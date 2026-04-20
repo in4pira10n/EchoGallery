@@ -9,6 +9,7 @@ A lightweight local photo gallery app.
 - [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [ ] `Fix` 调整缩略图尺寸后重新生成缩略图
 - [ ] `Fix` “乱序相册”每次打开都要重新加载
+- [ ] `Bug` `Windows` 打开正常但提示打开失败: 在文件管理器中打开失败: exit status 1
 - [ ] `Enhancement` CPU / 内存资源占用过高
 - [ ] `Bug` 扫描资料库时跳过失败项
 - [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
@@ -32,7 +33,9 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 
 - 时间线浏览
 - 大图浏览模式
-- 分享链接管理
+- 乱序相册
+- 幻灯片顺序 / 随机播放
+- 完整的链接式分享功能
 - 本地资源库管理
   - 多资源库支持
   - 库头像与设置同步
@@ -47,28 +50,6 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 - 基于 SQLite 的本地数据库
 
 ## Installation
-
-### Requirements
-- Go 1.26+
-- ffmpeg
-
-### Build
-```bash
-git clone https://github.com/in4pira10n/EchoGallery.git
-cd EchoGallery
-go build -o echogallery .
-```
-
-### Run
-```bash
-./echogallery
-```
-
-第一次运行时，如果没有 `config.json`，会自动启动初始化设置页面，通常访问：
-
-```text
-http://127.0.0.1:8080
-```
 
 ## Quick Start
 
@@ -91,6 +72,28 @@ http://127.0.0.1:8080
    - 进入时间线、大图浏览、相册、收藏等页面查看内容。
 
 > 第一次使用时，如果已经有 `config.json` 和数据库，EchoGallery 会直接进入主界面；否则会自动进入设置向导。
+
+### Requirements
+- Go 1.26+
+- ffmpeg
+
+### Build
+```bash
+git clone https://github.com/in4pira10n/EchoGallery.git
+cd EchoGallery
+go build -o echogallery .
+```
+
+### Run
+```bash
+./echogallery
+```
+
+第一次运行时，如果没有 `config.json`，会自动启动初始化设置页面，通常访问：
+
+```text
+http://127.0.0.1:8080
+```
 
 ## Thanks
 
