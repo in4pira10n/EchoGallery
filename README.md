@@ -7,6 +7,7 @@ A lightweight local photo gallery app.
 - [ ] `Doc` 补充：快捷键指南
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
+- [ ] `New Feature` 相册支持列表 / 大图显示切换
 - [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [ ] `Fix` 调整缩略图尺寸后重新生成缩略图
 - [ ] `Fix` “乱序相册”每次打开都要重新加载
