@@ -4,13 +4,18 @@ A lightweight local photo gallery app.
 
 ## TO-DOs
 
+- [ ] `Doc` 补充：快捷键指南
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
 - [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [ ] `Fix` 调整缩略图尺寸后重新生成缩略图
 - [ ] `Fix` “乱序相册”每次打开都要重新加载
+- [ ] `Fix` “在时间线中查看”精准跳转并高亮显示 1 秒
+- [ ] `Fix` 按 Esc 退出时默认执行“在时间线中查看”的逻辑，即精准跳转
+- [ ] `Fix` 按 Esc 也可以返回相册
 - [ ] `Bug` `Windows` 打开正常但提示打开失败: 在文件管理器中打开失败: exit status 1
 - [ ] `Enhancement` CPU / 内存资源占用过高
+- [ ] `Enhancement` 大图模式下方信息显示限制 1 行，多余信息改为滚动（保证图片显示）
 - [ ] `Bug` 扫描资料库时跳过失败项
 - [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
 - [x] `Bug` “设置”页面的资源库头像与实际不同步
