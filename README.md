@@ -46,7 +46,7 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 
 ### Build
 ```bash
-git clone https://github.com/<your-org>/EchoGallery.git
+git clone https://github.com/in4pira10n/EchoGallery.git
 cd EchoGallery
 go build -o echogallery .
 ```
