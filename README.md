@@ -7,6 +7,10 @@ A lightweight local photo gallery app.
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
 - [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
+- [ ] `Fix` 调整缩略图尺寸后重新生成缩略图
+- [ ] `Fix` “乱序相册”每次打开都要重新加载
+- [ ] `Enhancement` CPU / 内存资源占用过高
+- [ ] `Bug` 扫描资料库时跳过失败项
 - [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
 - [x] `Bug` “设置”页面的资源库头像与实际不同步
 - [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
