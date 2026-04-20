@@ -4,14 +4,14 @@ A lightweight local photo gallery app.
 
 ## TO-DOs
 
+- [ ] `New Feature` 多用户 / 访客用户支持
+- [ ] `New Feature` 增加更多格式支持
+- [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
 - [x] `Bug` “设置”页面的资源库头像与实际不同步
 - [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
 - [x] `New Feature` 点击资源库头像跳转设置
 - [x] `Fix` 分享链接可在设置中管理
-- [ ] `New Feature` 多用户 / 访客用户支持
-- [ ] `New Feature` 增加更多格式支持
-- [ ] `Bug` 某些 PNG 图像缩略图显示失败 /缺失
 
 ## Intro
 
