@@ -2,6 +2,14 @@
 
 A lightweight local photo gallery app.
 
+## TO-DOs
+
+- [x] `BUG` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
+- [x] `BUG` “设置”页面的资源库头像与实际不同步
+- [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
+- [x] `New Feature` 点击资源库头像跳转设置
+- [x] `Fix` 分享链接可在设置中管理
+
 ## Intro
 
 EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或局域网内浏览、管理和分享照片/视频的用户。
@@ -30,14 +38,6 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 - 视频缩略图刷新
 - 系统播放器播放与在文件管理器中定位
 - 基于 SQLite 的本地数据库
-
-## TO-DOs
-
-- [x] `BUG` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
-- [x] `BUG` “设置”页面的资源库头像与实际不同步
-- [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
-- [x] `New Feature` 点击资源库头像跳转设置
-- [x] `Fix` 分享链接可在设置中管理
 
 ## Installation
 
