@@ -10,6 +10,7 @@ A lightweight local photo gallery app.
 - [ ] `New Feature` 相册支持列表 / 大图显示切换
 - [ ] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [ ] `Bug` 资料库图像无法上传
+- [ ] `Bug` 大图缩放后无法移动查看头部
 - [ ] `Fix` 移除默认资料库图像，改为随机抓取一张
 - [ ] `Fix` 资料库图像逻辑：给定图像 -> 按中心裁剪为正方形 -> 在左上角显示为圆形，上传图像时也要提示用户裁剪
 - [ ] `Fix` 调整缩略图尺寸后重新生成缩略图
@@ -18,7 +19,7 @@ A lightweight local photo gallery app.
 - [ ] `Fix` 按 Esc 退出时默认执行“在时间线中查看”的逻辑，即精准跳转
 - [ ] `Fix` 按 Esc 也可以返回相册
 - [ ] `Bug` `Windows` 打开正常但提示打开失败: 在文件管理器中打开失败: exit status 1
-- [ ] `Enhancement` CPU / 内存资源占用过高
+- [ ] `Enhancement` `URGENT` CPU / 内存资源占用过高
 - [ ] `Enhancement` 大图模式下方信息显示限制 1 行，多余信息改为滚动（保证图片显示）
 - [ ] `Bug` 扫描资料库时跳过失败项
 - [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
