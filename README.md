@@ -49,8 +49,6 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 - 系统播放器播放与在文件管理器中定位
 - 基于 SQLite 的本地数据库
 
-## Installation
-
 ## Quick Start
 
 *请确保您的电脑安装了 `ffmpeg`，否则视频缩略图无法显示！*
@@ -83,6 +81,8 @@ git clone https://github.com/in4pira10n/EchoGallery.git
 cd EchoGallery
 go build -o echogallery .
 ```
+
+## Installation
 
 ### Run
 ```bash
