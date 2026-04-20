@@ -71,6 +71,8 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 
 > 第一次使用时，如果已经有 `config.json` 和数据库，EchoGallery 会直接进入主界面；否则会自动进入设置向导。
 
+## Installation
+
 ### Requirements
 - Go 1.26+
 - ffmpeg
@@ -81,8 +83,6 @@ git clone https://github.com/in4pira10n/EchoGallery.git
 cd EchoGallery
 go build -o echogallery .
 ```
-
-## Installation
 
 ### Run
 ```bash
