@@ -321,7 +321,7 @@ func handleRevealMediaInFinder(cfg *config.Config, registrar videoRegistrar) gin
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "已在 Finder 中定位"})
+		c.JSON(http.StatusOK, gin.H{"message": "已在文件管理器中定位"})
 	}
 }
 

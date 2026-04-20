@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"echogallery/internal/api"
@@ -20,6 +20,7 @@ import (
 )
 
 const restartDelayEnv = "ECHOGALLERY_RESTART_DELAY_MS"
+const portFallbackScanLimit = 20
 
 func main() {
 	if delay := strings.TrimSpace(os.Getenv(restartDelayEnv)); delay != "" {
@@ -94,10 +95,6 @@ func main() {
 	}
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 创建缩略图目录失败: %v\n", err)
-		os.Exit(1)
-	}
-	if err := migrateLegacyDatabase(cfg, dbPath); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 迁移旧数据库失败: %v\n", err)
 		os.Exit(1)
 	}
 	repo, err := sqlite.New(dbPath)
@@ -181,15 +178,24 @@ func main() {
 			fmt.Printf("已导入 %d 张历史图片\n", summary.Imported)
 		}
 	}
-	app := api.NewRouterWithStaticWithRestart(cfg, webFS, photoService, restartCurrentProcess)
+	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
+		os.Exit(1)
+	}
+	if actualPort != cfg.Port {
+		fmt.Printf("端口 %d 已被占用，已自动切换到 %d\n", cfg.Port, actualPort)
+		cfg.Port = actualPort
+	}
 
+	app := api.NewRouterWithStaticWithRestart(cfg, webFS, photoService, restartCurrentProcess)
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("HTTP 服务已启动: http://%s%s\n", host, addr)
 	} else {
 		fmt.Printf("HTTP 服务已启动: http://127.0.0.1%s\n", addr)
 	}
-	if err := http.ListenAndServe(addr, app); err != nil {
+	if err := http.Serve(listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -200,16 +206,60 @@ func startSetupServer(state api.SetupState) {
 	if port <= 0 {
 		port = 8080
 	}
-	addr := fmt.Sprintf(":%d", port)
+	listener, actualPort, err := listenTCPWithFallback(port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
+		os.Exit(1)
+	}
+	if actualPort != port {
+		fmt.Printf("设置端口 %d 已被占用，已自动切换到 %d\n", port, actualPort)
+	}
+	state.Port = actualPort
+	addr := fmt.Sprintf(":%d", actualPort)
 	app := api.NewSetupRouterWithStatic(webFS, state, restartCurrentProcess)
 	fmt.Printf("EchoGallery 设置服务已启动: http://127.0.0.1%s\n", addr)
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("局域网访问地址: http://%s%s\n", host, addr)
 	}
-	if err := http.ListenAndServe(addr, app); err != nil {
+	if err := http.Serve(listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func listenTCPWithFallback(preferredPort int) (net.Listener, int, error) {
+	if preferredPort <= 0 {
+		preferredPort = 8080
+	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", preferredPort))
+	if err == nil {
+		return listener, preferredPort, nil
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, 0, err
+	}
+
+	for port := preferredPort + 1; port <= preferredPort+portFallbackScanLimit; port++ {
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			return listener, port, nil
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, 0, err
+		}
+	}
+
+	listener, err = net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, 0, err
+	}
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		listener.Close()
+		return nil, 0, fmt.Errorf("无法解析监听端口: %T", listener.Addr())
+	}
+	return listener, addr.Port, nil
 }
 
 func restartCurrentProcess() error {
@@ -230,83 +280,6 @@ func restartCurrentProcess() error {
 		os.Exit(0)
 	}()
 	return nil
-}
-
-func migrateLegacyDatabase(cfg *config.Config, newDBPath string) error {
-	if _, err := os.Stat(newDBPath); err == nil {
-		return nil
-	}
-
-	legacyAppDBPaths, err := cfg.LegacyDatabasePaths()
-	if err != nil {
-		return err
-	}
-	candidates := append([]string{}, legacyAppDBPaths...)
-	candidates = append(candidates, filepath.Join(cfg.StoragePath, "photoalbum.db"))
-
-	for _, oldDBPath := range candidates {
-		if oldDBPath == "" || oldDBPath == newDBPath {
-			continue
-		}
-
-		matches, err := legacyDatabaseMatchesStoragePath(oldDBPath, cfg.StoragePath)
-		if err != nil {
-			return err
-		}
-		if !matches {
-			continue
-		}
-
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			oldPath := oldDBPath + suffix
-			if _, err := os.Stat(oldPath); err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				return err
-			}
-			newPath := newDBPath + suffix
-			if err := os.Rename(oldPath, newPath); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return nil
-}
-
-func legacyDatabaseMatchesStoragePath(dbPath, storagePath string) (bool, error) {
-	if _, err := os.Stat(dbPath); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return false, err
-	}
-	defer db.Close()
-
-	var exists int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='app_meta'`).Scan(&exists); err != nil {
-		return false, err
-	}
-	if exists == 0 {
-		return true, nil
-	}
-
-	var prev string
-	err = db.QueryRow(`SELECT value FROM app_meta WHERE key = 'storage_path'`).Scan(&prev)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return true, nil
-		}
-		return false, err
-	}
-
-	return config.NormalizeStoragePath(prev) == config.NormalizeStoragePath(storagePath), nil
 }
 
 func preferredLANIP() string {

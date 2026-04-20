@@ -209,44 +209,6 @@ func TestDatabasePath_UsesEchoGalleryPrefix(t *testing.T) {
 	}
 }
 
-func TestLegacyDatabasePaths_IncludeLegacyAppDataDir(t *testing.T) {
-	dir := t.TempDir()
-	configPathOverride = filepath.Join(dir, configFileName)
-	t.Cleanup(func() {
-		configPathOverride = ""
-	})
-
-	cfg := validConfig()
-	cfg.StoragePath = filepath.Join(dir, "library-a")
-
-	paths, err := cfg.LegacyDatabasePaths()
-	if err != nil {
-		t.Fatalf("获取旧数据库候选路径失败: %v", err)
-	}
-
-	legacyDir := filepath.Join(dir, "photoalbum-data", "db")
-	currentDir := filepath.Join(dir, "echogallery-data", "db")
-	hasLegacyHashed := false
-	hasLegacySingle := false
-	hasCurrentLegacyHashed := false
-
-	for _, path := range paths {
-		if strings.HasPrefix(path, legacyDir) && strings.Contains(filepath.Base(path), "photoalbum-") {
-			hasLegacyHashed = true
-		}
-		if path == filepath.Join(legacyDir, "photoalbum.db") {
-			hasLegacySingle = true
-		}
-		if strings.HasPrefix(path, currentDir) && strings.Contains(filepath.Base(path), "photoalbum-") {
-			hasCurrentLegacyHashed = true
-		}
-	}
-
-	if !hasLegacyHashed || !hasLegacySingle || !hasCurrentLegacyHashed {
-		t.Fatalf("旧数据库候选路径不完整: %v", paths)
-	}
-}
-
 func TestTrashPath_DefaultsToAppDataTrash(t *testing.T) {
 	dir := t.TempDir()
 	cfg := validConfig()

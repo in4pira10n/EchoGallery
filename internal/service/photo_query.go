@@ -5,9 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"echogallery/internal/storage"
+)
+
+var (
+	execCommand = exec.Command
+	currentOS   = runtime.GOOS
 )
 
 // GetTimeline 获取时间线图片（游标分页）
@@ -231,7 +237,7 @@ func (s *PhotoService) EmptyTrash(userID int64) error {
 	return nil
 }
 
-// RevealInFinder 在 Finder 中定位媒体文件。
+// RevealInFinder 在系统文件管理器中定位媒体文件。
 func (s *PhotoService) RevealInFinder(id int64, userID int64) error {
 	photo, err := s.repo.GetPhotoByIDAny(id, userID)
 	if err != nil {
@@ -245,8 +251,8 @@ func (s *PhotoService) RevealInFinder(id int64, userID int64) error {
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("文件不存在")
 	}
-	if err := exec.Command("open", "-R", target).Run(); err != nil {
-		return fmt.Errorf("在 Finder 中打开失败: %w", err)
+	if err := revealInFileManager(target); err != nil {
+		return fmt.Errorf("在文件管理器中打开失败: %w", err)
 	}
 	return nil
 }
@@ -265,10 +271,48 @@ func (s *PhotoService) PlayWithSystemPlayer(id int64, userID int64) error {
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("文件不存在")
 	}
-	if err := exec.Command("open", target).Run(); err != nil {
+	if err := openWithSystemDefault(target); err != nil {
 		return fmt.Errorf("使用系统播放器打开失败: %w", err)
 	}
 	return nil
+}
+
+func revealInFileManager(target string) error {
+	name, args := fileManagerRevealCommand(target)
+	return execCommand(name, args...).Run()
+}
+
+func openWithSystemDefault(target string) error {
+	name, args := systemOpenCommand(target)
+	return execCommand(name, args...).Run()
+}
+
+func fileManagerRevealCommand(target string) (string, []string) {
+	clean := filepath.Clean(target)
+	switch currentOS {
+	case "darwin":
+		return "open", []string{"-R", clean}
+	case "windows":
+		return "explorer", []string{"/select,", clean}
+	default:
+		dir := filepath.Dir(clean)
+		if dir == "" || dir == "." {
+			dir = clean
+		}
+		return "xdg-open", []string{dir}
+	}
+}
+
+func systemOpenCommand(target string) (string, []string) {
+	clean := filepath.Clean(target)
+	switch currentOS {
+	case "darwin":
+		return "open", []string{clean}
+	case "windows":
+		return "cmd", []string{"/c", "start", "", clean}
+	default:
+		return "xdg-open", []string{clean}
+	}
 }
 
 func (s *PhotoService) resolveFinderPath(photo *storage.Photo) string {

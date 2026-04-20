@@ -11,12 +11,9 @@ import (
 )
 
 const (
-	configFileName         = "config.json"
-	appDataDirName         = "echogallery-data"
-	legacyAppDataDirName   = "photoalbum-data"
-	databaseFilePrefix     = "echogallery-"
-	legacyDatabasePrefix   = "photoalbum-"
-	legacyDatabaseFileName = "photoalbum.db"
+	configFileName     = "config.json"
+	appDataDirName     = "echogallery-data"
+	databaseFilePrefix = "echogallery-"
 )
 
 // configPathOverride 用于测试时覆盖配置文件路径
@@ -309,14 +306,6 @@ func defaultAppDataDir() (string, error) {
 	return filepath.Join(baseDir, appDataDirName), nil
 }
 
-func legacyDefaultAppDataDir() (string, error) {
-	baseDir, err := defaultAppBaseDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(baseDir, legacyAppDataDirName), nil
-}
-
 func defaultAppBaseDir() (string, error) {
 	if configPathOverride != "" {
 		return filepath.Dir(configPathOverride), nil
@@ -344,41 +333,13 @@ func (c *Config) DatabasePath() (string, error) {
 	if err := c.prepareRuntimePaths(); err != nil {
 		return "", err
 	}
-	return databasePathForPrefix(c.AppDataDir, c.StoragePath, databaseFilePrefix), nil
+	return databasePathForPrefix(c.AppDataDir, c.StoragePath), nil
 }
 
-func (c *Config) LegacyDatabasePaths() ([]string, error) {
-	if err := c.prepareRuntimePaths(); err != nil {
-		return nil, err
-	}
-
-	appDataDirs := []string{c.AppDataDir}
-	if legacyDir, err := legacyDefaultAppDataDir(); err == nil && legacyDir != "" && legacyDir != c.AppDataDir {
-		appDataDirs = append(appDataDirs, legacyDir)
-	}
-
-	seen := make(map[string]struct{}, len(appDataDirs)*2)
-	paths := make([]string, 0, len(appDataDirs)*2)
-	for _, dir := range appDataDirs {
-		for _, candidate := range []string{
-			databasePathForPrefix(dir, c.StoragePath, legacyDatabasePrefix),
-			filepath.Join(dir, "db", legacyDatabaseFileName),
-		} {
-			if _, ok := seen[candidate]; ok {
-				continue
-			}
-			seen[candidate] = struct{}{}
-			paths = append(paths, candidate)
-		}
-	}
-
-	return paths, nil
-}
-
-func databasePathForPrefix(appDataDir, storagePath, prefix string) string {
+func databasePathForPrefix(appDataDir, storagePath string) string {
 	storageKey := NormalizeStoragePath(storagePath)
 	sum := sha1.Sum([]byte(storageKey))
-	fileName := prefix + hex.EncodeToString(sum[:8]) + ".db"
+	fileName := databaseFilePrefix + hex.EncodeToString(sum[:8]) + ".db"
 	return filepath.Join(appDataDir, "db", fileName)
 }
 

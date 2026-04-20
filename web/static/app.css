@@ -105,6 +105,21 @@ img { display: block; max-width: 100%; }
   color: var(--nav-text);
   border-bottom: 1px solid var(--nav-border-color);
   margin-bottom: 12px;
+  width: 100%;
+  background: none;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.nav-logo:hover {
+  background: var(--accent-faint);
+}
+.nav-logo:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .nav-logo-mark {
   min-width: 28px;
@@ -380,13 +395,29 @@ body.selection-mode .date-select-all { display: inline-flex; }
 /* ===== 灯箱 ===== */
 .lightbox { position: fixed; inset: 0; background: #000; z-index: 1000; display: none; flex-direction: column; }
 .lightbox.open { display: flex; }
-.lightbox-header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; color: #ccc; position: relative; z-index: 4; background: rgba(0,0,0,.78); }
+.lightbox-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  color: #ccc;
+  position: relative;
+  z-index: 4;
+  background: rgba(0,0,0,.78);
+}
 .lightbox-header .lb-title {
-  flex: 1;
+  flex: 1 1 260px;
+  min-width: 0;
   font-size: .9rem;
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .lightbox-zoom-wrap {
   display: inline-flex;
@@ -394,14 +425,18 @@ body.selection-mode .date-select-all { display: inline-flex; }
   gap: 8px;
   color: #eee;
   font-size: .82rem;
+  min-width: 0;
 }
 .lightbox-slideshow-controls {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 6px 10px;
   border-radius: 999px;
   background: rgba(255,255,255,.08);
+  min-width: 0;
+  max-width: 100%;
 }
 .lightbox-play-btn.active {
   color: #fff !important;
@@ -456,12 +491,32 @@ body.selection-mode .date-select-all { display: inline-flex; }
   padding: 12px 20px;
   background: rgba(0,0,0,.6);
   color: #ccc; font-size: .82rem;
-  display: flex; flex-wrap: wrap; gap: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
   position: relative;
   z-index: 4;
 }
-.lb-info-item { display: flex; flex-direction: column; gap: 2px; }
+.lb-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.05);
+  min-width: 0;
+}
 .lb-info-item span:first-child { font-size: .7rem; color: #888; text-transform: uppercase; letter-spacing: .5px; }
+.lb-info-item span:last-child {
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .lightbox.slideshow-active .lightbox-header,
 .lightbox.slideshow-active .lightbox-info,
 .lightbox.slideshow-active .lb-nav {
@@ -809,6 +864,45 @@ body.selection-mode .date-select-all { display: inline-flex; }
   flex-direction: column;
   gap: 10px;
 }
+.settings-share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-share-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.settings-share-main {
+  min-width: 0;
+  flex: 1;
+}
+.settings-share-title {
+  font-weight: 600;
+}
+.settings-share-url {
+  margin-top: 4px;
+  font-size: .8rem;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}
+.settings-share-meta {
+  margin-top: 6px;
+  font-size: .76rem;
+  color: var(--text2);
+}
+.settings-share-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 /* ===== 相册选择弹窗 ===== */
 .album-picker-grid {
@@ -895,6 +989,10 @@ body.selection-mode .date-select-all { display: inline-flex; }
   }
   .settings-library-row {
     grid-template-columns: 1fr;
+  }
+  .settings-share-row {
+    flex-direction: column;
+    align-items: stretch;
   }
   .settings-library-remove {
     width: 100%;
