@@ -4,11 +4,14 @@ A lightweight local photo gallery app.
 
 ## TO-DOs
 
-- [x] `BUG` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
-- [x] `BUG` “设置”页面的资源库头像与实际不同步
+- [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
+- [x] `Bug` “设置”页面的资源库头像与实际不同步
 - [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
 - [x] `New Feature` 点击资源库头像跳转设置
 - [x] `Fix` 分享链接可在设置中管理
+- [ ] `New Feature` 多用户 / 访客用户支持
+- [ ] `New Feature` 增加更多格式支持
+- [ ] `Bug` 某些 PNG 图像缩略图显示失败 /缺失
 
 ## Intro
 
@@ -43,6 +46,7 @@ EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或
 
 ### Requirements
 - Go 1.26+
+- ffmpeg
 
 ### Build
 ```bash
@@ -62,10 +66,9 @@ go build -o echogallery .
 http://127.0.0.1:8080
 ```
 
-### 其他
-- 添加用户：`./echogallery adduser`
-
 ## Quick Start
+
+*请确保您的电脑安装了 `ffmpeg`，否则视频缩略图无法显示！*
 
 1. 下载 Release
    - 直接从 GitHub Release 页面下载对应平台的压缩包或可执行文件。
