@@ -8,6 +8,9 @@ A lightweight local photo gallery app.
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
 - [ ] `New Feature` 相册支持列表 / 大图显示切换
+- [ ] `Bug` 资料库图像无法更改
+- [ ] `Bug` 无法回到时间线浏览位置
+- [ ] `Bug` “乱序相册”按 Esc 退出时无论如何都返回时间线而不是原位置
 - [x] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [x] `Bug` 资料库图像无法上传
 - [x] `Bug` 大图缩放后无法移动查看头部
