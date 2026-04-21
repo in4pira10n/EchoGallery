@@ -292,6 +292,32 @@ func TestListPhotos_Pagination(t *testing.T) {
 	}
 }
 
+func TestListPhotos_ReverseOrder(t *testing.T) {
+	db := newTestDB(t)
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 4; i++ {
+		p := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		p.UUID = fmt.Sprintf("reverse-%d", i)
+		if err := db.SavePhoto(p); err != nil {
+			t.Fatalf("保存测试图片失败: %v", err)
+		}
+	}
+
+	page, err := db.ListPhotos(storage.ListPhotosParams{UserID: 1, Limit: 4, Reverse: true})
+	if err != nil {
+		t.Fatalf("倒序查询失败: %v", err)
+	}
+	if len(page.Photos) != 4 {
+		t.Fatalf("期望 4 张，得到 %d", len(page.Photos))
+	}
+	for i := 1; i < len(page.Photos); i++ {
+		if page.Photos[i-1].TakenAt.After(page.Photos[i].TakenAt) {
+			t.Fatalf("期望按时间正序返回，%v 在 %v 之后", page.Photos[i-1].TakenAt, page.Photos[i].TakenAt)
+		}
+	}
+}
+
 func TestListPhotos_UserIsolation(t *testing.T) {
 	db := newTestDB(t)
 	db.SavePhoto(makePhoto(1, time.Now()))

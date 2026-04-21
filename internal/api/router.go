@@ -1110,9 +1110,10 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 			return
 		}
 		page, err := registrar.GetTimeline(storage.ListPhotosParams{
-			UserID: userID,
-			Cursor: c.Query("cursor"),
-			Limit:  mediaPageLimit(c),
+			UserID:  userID,
+			Cursor:  c.Query("cursor"),
+			Limit:   mediaPageLimit(c),
+			Reverse: mediaPageReverse(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1136,6 +1137,11 @@ func mediaPageLimit(c *gin.Context) int {
 		return 300
 	}
 	return limit
+}
+
+func mediaPageReverse(c *gin.Context) bool {
+	raw := strings.TrimSpace(strings.ToLower(c.Query("order")))
+	return raw == "asc" || raw == "oldest"
 }
 
 func handleServeMediaFile(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {

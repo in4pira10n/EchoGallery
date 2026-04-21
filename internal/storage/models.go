@@ -76,6 +76,7 @@ type ListPhotosParams struct {
 	UserID       int64  // 必填，用户隔离
 	Cursor       string // 游标，空表示从头开始
 	Limit        int    // 每页数量，默认30
+	Reverse      bool   // true 时按拍摄时间正序（旧到新）
 	OnlyTrashed  bool   // true 时查询回收站
 	OnlyFavorite bool   // true 时仅查询个人收藏
 }

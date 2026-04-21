@@ -27,12 +27,14 @@ A lightweight local photo gallery app.
 - [x] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
 - [x] `Fix` `External HDD` 加载所有时间线媒体时应暂时禁止用户操作并展示进度，待完全加载完成再开放操作；同时优化加载速度
 - [x] `Fix` 分享链接可在设置中管理
+- [ ] `Fix` 移除资源库图像
 - [ ] `Future Plan` AI 人脸识别
 - [ ] `Future Plan` "回忆" Tab
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
-- [ ] `New Feature` 相册支持列表 / 大图显示切换
-- [ ] `New Feature` 时间线倒序
+- [x] `New Feature` 相册支持列表 / 大图显示切换
+- [x] `New Feature` 时间线倒序
+- [x] `New Feature` 个人收藏支持全选下载
 - [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
 - [x] `New Feature` 点击资源库头像跳转设置
 

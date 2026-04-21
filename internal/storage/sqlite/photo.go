@@ -170,7 +170,32 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	var rows *sql.Rows
 	var err error
 
-	if params.Cursor == "" {
+	if params.Reverse {
+		if params.Cursor == "" {
+			rows, err = s.db.Query(`
+				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+				       storage_rel_path, source_rel_path, is_favorite,
+				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+				FROM photos
+				WHERE uploaded_by = ? AND deleted_at IS NULL
+				ORDER BY taken_at ASC, id ASC
+				LIMIT ?`, params.UserID, limit+1)
+		} else {
+			c, err2 := decodeCursor(params.Cursor)
+			if err2 != nil {
+				return nil, err2
+			}
+			rows, err = s.db.Query(`
+				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+				       storage_rel_path, source_rel_path, is_favorite,
+				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+				FROM photos
+				WHERE uploaded_by = ? AND deleted_at IS NULL
+				  AND (taken_at > ? OR (taken_at = ? AND id > ?))
+				ORDER BY taken_at ASC, id ASC
+				LIMIT ?`, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+		}
+	} else if params.Cursor == "" {
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, is_favorite,

@@ -1121,6 +1121,16 @@ function renderGridScaleControl() {
     <input type="range" id="grid-scale" min="100" max="260" step="10" value="${state.gridSize}">
   </label>`;
 }
+function renderTimelineOrderControl() {
+  const ascending = state.timelineOrder === 'asc';
+  return `<button class="btn btn-sm" id="timeline-order-btn" type="button">时间线: ${ascending ? '正序' : '倒序'}</button>`;
+}
+function renderAlbumViewModeControl() {
+  return `<div class="album-view-toggle" role="group" aria-label="相册显示方式">
+    <button class="btn btn-sm${state.albumViewMode === 'grid' ? ' btn-primary' : ''}" id="album-view-grid-btn" type="button">大图</button>
+    <button class="btn btn-sm${state.albumViewMode === 'list' ? ' btn-primary' : ''}" id="album-view-list-btn" type="button">列表</button>
+  </div>`;
+}
 function bindGridScaleControl() {
   const input = $('#grid-scale');
   if (!input) return;
@@ -1147,6 +1157,7 @@ const state = {
   randomAlbumHasMore: true,
   randomAlbumSeed: Date.now(),
   randomAlbumLoaded: false,
+  timelineOrder: 'desc',
   timelineCursor: '',
   timelineHasMore: true,
   timelineLoading: false,
@@ -1155,6 +1166,7 @@ const state = {
   trashHasMore: true,
   trashLoading: false,
   albums: [],
+  albumViewMode: 'grid',
   currentAlbum: null,
   albumPhotos: [],
   albumCursor: '',
@@ -2212,9 +2224,14 @@ function renderSettingsContent() {
 // ── 时间线视图 ─────────────────────────────────────────
 async function renderTimeline() {
   $('#topbar-title').textContent = '时间线';
-  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderGridScaleControl();
+  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button>`;
   bindGridScaleControl();
+  $('#timeline-order-btn').addEventListener('click', () => {
+    state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
+    state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
+    switchView('timeline');
+  });
   $('#upload-btn').addEventListener('click', openUploadModal);
 
   $('#content').innerHTML = `
@@ -2256,7 +2273,7 @@ function setTimelineJumpStatus(message = '') {
 async function renderFavorites() {
   $('#topbar-title').textContent = '个人收藏';
   $('#topbar-meta').innerHTML = renderGridScaleControl();
-  $('#topbar-actions').innerHTML = '';
+  $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="download-all-favorites-btn">下载全部收藏</button>`;
   bindGridScaleControl();
 
   $('#content').innerHTML = `
@@ -2274,6 +2291,7 @@ async function renderFavorites() {
 
   $('#clear-sel-btn').addEventListener('click', clearSelection);
   $('#download-sel-btn').addEventListener('click', downloadSelected);
+  $('#download-all-favorites-btn').addEventListener('click', downloadAllFavorites);
   $('#add-to-album-btn').addEventListener('click', () => openAlbumPickerModal(null));
   $('#unfavorite-sel-btn').addEventListener('click', unfavoriteSelected);
 
@@ -2290,7 +2308,10 @@ async function loadMoreTimeline() {
   if (state.timelineLoading || !state.timelineHasMore) return;
   state.timelineLoading = true;
   try {
-    const params = new URLSearchParams({ limit: state.pendingTimelinePhotoID ? '180' : '30' });
+    const params = new URLSearchParams({
+      limit: state.pendingTimelinePhotoID ? '180' : '30',
+      order: state.timelineOrder === 'asc' ? 'asc' : 'desc',
+    });
     if (state.timelineCursor) params.set('cursor', state.timelineCursor);
     const url = `/api/media?${params.toString()}`;
     const page = await api.get(url);
@@ -2718,9 +2739,17 @@ async function focusPendingTimelinePhoto() {
 // ── 相册列表 ──────────────────────────────────────────
 async function renderAlbums() {
   $('#topbar-title').textContent = '相册';
-  $('#topbar-meta').innerHTML = '';
+  $('#topbar-meta').innerHTML = renderAlbumViewModeControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-primary btn-sm" id="new-album-btn">${icons.plus} 新建相册</button>`;
   $('#new-album-btn').addEventListener('click', openCreateAlbumModal);
+  $('#album-view-grid-btn').addEventListener('click', () => {
+    state.albumViewMode = 'grid';
+    renderAlbums();
+  });
+  $('#album-view-list-btn').addEventListener('click', () => {
+    state.albumViewMode = 'list';
+    renderAlbums();
+  });
 
   $('#content').innerHTML = `<div id="album-grid-wrap"></div>`;
   try {
@@ -2737,14 +2766,14 @@ function renderAlbumGrid() {
     wrap.innerHTML = `<div class="empty">${icons.album}<p>还没有相册，点击右上角新建</p></div>`;
     return;
   }
-  const grid = el('div', 'album-grid');
+  const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
   state.albums.forEach(a => grid.appendChild(makeAlbumCard(a)));
   wrap.innerHTML = '';
   wrap.appendChild(grid);
 }
 
 function makeAlbumCard(album) {
-  const card = el('div', 'album-card');
+  const card = el('div', `album-card${state.albumViewMode === 'list' ? ' list' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const coverHtml = album.cover_uuid
     ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${album.name}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
@@ -3331,6 +3360,40 @@ async function downloadSelected() {
 	} catch (e) {
 		alert('下载失败: ' + (e.error || e));
 	}
+}
+
+async function collectAllFavoriteIDs() {
+  const ids = [];
+  let cursor = '';
+  for (;;) {
+    const params = new URLSearchParams({ limit: '240' });
+    if (cursor) params.set('cursor', cursor);
+    const page = await api.get(`/api/media/favorites?${params.toString()}`);
+    (page.photos || []).forEach(photo => {
+      if (photo && photo.id) ids.push(photo.id);
+    });
+    if (!page.has_more || !page.next_cursor) break;
+    cursor = page.next_cursor;
+  }
+  return ids;
+}
+
+async function downloadAllFavorites() {
+  const btn = $('#download-all-favorites-btn');
+  try {
+    await withButtonBusy(btn, '整理中…', async () => {
+      const ids = await collectAllFavoriteIDs();
+      if (!ids.length) {
+        showToast('当前没有可下载的收藏媒体');
+        return;
+      }
+      await triggerPostDownload('/api/media/download', {
+        media_ids: ids,
+      }, `echogallery-favorites-${Date.now()}.zip`);
+    });
+  } catch (e) {
+    alert('下载失败: ' + (e.error || e));
+  }
 }
 
 // ── 上传模态框 ────────────────────────────────────────
