@@ -1106,6 +1106,12 @@ function handleLightboxKeydown(e) {
     e.stopImmediatePropagation();
     return true;
   }
+  if (e.key === 'f' || e.key === 'F') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    toggleCurrentLightboxFavorite();
+    return true;
+  }
   if (e.key === 'a' || e.key === 'A') { lbNav(-1); return true; }
   if (e.key === 'd' || e.key === 'D') { lbNav(1); return true; }
   if (e.key === ' ') {
@@ -1232,10 +1238,12 @@ const state = {
   favoriteCursor: '',
   favoriteHasMore: true,
   favoriteLoading: false,
+  favoriteTotal: 0,
   settingsDirty: false,
   settingsReady: false,
   settingsFocus: '',
   lightboxPlaybackToken: 0,
+  lightboxMediaLoading: false,
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
   loadMoreObserver: null,
@@ -1243,6 +1251,7 @@ const state = {
   prefetchedMediaSet: new Set(),
   blockingInteraction: false,
   lightboxPageScrollTop: 0,
+  pendingLibraryLogoGuide: null,
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -1316,6 +1325,11 @@ function hideBlockingProgress() {
   state.blockingInteraction = false;
   const overlay = $('#blocking-progress');
   if (overlay) overlay.classList.remove('show');
+}
+function setLightboxMediaLoading(loading) {
+  state.lightboxMediaLoading = !!loading;
+  const spinner = $('#lb-loading');
+  if (spinner) spinner.classList.toggle('show', state.lightboxMediaLoading);
 }
 
 // ── 右键菜单 ──────────────────────────────────────────
@@ -1392,7 +1406,8 @@ ${renderUploadModal()}
 ${renderCreateAlbumModal()}
 ${renderShareModal()}
 ${renderAlbumPickerModal()}
-${renderShareListModal()}`;
+${renderShareListModal()}
+${renderLibraryLogoGuideModal()}`;
 
   bindNav();
   bindGlobal();
@@ -2102,15 +2117,19 @@ function renderSettingsContent() {
       logoInput.addEventListener('change', e => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
-        if (row.dataset.logoPreviewUrl && row.dataset.logoPreviewUrl.startsWith('blob:')) {
-          URL.revokeObjectURL(row.dataset.logoPreviewUrl);
-        }
-        row._pendingLogoFile = file;
-        row.dataset.logoAction = 'upload';
-        row.dataset.logoPreviewUrl = URL.createObjectURL(file);
-        buildLibraryLogoPreview(row);
-        applyLibraryBranding();
-        setSettingsDirty();
+        openLibraryLogoGuideModal(() => {
+          if (row.dataset.logoPreviewUrl && row.dataset.logoPreviewUrl.startsWith('blob:')) {
+            URL.revokeObjectURL(row.dataset.logoPreviewUrl);
+          }
+          row._pendingLogoFile = file;
+          row.dataset.logoAction = 'upload';
+          row.dataset.logoPreviewUrl = URL.createObjectURL(file);
+          buildLibraryLogoPreview(row);
+          applyLibraryBranding();
+          setSettingsDirty();
+        }, () => {
+          if (logoInput) logoInput.value = '';
+        });
       });
     }
     if (clearLogoBtn) {
@@ -2272,7 +2291,7 @@ function setTimelineJumpStatus(message = '') {
 
 async function renderFavorites() {
   $('#topbar-title').textContent = '个人收藏';
-  $('#topbar-meta').innerHTML = renderGridScaleControl();
+  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="favorite-total-hint">共 ${state.favoriteTotal || 0} 条</span>${renderGridScaleControl()}`;
   $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="download-all-favorites-btn">下载全部收藏</button>`;
   bindGridScaleControl();
 
@@ -2298,6 +2317,8 @@ async function renderFavorites() {
   state.favoritePhotos = [];
   state.favoriteCursor = '';
   state.favoriteHasMore = true;
+  state.favoriteTotal = 0;
+  updateFavoriteTotalHint();
   await loadShareMap();
   await loadMoreFavorites();
   observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
@@ -2371,12 +2392,20 @@ function renderFavoriteGroups(newPhotos) {
   }
 }
 
+function updateFavoriteTotalHint() {
+  const hint = $('#favorite-total-hint');
+  if (!hint) return;
+  hint.textContent = `共 ${state.favoriteTotal || 0} 条`;
+}
+
 async function loadMoreFavorites() {
   if (state.favoriteLoading || !state.favoriteHasMore) return;
   state.favoriteLoading = true;
   try {
     const url = '/api/media/favorites' + (state.favoriteCursor ? `?cursor=${encodeURIComponent(state.favoriteCursor)}` : '');
     const page = await api.get(url);
+    state.favoriteTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.favoritePhotos.length + (page.photos || []).length;
+    updateFavoriteTotalHint();
     state.favoritePhotos.push(...(page.photos || []));
     state.favoriteCursor = page.next_cursor || '';
     state.favoriteHasMore = page.has_more || false;
@@ -2502,13 +2531,11 @@ function photoContextMenuItems(photo, thumbEl, listRef) {
   const items = [
     { label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl) },
     { label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
+    { label: '在时间线中查看', action: () => openInTimeline(photo.id) },
     { label: favoriteLabel, action: () => toggleFavorite(photo) },
     { label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     { label: '下载', action: () => triggerDownload(`/api/media/${photo.id}/download`) },
   ];
-  if (state.view === 'random-album') {
-    items.push({ label: '在时间线中查看', action: () => openInTimeline(photo.id) });
-  }
   items.push(
     '-',
     { label: '添加到相册…', action: () => openAlbumPickerModal([photo.id]) },
@@ -2563,9 +2590,11 @@ function updateFavoriteButtonsInDOM(photoId, favorite) {
 }
 
 function removePhotoFromList(list, photoId) {
-  if (!Array.isArray(list)) return;
+  if (!Array.isArray(list)) return false;
   const index = list.findIndex(photo => photo && photo.id === photoId);
-  if (index >= 0) list.splice(index, 1);
+  if (index < 0) return false;
+  list.splice(index, 1);
+  return true;
 }
 
 function cleanupEmptyDateGroup(group) {
@@ -2582,8 +2611,12 @@ function renderFavoritesEmptyStateIfNeeded() {
 }
 
 function removeFavoritePhotoFromUI(photoId) {
-  removePhotoFromList(state.favoritePhotos, photoId);
+  const removedFavorite = removePhotoFromList(state.favoritePhotos, photoId);
   removePhotoFromList(state.lightboxPhotos, photoId);
+  if (removedFavorite) {
+    state.favoriteTotal = Math.max(0, (state.favoriteTotal || 0) - 1);
+    updateFavoriteTotalHint();
+  }
   state.selected.delete(photoId);
   const thumb = findPhotoThumb(photoId);
   if (!thumb) {
@@ -3086,6 +3119,7 @@ function renderLightbox() {
     <button class="btn-icon" style="color:#ccc" id="lb-close">${icons.prev} 返回</button>
   </div>
   <div class="lightbox-body">
+    <div class="lightbox-loading" id="lb-loading"><div class="spinner"></div><span>媒体加载中…</span></div>
     <div class="lightbox-media-frame" id="lb-frame">
       <img class="lightbox-img" id="lb-img" src="" alt="">
       <video class="lightbox-video hidden" id="lb-video" controls playsinline preload="metadata"></video>
@@ -3122,7 +3156,7 @@ function bindGlobal() {
   document.addEventListener('fullscreenchange', () => {
     const lightbox = $('#lightbox');
     if (!lightbox || !lightbox.classList.contains('open')) return;
-    if (!document.fullscreenElement) closeLightbox();
+    if (!document.fullscreenElement) exitLightboxToContext();
   });
   document.addEventListener('click', e => {
     if (e.target.closest('#lb-close')) exitLightboxToContext();
@@ -3166,6 +3200,7 @@ async function openLightbox(photos, index) {
   state.lightboxReturnView = state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
   state.slideshowRandomQueue = [];
+  setLightboxMediaLoading(true);
   applyLightboxZoom();
   lockPageScrollForLightbox();
   $('#lightbox').classList.add('open');
@@ -3175,6 +3210,7 @@ function closeLightbox() {
   stopSlideshow();
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
+  setLightboxMediaLoading(false);
   const video = $('#lb-video');
   if (video) {
     video.pause();
@@ -3187,7 +3223,17 @@ function closeLightbox() {
   state.lightboxReturnAlbumID = null;
 }
 function exitLightboxToContext() {
+  const returnView = state.lightboxReturnView;
+  const returnAlbumID = state.lightboxReturnAlbumID;
   closeLightbox();
+  if (returnView === 'album-detail' && returnAlbumID && state.view !== 'album-detail') {
+    if (state.currentAlbum && state.currentAlbum.id !== returnAlbumID) state.currentAlbum = null;
+    state.currentAlbumID = returnAlbumID;
+    state.view = 'album-detail';
+    setHashView('album-detail', returnAlbumID);
+    $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
+    renderAlbumDetail();
+  }
 }
 function lbNav(dir) {
   const n = state.lightboxIndex + dir;
@@ -3212,24 +3258,35 @@ function lbRender() {
   if (!p) return;
   const img = $('#lb-img');
   const video = $('#lb-video');
+  setLightboxMediaLoading(true);
   if (isVideoMedia(p)) {
     img.classList.add('hidden');
+    img.onload = null;
+    img.onerror = null;
     img.removeAttribute('src');
     video.classList.remove('hidden');
     video.preload = 'auto';
+    video.onloadeddata = () => setLightboxMediaLoading(false);
+    video.onerror = () => setLightboxMediaLoading(false);
     video.src = mediaFileURL(p);
     video.poster = mediaThumbURL(p);
     video.load();
+    if (video.readyState >= 2) setLightboxMediaLoading(false);
     if (state.slideshowPlaying || state.experimentalAutoplayVideo) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
     video.pause();
     video.classList.add('hidden');
     video.preload = 'metadata';
+    video.onloadeddata = null;
+    video.onerror = null;
     video.removeAttribute('src');
     video.load();
     img.classList.remove('hidden');
+    img.onload = () => setLightboxMediaLoading(false);
+    img.onerror = () => setLightboxMediaLoading(false);
     img.src = mediaFileURL(p);
+    if (img.complete) setLightboxMediaLoading(false);
   }
   $('#lb-title').textContent = p.original_name;
   $('#lb-favorite').innerHTML = `${icons.favorite} ${p.is_favorite ? '取消收藏' : '收藏'}`;
@@ -3742,6 +3799,38 @@ function renderShareListModal() {
     </div>
   </div>
 </div>`;
+}
+
+function renderLibraryLogoGuideModal() {
+  return `<div class="modal-overlay" id="library-logo-guide-modal">
+  <div class="modal" style="width:460px">
+    <div class="modal-title">编辑资源库头像</div>
+    <p style="font-size:.88rem;color:var(--text2);margin-bottom:12px">保存后系统会按图像中心裁剪为正方形，并在侧边栏显示为圆形头像。</p>
+    <p style="font-size:.88rem;color:var(--text2);margin-bottom:12px">如果你想精确控制构图，建议先在外部工具中裁成正方形，再回来上传。</p>
+    <div class="modal-footer">
+      <button class="btn" id="library-logo-guide-cancel">重新选择</button>
+      <button class="btn btn-primary" id="library-logo-guide-confirm">继续使用这张图</button>
+    </div>
+  </div>
+</div>`;
+}
+
+function openLibraryLogoGuideModal(onConfirm, onCancel) {
+  state.pendingLibraryLogoGuide = { onConfirm, onCancel };
+  const modal = $('#library-logo-guide-modal');
+  modal.classList.add('open');
+  $('#library-logo-guide-cancel').onclick = () => {
+    modal.classList.remove('open');
+    const pending = state.pendingLibraryLogoGuide;
+    state.pendingLibraryLogoGuide = null;
+    if (pending && pending.onCancel) pending.onCancel();
+  };
+  $('#library-logo-guide-confirm').onclick = () => {
+    modal.classList.remove('open');
+    const pending = state.pendingLibraryLogoGuide;
+    state.pendingLibraryLogoGuide = null;
+    if (pending && pending.onConfirm) pending.onConfirm();
+  };
 }
 
 let _shareListTarget = null;

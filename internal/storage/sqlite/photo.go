@@ -283,6 +283,14 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 		limit = 30
 	}
 
+	var total int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM photos
+		WHERE uploaded_by = ? AND deleted_at IS NULL AND is_favorite = 1`, params.UserID).Scan(&total); err != nil {
+		return nil, fmt.Errorf("统计个人收藏失败: %w", err)
+	}
+
 	var rows *sql.Rows
 	var err error
 
@@ -315,9 +323,14 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 	}
 	defer rows.Close()
 
-	return collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
+	page, err := collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
 		return p.TakenAt
 	})
+	if err != nil {
+		return nil, err
+	}
+	page.Total = total
+	return page, nil
 }
 
 // collectPhotoPage 收集分页结果，判断是否有更多。

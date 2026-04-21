@@ -69,6 +69,7 @@ type PhotoPage struct {
 	Photos     []*Photo `json:"photos"`
 	NextCursor string   `json:"next_cursor"` // 空字符串表示没有更多
 	HasMore    bool     `json:"has_more"`
+	Total      int      `json:"total,omitempty"`
 }
 
 // ListPhotosParams 查询图片参数
