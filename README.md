@@ -4,21 +4,19 @@ A lightweight local photo gallery app.
 
 ## TO-DOs
 
-- [x] `Doc` 补充：快捷键指南
-- [ ] `Future Plan` AI 人脸识别
-- [ ] `Future Plan` "回忆" Tab
-- [ ] `New Feature` 多用户 / 访客用户支持
-- [ ] `New Feature` 增加更多格式支持
-- [ ] `New Feature` 相册支持列表 / 大图显示切换
-- [ ] `New Feature` 时间线倒序
-- [ ] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
-- [ ] `Fix` `External HDD` 加载所有时间线媒体时应暂时禁止用户操作并展示进度，待完全加载完成再开放操作；同时优化加载速度
-- [ ] `Bug` 资料库图像无法更改
-- [ ] `Bug` 浏览时间线媒体返回时，总是从最顶部滚动下来（从“乱序相册”定位到时间线时也是如此）
-- [ ] `Bug` “乱序相册”按 Esc 退出时无论如何都返回时间线而不是原位置
 - [x] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [x] `Bug` 资料库图像无法上传
+- [x] `Bug` 资料库图像无法更改
 - [x] `Bug` 大图缩放后无法移动查看头部
+- [x] `Bug` 浏览时间线媒体返回时，总是从最顶部滚动下来（从“乱序相册”定位到时间线时也是如此）
+- [x] `Bug` “乱序相册”按 Esc 退出时无论如何都返回时间线而不是原位置
+- [x] `Bug` `Windows` 打开正常但提示打开失败: 在文件管理器中打开失败: exit status 1
+- [x] `Bug` 扫描资料库时跳过失败项
+- [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
+- [x] `Bug` “设置”页面的资源库头像与实际不同步
+- [x] `Doc` 补充：快捷键指南
+- [x] `Enhancement` `URGENT` CPU / 内存资源占用过高
+- [x] `Enhancement` 大图模式下方信息显示限制 1 行，多余信息改为滚动（保证图片显示）
 - [x] `Fix` 移除默认资料库图像，改为随机抓取一张
 - [x] `Fix` 资料库图像逻辑：给定图像 -> 按中心裁剪为正方形 -> 在左上角显示为圆形，上传图像时也要提示用户裁剪
 - [x] `Fix` 调整缩略图尺寸后重新生成缩略图
@@ -26,15 +24,17 @@ A lightweight local photo gallery app.
 - [x] `Fix` “在时间线中查看”精准跳转并高亮显示 1 秒
 - [x] `Fix` 按 Esc 退出时默认执行“在时间线中查看”的逻辑，即精准跳转
 - [x] `Fix` 按 Esc 也可以返回相册
-- [x] `Bug` `Windows` 打开正常但提示打开失败: 在文件管理器中打开失败: exit status 1
-- [x] `Bug` 扫描资料库时跳过失败项
-- [x] `Enhancement` `URGENT` CPU / 内存资源占用过高
-- [x] `Enhancement` 大图模式下方信息显示限制 1 行，多余信息改为滚动（保证图片显示）
-- [x] `Bug` `Windows` 在 Finder 中打开等 macOS 遗留操作在 Windows 下不生效
-- [x] `Bug` “设置”页面的资源库头像与实际不同步
+- [x] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
+- [x] `Fix` `External HDD` 加载所有时间线媒体时应暂时禁止用户操作并展示进度，待完全加载完成再开放操作；同时优化加载速度
+- [x] `Fix` 分享链接可在设置中管理
+- [ ] `Future Plan` AI 人脸识别
+- [ ] `Future Plan` "回忆" Tab
+- [ ] `New Feature` 多用户 / 访客用户支持
+- [ ] `New Feature` 增加更多格式支持
+- [ ] `New Feature` 相册支持列表 / 大图显示切换
+- [ ] `New Feature` 时间线倒序
 - [x] `New Feature` 在大图模式下方添加更多的照片 / 视频文件信息
 - [x] `New Feature` 点击资源库头像跳转设置
-- [x] `Fix` 分享链接可在设置中管理
 
 ## Intro
 

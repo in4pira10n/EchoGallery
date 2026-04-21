@@ -517,9 +517,16 @@ function updateSlideshowSetting(name, value) {
 }
 function initLightboxZoom() {
   state.lightboxZoom = 100;
+  state.lightboxZoomMode = 'height';
 }
 function setLightboxZoom(value) {
   state.lightboxZoom = Math.min(300, Math.max(50, Number(value) || 100));
+  state.lightboxZoomMode = 'scale';
+  applyLightboxZoom();
+}
+function setLightboxFitHeight() {
+  state.lightboxZoom = 100;
+  state.lightboxZoomMode = 'height';
   applyLightboxZoom();
 }
 function lightboxMediaNaturalSize() {
@@ -543,12 +550,15 @@ function applyLightboxZoom() {
   const label = $('#lb-zoom-value');
   const input = $('#lb-zoom');
   const body = $('#lightbox .lightbox-body');
+  const fitHeightBtn = $('#lb-fit-height');
   const { width, height } = lightboxMediaNaturalSize();
   let zoomed = state.lightboxZoom > 100;
   if (body && width > 0 && height > 0) {
     const viewportWidth = Math.max(1, body.clientWidth);
     const viewportHeight = Math.max(1, body.clientHeight);
-    const fitScale = Math.min(viewportWidth / width, viewportHeight / height, 1);
+    const fitScale = state.lightboxZoomMode === 'height'
+      ? viewportHeight / height
+      : Math.min(viewportWidth / width, viewportHeight / height, 1);
     const displayScale = fitScale * (state.lightboxZoom / 100);
     const targetWidth = Math.max(1, Math.round(width * displayScale));
     const targetHeight = Math.max(1, Math.round(height * displayScale));
@@ -584,7 +594,8 @@ function applyLightboxZoom() {
     }
   }
   if (body) body.classList.toggle('zoomed', zoomed);
-  if (label) label.textContent = `${state.lightboxZoom}%`;
+  if (fitHeightBtn) fitHeightBtn.classList.toggle('active', state.lightboxZoomMode === 'height');
+  if (label) label.textContent = state.lightboxZoomMode === 'height' ? '适应高度' : `${state.lightboxZoom}%`;
   if (input) input.value = String(state.lightboxZoom);
 }
 function initExperimentalSettings() {
@@ -758,6 +769,11 @@ function shouldIgnoreGlobalShortcut(target) {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 function handleViewNumberShortcut(e) {
+  if (state.blockingInteraction) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return true;
+  }
   if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
   if (shouldIgnoreGlobalShortcut(e.target)) return false;
   if (!/^[1-6]$/.test(e.key)) return false;
@@ -881,6 +897,7 @@ function applyServerSettings(data = {}) {
   state.slideshowLoop = data.slideshow_loop !== false;
   state.slideshowInterval = Math.min(30000, Math.max(1000, Number(data.slideshow_interval) || 5000));
   state.lightboxZoom = Math.min(300, Math.max(50, Number(data.lightbox_zoom) || 100));
+  state.lightboxZoomMode = state.lightboxZoom === 100 ? 'height' : 'scale';
   state.experimentalAutoplayVideo = !!data.experimental_autoplay_video;
   state.experimentalPrefetchNeighbors = data.experimental_prefetch_neighbors !== false;
   state.experimentalRestoreLastView = !!data.experimental_restore_last_view;
@@ -1071,6 +1088,12 @@ function keyEventToken(e) {
   return normalizeKeyToken(raw);
 }
 function handleLightboxKeydown(e) {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === '0') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    setLightboxFitHeight();
+    return true;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -1161,6 +1184,7 @@ const state = {
   slideshowRandomQueue: [],
   pendingTimelinePhotoID: null,
   lightboxZoom: 100,
+  lightboxZoomMode: 'height',
   gridGap: 8,
   thumbRadius: 8,
   serverSettings: {
@@ -1205,6 +1229,8 @@ const state = {
   loadMoreObserver: null,
   prefetchedMediaKeys: [],
   prefetchedMediaSet: new Set(),
+  blockingInteraction: false,
+  lightboxPageScrollTop: 0,
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -1253,6 +1279,31 @@ function rememberPrefetchedMedia(key) {
     if (expired) state.prefetchedMediaSet.delete(expired);
   }
   return true;
+}
+
+function showBlockingProgress(title, detail = '') {
+  state.blockingInteraction = true;
+  let overlay = $('#blocking-progress');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'blocking-progress';
+    overlay.className = 'blocking-progress';
+    overlay.innerHTML = `<div class="blocking-progress-card"><div class="spinner"></div><strong></strong><span></span></div>`;
+    document.body.appendChild(overlay);
+  }
+  $('strong', overlay).textContent = title;
+  $('span', overlay).textContent = detail;
+  overlay.classList.add('show');
+}
+function updateBlockingProgress(detail = '') {
+  const overlay = $('#blocking-progress');
+  if (!overlay) return;
+  $('span', overlay).textContent = detail;
+}
+function hideBlockingProgress() {
+  state.blockingInteraction = false;
+  const overlay = $('#blocking-progress');
+  if (overlay) overlay.classList.remove('show');
 }
 
 // ── 右键菜单 ──────────────────────────────────────────
@@ -1450,20 +1501,25 @@ async function fetchAllRandomAlbumPhotos() {
   const allPhotos = [];
   let cursor = '';
   let pageCount = 0;
+  showBlockingProgress('正在加载全部时间线媒体', '正在读取第 1 批…');
   for (;;) {
-    const url = '/api/media' + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : '');
+    const params = new URLSearchParams({ limit: '240' });
+    if (cursor) params.set('cursor', cursor);
+    const url = `/api/media?${params.toString()}`;
     const page = await api.get(url);
     const nextPhotos = page.photos || [];
     allPhotos.push(...nextPhotos);
     pageCount += 1;
+    updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在整理乱序相册…`);
     const loadMore = $('#load-more');
     if (loadMore) {
       loadMore.innerHTML = `<div class="spinner"></div>正在收集全部媒体… 已读取 ${allPhotos.length} 条`;
     }
     if (!page.has_more || !page.next_cursor) break;
     cursor = page.next_cursor;
-    if (pageCount % 6 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
+    if (pageCount % 8 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
   }
+  updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在打乱顺序…`);
   return shuffleRandomAlbumBatch(allPhotos);
 }
 
@@ -1480,6 +1536,7 @@ async function loadMoreRandomAlbum() {
     throw e;
   } finally {
     state.randomAlbumLoading = false;
+    hideBlockingProgress();
     renderRandomAlbumGrid();
   }
 }
@@ -1564,7 +1621,7 @@ function renderLibrarySettingsRows() {
     return `<div class="settings-empty">暂无资源库，请先添加一个路径。</div>`;
   }
   return libraries.map((library, index) => `
-    <div class="settings-library-row" data-library-index="${index}">
+    <div class="settings-library-row" data-library-index="${index}" data-logo-asset="${escapeHTML(library.logo_asset || '')}" data-logo-preview-url="${escapeHTML(library.logo_image_url || '')}" data-logo-action="">
       <div class="settings-library-logo-block">
         <div class="settings-library-logo-preview has-image">
           <img src="${resolveLibraryLogoURL(library)}" alt="${escapeHTML(library.name || '资源库 Logo')}">
@@ -2233,7 +2290,9 @@ async function loadMoreTimeline() {
   if (state.timelineLoading || !state.timelineHasMore) return;
   state.timelineLoading = true;
   try {
-    const url = '/api/media' + (state.timelineCursor ? `?cursor=${encodeURIComponent(state.timelineCursor)}` : '');
+    const params = new URLSearchParams({ limit: state.pendingTimelinePhotoID ? '180' : '30' });
+    if (state.timelineCursor) params.set('cursor', state.timelineCursor);
+    const url = `/api/media?${params.toString()}`;
     const page = await api.get(url);
     state.photos.push(...(page.photos || []));
     state.timelineCursor = page.next_cursor || '';
@@ -2633,22 +2692,26 @@ async function focusPendingTimelinePhoto() {
   if (!state.pendingTimelinePhotoID) return false;
   const photoId = state.pendingTimelinePhotoID;
   setTimelineJumpStatus('正在时间线中定位媒体，可能需要继续加载…');
+  showBlockingProgress('正在时间线中定位媒体', '正在检查已加载内容…');
   let thumb = findPhotoThumb(photoId);
   while (!thumb && state.timelineHasMore && !state.timelineLoading) {
     setTimelineJumpStatus(`正在时间线中定位媒体… 已加载 ${state.photos.length} 条`);
+    updateBlockingProgress(`已加载 ${state.photos.length} 条媒体，继续向下查找…`);
     await loadMoreTimeline();
     thumb = findPhotoThumb(photoId);
   }
   state.pendingTimelinePhotoID = null;
   if (!thumb) {
     setTimelineJumpStatus('');
+    hideBlockingProgress();
     showToast('目标媒体暂未在当前时间线中找到');
     return false;
   }
-  thumb.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
   thumb.classList.add('photo-thumb-focus');
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
   setTimelineJumpStatus('');
+  hideBlockingProgress();
   return true;
 }
 
@@ -2972,6 +3035,7 @@ function renderLightbox() {
       <span id="lb-zoom-value">100%</span>
       <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="300" step="10" aria-label="媒体缩放">
     </label>
+    <button class="btn-icon lightbox-fit-height" style="color:#ccc" id="lb-fit-height" title="适应高度（Alt + 0）">适应高度</button>
     <div class="lightbox-slideshow-controls">
       <button class="btn-icon lightbox-play-btn" style="color:#ccc" id="lb-slideshow-toggle"></button>
       <select class="lightbox-select" id="lb-slideshow-mode" aria-label="播放模式">
@@ -3038,6 +3102,7 @@ function bindGlobal() {
     if (e.target.closest('#lb-download')) downloadCurrentPhoto();
     if (e.target.closest('#lb-favorite')) toggleCurrentLightboxFavorite();
     if (e.target.closest('#lb-share')) lbShare();
+    if (e.target.closest('#lb-fit-height')) setLightboxFitHeight();
     if (e.target.closest('#lb-slideshow-toggle')) toggleSlideshow();
   });
   document.addEventListener('contextmenu', e => {
@@ -3093,15 +3158,6 @@ function closeLightbox() {
   state.lightboxReturnAlbumID = null;
 }
 function exitLightboxToContext() {
-  const photo = state.lightboxPhotos[state.lightboxIndex];
-  if (state.lightboxReturnView === 'album-detail' || state.lightboxReturnView === 'trash') {
-    closeLightbox();
-    return;
-  }
-  if (photo && photo.id) {
-    openInTimeline(photo.id);
-    return;
-  }
   closeLightbox();
 }
 function lbNav(dir) {

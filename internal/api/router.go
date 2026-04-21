@@ -411,7 +411,7 @@ func handleListTrashMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 		page, err := registrar.GetTrash(storage.ListPhotosParams{
 			UserID: userID,
 			Cursor: c.Query("cursor"),
-			Limit:  30,
+			Limit:  mediaPageLimit(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -435,7 +435,7 @@ func handleListFavoriteMedia(cfg *config.Config, registrar videoRegistrar) gin.H
 		page, err := registrar.GetFavorites(storage.ListPhotosParams{
 			UserID: userID,
 			Cursor: c.Query("cursor"),
-			Limit:  30,
+			Limit:  mediaPageLimit(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -498,7 +498,7 @@ func handleListAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			AlbumID: albumID,
 			UserID:  userID,
 			Cursor:  c.Query("cursor"),
-			Limit:   30,
+			Limit:   mediaPageLimit(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -806,7 +806,7 @@ func handleGetSharedAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin
 			AlbumID: link.TargetID,
 			UserID:  link.CreatedBy,
 			Cursor:  c.Query("cursor"),
-			Limit:   30,
+			Limit:   mediaPageLimit(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1112,7 +1112,7 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 		page, err := registrar.GetTimeline(storage.ListPhotosParams{
 			UserID: userID,
 			Cursor: c.Query("cursor"),
-			Limit:  30,
+			Limit:  mediaPageLimit(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1120,6 +1120,22 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 		}
 		c.JSON(http.StatusOK, page)
 	}
+}
+
+func mediaPageLimit(c *gin.Context) int {
+	limit := 30
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	if limit < 1 {
+		return 1
+	}
+	if limit > 300 {
+		return 300
+	}
+	return limit
 }
 
 func handleServeMediaFile(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
