@@ -1,4 +1,12 @@
+build.sh
 .DS_Store
 echogallery-data
 EchoGallery
 config.json
+publish.sh
+releases
+EchoGallery_linux_amd64_v1.0.0
+EchoGallery_linux_arm64_v1.0.0
+EchoGallery_macos_amd64_v1.0.0
+EchoGallery_macos_arm64_v1.0.0
+EchoGallery_windows_amd64_v1.0.0.exe
