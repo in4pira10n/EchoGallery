@@ -4,6 +4,10 @@ A lightweight local photo gallery app.
 
 ## TO-DOs
 
+- [ ] `Future Plan` AI 人脸识别
+- [ ] `Future Plan` "回忆" Tab
+- [ ] `New Feature` 多用户 / 访客用户支持
+- [ ] `New Feature` 增加更多格式支持
 - [x] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [x] `Bug` 资料库图像无法上传
 - [x] `Bug` 资料库图像无法更改
@@ -23,9 +27,9 @@ A lightweight local photo gallery app.
 - [x] `Fix` “乱序相册”每次打开都要重新加载
 - [x] `Fix` “在时间线中查看”精准跳转并高亮显示 1 秒
 - [x] `Fix` 按 Esc 退出时默认执行“在时间线中查看”的逻辑，即精准跳转
-- [ ] `Fix` 按 Esc 也可以返回相册
-- [ ] `Fix` 「个人收藏」显示总相片数
-- [ ] `Fix` 移除鼠标 hover 的缩放效果
+- [x] `Fix` 按 Esc 也可以返回相册
+- [x] `Fix` 「个人收藏」显示总相片数
+- [x] `Fix` 移除鼠标 hover 的缩放效果
 - [x] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
 - [x] `Fix` `External HDD` 加载所有时间线媒体时应暂时禁止用户操作并展示进度，待完全加载完成再开放操作；同时优化加载速度
 - [x] `Fix` 分享链接可在设置中管理
@@ -33,10 +37,6 @@ A lightweight local photo gallery app.
 - [x] `Fix` 按 `F` 可快捷加入 / 移除个人收藏
 - [x] `Fix` 大图模式在加载中时，也要有转圈的提示
 - [x] `Fix` 修正「资源库头像」：上传之后弹出一个 popup 提示用户进行编辑（裁剪为正方形等）
-- [ ] `Future Plan` AI 人脸识别
-- [ ] `Future Plan` "回忆" Tab
-- [ ] `New Feature` 多用户 / 访客用户支持
-- [ ] `New Feature` 增加更多格式支持
 - [x] `New Feature` 相册支持列表 / 大图显示切换
 - [x] `New Feature` 时间线倒序
 - [x] `New Feature` 个人收藏支持全选下载
