@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -279,7 +280,17 @@ func (s *PhotoService) PlayWithSystemPlayer(id int64, userID int64) error {
 
 func revealInFileManager(target string) error {
 	name, args := fileManagerRevealCommand(target)
-	return execCommand(name, args...).Run()
+	err := execCommand(name, args...).Run()
+	if err == nil {
+		return nil
+	}
+	if currentOS == "windows" {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil
+		}
+	}
+	return err
 }
 
 func openWithSystemDefault(target string) error {

@@ -82,7 +82,6 @@ function escapeHTML(value) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
-const defaultLibraryFallbackImages = Array.from({ length: 8 }, (_, index) => `/static/library-defaults/library-${String(index + 1).padStart(2, '0')}.jpg`);
 const defaultLibraryAccentPalette = ['#2d6a5f', '#ad7c45', '#c75c3d', '#6b8f71', '#456b9d', '#9466a1', '#cf8a33', '#3d7e90'];
 function hashString(value) {
   let hash = 0;
@@ -104,10 +103,16 @@ function libraryVisualSeed(library = {}) {
 }
 function defaultLibraryLogoURL(library = {}) {
   const seed = libraryVisualSeed(library);
-  return defaultLibraryFallbackImages[hashString(seed) % defaultLibraryFallbackImages.length];
+  return `https://picsum.photos/seed/${encodeURIComponent(`echogallery-${seed || 'default'}`)}/320/320`;
+}
+function libraryLogoAssetURL(library = {}) {
+  const asset = String(library.logo_asset || library.logoAsset || '').trim();
+  const index = Number.isFinite(Number(library.index)) ? Number(library.index) : Number(library.logo_index);
+  if (!asset || !Number.isInteger(index) || index < 0) return '';
+  return `/api/settings/libraries/${index}/logo?v=${encodeURIComponent(asset)}`;
 }
 function resolveLibraryLogoURL(library = {}) {
-  return library.logo_image_url || library.logoImageUrl || defaultLibraryLogoURL(library);
+  return library.logo_image_url || library.logoImageUrl || libraryLogoAssetURL(library) || defaultLibraryLogoURL(library);
 }
 function normalizeHexColor(value) {
   const input = String(value || '').trim();
@@ -165,6 +170,7 @@ function normalizeLibraries(libraries, fallbackPath = '') {
     if (seen.has(key)) return;
     seen.add(key);
     result.push({
+      index,
       name: (library && library.name || '').trim() || `资源库 ${index + 1}`,
       path,
       logo_asset: library && (library.logo_asset || library.logoAsset) || '',
@@ -173,7 +179,7 @@ function normalizeLibraries(libraries, fallbackPath = '') {
     });
   });
   if (!result.length && (fallbackPath || '').trim()) {
-    result.push({ name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '' });
+    result.push({ index: 0, name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '' });
   }
   return result;
 }
@@ -516,14 +522,68 @@ function setLightboxZoom(value) {
   state.lightboxZoom = Math.min(300, Math.max(50, Number(value) || 100));
   applyLightboxZoom();
 }
+function lightboxMediaNaturalSize() {
+  const photo = state.lightboxPhotos[state.lightboxIndex] || {};
+  const img = $('#lb-img');
+  const video = $('#lb-video');
+  if (!isVideoMedia(photo)) {
+    return {
+      width: Number(photo.width) || (img && img.naturalWidth) || 0,
+      height: Number(photo.height) || (img && img.naturalHeight) || 0,
+    };
+  }
+  return {
+    width: Number(photo.width) || (video && video.videoWidth) || 0,
+    height: Number(photo.height) || (video && video.videoHeight) || 0,
+  };
+}
 function applyLightboxZoom() {
   const img = $('#lb-img');
   const video = $('#lb-video');
   const label = $('#lb-zoom-value');
   const input = $('#lb-zoom');
-  const scale = state.lightboxZoom / 100;
-  if (img) img.style.transform = `scale(${scale})`;
-  if (video) video.style.transform = `scale(${scale})`;
+  const body = $('#lightbox .lightbox-body');
+  const { width, height } = lightboxMediaNaturalSize();
+  let zoomed = state.lightboxZoom > 100;
+  if (body && width > 0 && height > 0) {
+    const viewportWidth = Math.max(1, body.clientWidth);
+    const viewportHeight = Math.max(1, body.clientHeight);
+    const fitScale = Math.min(viewportWidth / width, viewportHeight / height, 1);
+    const displayScale = fitScale * (state.lightboxZoom / 100);
+    const targetWidth = Math.max(1, Math.round(width * displayScale));
+    const targetHeight = Math.max(1, Math.round(height * displayScale));
+    if (img) {
+      img.style.transform = '';
+      img.style.maxWidth = 'none';
+      img.style.maxHeight = 'none';
+      img.style.width = `${targetWidth}px`;
+      img.style.height = `${targetHeight}px`;
+    }
+    if (video) {
+      video.style.transform = '';
+      video.style.maxWidth = 'none';
+      video.style.maxHeight = 'none';
+      video.style.width = `${targetWidth}px`;
+      video.style.height = `${targetHeight}px`;
+    }
+    zoomed = targetWidth > viewportWidth || targetHeight > viewportHeight;
+  } else {
+    if (img) {
+      img.style.transform = '';
+      img.style.width = '';
+      img.style.height = '';
+      img.style.maxWidth = '100%';
+      img.style.maxHeight = '100%';
+    }
+    if (video) {
+      video.style.transform = '';
+      video.style.width = '';
+      video.style.height = '';
+      video.style.maxWidth = '100%';
+      video.style.maxHeight = '100%';
+    }
+  }
+  if (body) body.classList.toggle('zoomed', zoomed);
   if (label) label.textContent = `${state.lightboxZoom}%`;
   if (input) input.value = String(state.lightboxZoom);
 }
@@ -545,6 +605,7 @@ function setExperimentalSetting(key, enabled) {
 }
 function normalizeLibrary(data = {}) {
   return {
+    index: Number.isInteger(Number(data.index)) ? Number(data.index) : (Number.isInteger(Number(data.logo_index)) ? Number(data.logo_index) : -1),
     name: data.name || '',
     path: data.path || '',
     logo_asset: data.logo_asset || data.logoAsset || '',
@@ -617,6 +678,30 @@ function currentLibraryBrand() {
   }
   return resolveActiveLibrary(state.serverSettings.libraries || [], state.serverSettings.storage_path || '');
 }
+function libraryFallbackText(library = {}, limit = 3) {
+  const label = String(library.name || library.path || 'EchoGallery').trim();
+  return escapeHTML((label || 'EG').slice(0, limit));
+}
+function applyNavLogoFallback(navLogo, library = {}) {
+  if (!navLogo) return;
+  const img = $('.nav-logo-image', navLogo);
+  const media = $('.nav-logo-media', navLogo);
+  if (!img || !media) return;
+  const fallback = () => {
+    media.innerHTML = `<span class="nav-logo-mark">${libraryFallbackText(library)}</span>`;
+  };
+  img.addEventListener('error', fallback, { once: true });
+}
+function applyLibraryPreviewFallback(preview, library = {}) {
+  if (!preview) return;
+  const img = $('img', preview);
+  if (!img) return;
+  const fallback = () => {
+    preview.classList.remove('has-image');
+    preview.innerHTML = `<span>${libraryFallbackText(library)}</span>`;
+  };
+  img.addEventListener('error', fallback, { once: true });
+}
 function applyLibraryBranding() {
   const current = currentLibraryBrand();
   const accent = current ? resolveLibraryAccentColor(current) : '#2d6a5f';
@@ -645,7 +730,10 @@ function applyLibraryBranding() {
   }
   favicon.href = current ? resolveLibraryLogoURL(current) : createTextFavicon(current && current.name ? current.name : 'PA');
   const navLogo = document.querySelector('.nav-logo');
-  if (navLogo) navLogo.innerHTML = renderNavLogo();
+  if (navLogo) {
+    navLogo.innerHTML = renderNavLogo();
+    applyNavLogoFallback(navLogo, current || {});
+  }
 }
 async function refreshVideoThumbnails() {
   return api.post('/api/settings/video-thumbnails/refresh', {});
@@ -653,7 +741,8 @@ async function refreshVideoThumbnails() {
 function renderNavLogo() {
   const current = currentLibraryBrand();
   if (current) {
-    return `<img class="nav-logo-image" src="${resolveLibraryLogoURL(current)}" alt="logo"> ${escapeHTML(current.name || 'EchoGallery')}`;
+    const label = current.name || 'EchoGallery';
+    return `<span class="nav-logo-media"><img class="nav-logo-image" src="${resolveLibraryLogoURL(current)}" alt="${escapeHTML(label)}"></span><span class="nav-logo-text">${escapeHTML(label)}</span>`;
   }
   const logoText = current && current.name ? current.name.trim() : '';
   const logoMark = logoText ? `<span class="nav-logo-mark">${logoText.slice(0, 3)}</span>` : icons.photo;
@@ -985,7 +1074,7 @@ function handleLightboxKeydown(e) {
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopImmediatePropagation();
-    closeLightbox();
+    exitLightboxToContext();
     return true;
   }
   const binding = state.playerKeymap[keyEventToken(e)];
@@ -1034,6 +1123,7 @@ const state = {
   randomAlbumCursor: '',
   randomAlbumHasMore: true,
   randomAlbumSeed: Date.now(),
+  randomAlbumLoaded: false,
   timelineCursor: '',
   timelineHasMore: true,
   timelineLoading: false,
@@ -1050,6 +1140,8 @@ const state = {
   selected: new Set(),
   lightboxPhotos: [],
   lightboxIndex: 0,
+  lightboxReturnView: '',
+  lightboxReturnAlbumID: null,
   // b-2: 当前用户的分享链接，key=`${type}:${targetId}`
   shareMap: {},
   shareLinks: [],
@@ -1110,6 +1202,9 @@ const state = {
   lightboxPlaybackToken: 0,
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
+  loadMoreObserver: null,
+  prefetchedMediaKeys: [],
+  prefetchedMediaSet: new Set(),
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -1135,6 +1230,29 @@ async function loadShareMap() {
 		const links = await api.get('/api/media/shares');
     setShareLinks(links || []);
   } catch(e) { /* 非关键，忽略 */ }
+}
+
+function disconnectLoadMoreObserver() {
+  if (state.loadMoreObserver) {
+    state.loadMoreObserver.disconnect();
+    state.loadMoreObserver = null;
+  }
+}
+
+function resetLightboxPrefetchCache() {
+  state.prefetchedMediaKeys = [];
+  state.prefetchedMediaSet.clear();
+}
+
+function rememberPrefetchedMedia(key) {
+  if (!key || state.prefetchedMediaSet.has(key)) return false;
+  state.prefetchedMediaSet.add(key);
+  state.prefetchedMediaKeys.push(key);
+  while (state.prefetchedMediaKeys.length > 24) {
+    const expired = state.prefetchedMediaKeys.shift();
+    if (expired) state.prefetchedMediaSet.delete(expired);
+  }
+  return true;
 }
 
 // ── 右键菜单 ──────────────────────────────────────────
@@ -1282,6 +1400,7 @@ function openLibrarySettings() {
 
 function switchView(view) {
   saveViewScroll();
+  disconnectLoadMoreObserver();
   state.view = view;
   state.selected.clear();
   if (view !== 'album-detail') {
@@ -1355,6 +1474,7 @@ async function loadMoreRandomAlbum() {
     state.randomAlbumPhotos = await fetchAllRandomAlbumPhotos();
     state.randomAlbumCursor = '';
     state.randomAlbumHasMore = false;
+    state.randomAlbumLoaded = true;
   } catch (e) {
     console.error(e);
     throw e;
@@ -1374,9 +1494,18 @@ async function renderRandomAlbum() {
     state.randomAlbumPhotos = [];
     state.randomAlbumCursor = '';
     state.randomAlbumHasMore = false;
+    state.randomAlbumLoaded = false;
     $('#content').innerHTML = `<div id="random-album-wrap"><div class="load-more" id="load-more"><div class="spinner"></div>正在收集全部媒体并打乱…</div></div>`;
     await loadMoreRandomAlbum();
+    restoreViewScroll('random-album');
   });
+
+  if (state.randomAlbumLoaded) {
+    $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
+    renderRandomAlbumGrid();
+    restoreViewScroll('random-album');
+    return;
+  }
 
   $('#content').innerHTML = `<div id="random-album-wrap"><div class="load-more" id="load-more"><div class="spinner"></div>正在收集全部媒体并打乱…</div></div>`;
   try {
@@ -1446,12 +1575,12 @@ function renderLibrarySettingsRows() {
         </label>
         <div class="settings-library-logo-actions">
           <label class="btn btn-sm settings-library-upload-label">
-            <input class="settings-library-logo-input" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,image/*">
+            <input class="settings-library-logo-input" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,image/png,image/jpeg,image/gif,image/webp">
             选择图像
           </label>
           <button class="btn btn-sm settings-library-clear-logo" type="button" ${library.logo_asset ? '' : 'disabled'}>移除图像</button>
         </div>
-        <div class="settings-library-logo-hint">${library.logo_asset ? '已设置资源库图像' : '未设置资源库图像'}</div>
+        <div class="settings-library-logo-hint">${library.logo_asset ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示' : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示'}</div>
       </div>
       <div class="settings-library-fields">
         <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(library.name)}">
@@ -1492,8 +1621,10 @@ function buildLibraryLogoPreview(row, library = {}) {
   const displayName = $('.settings-library-name', row) ? $('.settings-library-name', row).value.trim() : (library.name || '');
   const displayPath = $('.settings-library-path', row) ? $('.settings-library-path', row).value.trim() : (library.path || '');
   const displayLibrary = {
+    index: Number.isInteger(Number(row.dataset.libraryIndex)) ? Number(row.dataset.libraryIndex) : (Number.isInteger(Number(library.index)) ? Number(library.index) : -1),
     name: displayName || library.name || '',
     path: displayPath || library.path || '',
+    logo_asset: row.dataset.logoAsset || library.logo_asset || '',
     logo_image_url: library.logo_image_url || '',
     accent_color: $('.settings-library-accent', row) ? $('.settings-library-accent', row).value : (library.accent_color || ''),
   };
@@ -1504,11 +1635,14 @@ function buildLibraryLogoPreview(row, library = {}) {
     preview.innerHTML = `<img src="${logoURL}" alt="${escapeHTML(displayName || '资源库 Logo')}">`;
     preview.style.borderColor = rgbaColor(accent, .35);
     preview.style.boxShadow = `inset 0 0 0 1px ${rgbaColor(accent, .12)}`;
+    applyLibraryPreviewFallback(preview, displayLibrary);
   }
   if (hint) {
-    if (file) hint.textContent = `待上传：${file.name}`;
+    if (file) hint.textContent = `待上传：${file.name}，保存后会按中心裁剪为正方形，并在侧栏以圆形显示`;
     else if (row.dataset.logoAction === 'remove') hint.textContent = '保存后将移除资源库图像';
-    else hint.textContent = row.dataset.logoAsset ? '已设置资源库图像' : '未设置资源库图像';
+    else hint.textContent = row.dataset.logoAsset
+      ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示'
+      : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示';
   }
   if (clearBtn) clearBtn.disabled = !row.dataset.logoAsset && !file && row.dataset.logoAction !== 'remove';
 }
@@ -1535,12 +1669,12 @@ function createLibrarySettingsRow(library = {}, index = 0) {
       </label>
       <div class="settings-library-logo-actions">
         <label class="btn btn-sm settings-library-upload-label">
-          <input class="settings-library-logo-input" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,image/*">
+          <input class="settings-library-logo-input" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,image/png,image/jpeg,image/gif,image/webp">
           选择图像
         </label>
         <button class="btn btn-sm settings-library-clear-logo" type="button" ${logoAsset ? '' : 'disabled'}>移除图像</button>
       </div>
-      <div class="settings-library-logo-hint">${logoAsset ? '已设置资源库图像' : '未设置资源库图像'}</div>
+      <div class="settings-library-logo-hint">${logoAsset ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示' : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示'}</div>
     </div>
     <div class="settings-library-fields">
       <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(name)}">
@@ -1568,6 +1702,12 @@ function syncActiveLibrarySelect() {
   }).join('') || '<option value="">请先添加资源库</option>';
 }
 
+function reindexLibrarySettingsRows() {
+  $$('.settings-library-row').forEach((row, index) => {
+    row.dataset.libraryIndex = String(index);
+  });
+}
+
 function setSettingsDirty(dirty = true) {
   state.settingsDirty = !!dirty;
   const saveBtn = $('#settings-save-top-btn');
@@ -1576,23 +1716,27 @@ function setSettingsDirty(dirty = true) {
 
 async function persistSettingsWithLibraryAssets() {
   const rows = $$('.settings-library-row');
-  const libraryOps = rows.map((row, index) => ({
-    index,
-    action: row.dataset.logoAction || '',
-    file: row._pendingLogoFile || null,
-  }));
+  const libraryOps = rows
+    .map(row => ({
+      path: $('.settings-library-path', row).value.trim(),
+      action: row.dataset.logoAction || '',
+      file: row._pendingLogoFile || null,
+    }))
+    .filter(operation => operation.path && (operation.action === 'remove' || operation.file));
 
   const resp = await persistSettings();
   let latestMessage = (resp && resp.message) || '设置已保存';
 
   for (const operation of libraryOps) {
+    const targetIndex = state.serverSettings.libraries.findIndex(library => (library.path || '').trim() === operation.path);
+    if (targetIndex < 0) continue;
     if (operation.action === 'remove') {
-      const removeResp = await deleteLibraryLogo(operation.index);
+      const removeResp = await deleteLibraryLogo(targetIndex);
       latestMessage = (removeResp && removeResp.message) || latestMessage;
       continue;
     }
     if (operation.file) {
-      const uploadResp = await uploadLibraryLogo(operation.index, operation.file);
+      const uploadResp = await uploadLibraryLogo(targetIndex, operation.file);
       latestMessage = (uploadResp && uploadResp.message) || latestMessage;
     }
   }
@@ -1878,6 +2022,7 @@ function renderSettingsContent() {
   function bindLibraryRow(row) {
     $('.settings-library-remove', row).addEventListener('click', () => {
       row.remove();
+      reindexLibrarySettingsRows();
       syncActiveLibrarySelect();
       applyLibraryBranding();
       setSettingsDirty();
@@ -1925,6 +2070,7 @@ function renderSettingsContent() {
     buildLibraryLogoPreview(row);
   }
   $$('.settings-library-row').forEach(bindLibraryRow);
+  reindexLibrarySettingsRows();
   $('#settings-active-library').addEventListener('change', e => {
     state.serverSettings.storage_path = e.target.value;
     applyLibraryBranding();
@@ -2009,7 +2155,7 @@ function renderSettingsContent() {
 // ── 时间线视图 ─────────────────────────────────────────
 async function renderTimeline() {
   $('#topbar-title').textContent = '时间线';
-  $('#topbar-meta').innerHTML = renderGridScaleControl();
+  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button>`;
   bindGridScaleControl();
   $('#upload-btn').addEventListener('click', openUploadModal);
@@ -2035,11 +2181,19 @@ async function renderTimeline() {
   state.photos = [];
   state.timelineCursor = '';
   state.timelineHasMore = true;
+  const hasPendingFocus = !!state.pendingTimelinePhotoID;
   await loadShareMap();   // b-2: 加载分享状态
   await loadMoreTimeline();
-  await focusPendingTimelinePhoto();
+  const focusedPending = await focusPendingTimelinePhoto();
   observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading);
-  restoreViewScroll('timeline');
+  if (!hasPendingFocus || !focusedPending) restoreViewScroll('timeline');
+}
+
+function setTimelineJumpStatus(message = '') {
+  const status = $('#timeline-jump-status');
+  if (!status) return;
+  status.textContent = message;
+  status.hidden = !message;
 }
 
 async function renderFavorites() {
@@ -2203,6 +2357,14 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const thumbFallback = isVideoMedia(photo) ? ` onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'"` : '';
 
   div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${shareBadge}${mediaBadge}`;
+  const imageEl = div.querySelector('img');
+  if (imageEl && !isVideoMedia(photo)) {
+    imageEl.addEventListener('error', () => {
+      if (imageEl.dataset.fallbackApplied === '1') return;
+      imageEl.dataset.fallbackApplied = '1';
+      imageEl.src = mediaFileURL(photo);
+    });
+  }
 
   // b-1: 点击 .check 区域直接进入/切换选择模式
   const checkEl = div.querySelector('.check');
@@ -2468,18 +2630,26 @@ function openInTimeline(photoId) {
 }
 
 async function focusPendingTimelinePhoto() {
-  if (!state.pendingTimelinePhotoID) return;
+  if (!state.pendingTimelinePhotoID) return false;
   const photoId = state.pendingTimelinePhotoID;
+  setTimelineJumpStatus('正在时间线中定位媒体，可能需要继续加载…');
   let thumb = findPhotoThumb(photoId);
   while (!thumb && state.timelineHasMore && !state.timelineLoading) {
+    setTimelineJumpStatus(`正在时间线中定位媒体… 已加载 ${state.photos.length} 条`);
     await loadMoreTimeline();
     thumb = findPhotoThumb(photoId);
   }
-  if (!thumb) return;
+  state.pendingTimelinePhotoID = null;
+  if (!thumb) {
+    setTimelineJumpStatus('');
+    showToast('目标媒体暂未在当前时间线中找到');
+    return false;
+  }
   thumb.scrollIntoView({ behavior: 'smooth', block: 'center' });
   thumb.classList.add('photo-thumb-focus');
-  setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1800);
-  state.pendingTimelinePhotoID = null;
+  setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
+  setTimelineJumpStatus('');
+  return true;
 }
 
 // ── 相册列表 ──────────────────────────────────────────
@@ -2766,12 +2936,13 @@ async function hardDeleteSelected() {
 
 // ── 无限滚动 ──────────────────────────────────────────
 function observeLoadMore(id, loadFn, canLoad) {
+  disconnectLoadMoreObserver();
   const sentinel = document.getElementById(id);
   if (!sentinel) return;
-  const obs = new IntersectionObserver(entries => {
+  state.loadMoreObserver = new IntersectionObserver(entries => {
     if (entries[0].isIntersecting && canLoad()) loadFn();
   }, { rootMargin: '200px' });
-  obs.observe(sentinel);
+  state.loadMoreObserver.observe(sentinel);
 }
 function updateLoadMoreUI(id, hasMore) {
   const e = document.getElementById(id);
@@ -2822,13 +2993,29 @@ function renderLightbox() {
     <button class="btn-icon" style="color:#ccc" id="lb-close">${icons.prev} 返回</button>
   </div>
   <div class="lightbox-body">
-    <img class="lightbox-img" id="lb-img" src="" alt="">
-    <video class="lightbox-video hidden" id="lb-video" controls playsinline preload="metadata"></video>
+    <div class="lightbox-media-frame" id="lb-frame">
+      <img class="lightbox-img" id="lb-img" src="" alt="">
+      <video class="lightbox-video hidden" id="lb-video" controls playsinline preload="metadata"></video>
+    </div>
     <button class="lb-nav lb-prev" id="lb-prev">${icons.prev}</button>
     <button class="lb-nav lb-next" id="lb-next">${icons.next}</button>
   </div>
   <div class="lightbox-info" id="lb-info"></div>
 </div>`;
+}
+function lockPageScrollForLightbox() {
+  if (document.body.classList.contains('lightbox-page-lock')) return;
+  state.lightboxPageScrollTop = window.scrollY || window.pageYOffset || 0;
+  document.body.classList.add('lightbox-page-lock');
+  document.body.style.top = `-${state.lightboxPageScrollTop}px`;
+}
+function unlockPageScrollForLightbox() {
+  if (!document.body.classList.contains('lightbox-page-lock')) return;
+  const top = Number(state.lightboxPageScrollTop) || 0;
+  document.body.classList.remove('lightbox-page-lock');
+  document.body.style.top = '';
+  window.scrollTo(0, top);
+  state.lightboxPageScrollTop = 0;
 }
 function bindGlobal() {
   document.addEventListener('click', () => closeContextMenu());
@@ -2845,7 +3032,7 @@ function bindGlobal() {
     if (!document.fullscreenElement) closeLightbox();
   });
   document.addEventListener('click', e => {
-    if (e.target.closest('#lb-close')) closeLightbox();
+    if (e.target.closest('#lb-close')) exitLightboxToContext();
     if (e.target.closest('#lb-prev'))  lbNav(-1);
     if (e.target.closest('#lb-next'))  lbNav(1);
     if (e.target.closest('#lb-download')) downloadCurrentPhoto();
@@ -2882,14 +3069,18 @@ async function openLightbox(photos, index) {
   }
   state.lightboxPhotos = photos;
   state.lightboxIndex  = Math.max(0, index);
+  state.lightboxReturnView = state.view;
+  state.lightboxReturnAlbumID = state.currentAlbumID;
   state.slideshowRandomQueue = [];
   applyLightboxZoom();
+  lockPageScrollForLightbox();
   $('#lightbox').classList.add('open');
   lbRender();
 }
 function closeLightbox() {
   stopSlideshow();
   state.lightboxPlaybackToken += 1;
+  resetLightboxPrefetchCache();
   const video = $('#lb-video');
   if (video) {
     video.pause();
@@ -2897,6 +3088,21 @@ function closeLightbox() {
     video.load();
   }
   $('#lightbox').classList.remove('open');
+  unlockPageScrollForLightbox();
+  state.lightboxReturnView = '';
+  state.lightboxReturnAlbumID = null;
+}
+function exitLightboxToContext() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (state.lightboxReturnView === 'album-detail' || state.lightboxReturnView === 'trash') {
+    closeLightbox();
+    return;
+  }
+  if (photo && photo.id) {
+    openInTimeline(photo.id);
+    return;
+  }
+  closeLightbox();
 }
 function lbNav(dir) {
   const n = state.lightboxIndex + dir;
@@ -2962,7 +3168,7 @@ function lbRender() {
     ['媒体 ID', String(p.id || '—')],
     ['UUID', p.uuid || '—'],
   ];
-  $('#lb-info').innerHTML = items.map(([k, v]) => `<div class="lb-info-item"><span>${k}</span><span>${v}</span></div>`).join('');
+  $('#lb-info').innerHTML = items.map(([k, v]) => `<div class="lb-info-item" title="${escapeHTML(`${k}: ${v}`)}"><span class="lb-info-key">${escapeHTML(k)}</span><span class="lb-info-value">${escapeHTML(v)}</span></div>`).join('');
 }
 
 async function toggleCurrentLightboxFavorite() {
@@ -2976,16 +3182,20 @@ function prefetchAdjacentMedia() {
     .map(i => state.lightboxPhotos[i]);
   neighbors.forEach(photo => {
     if (!photo) return;
+    const kind = isVideoMedia(photo) ? 'video-poster' : 'image';
+    const key = `${kind}:${photo.uuid || photo.id || photo.original_name || ''}`;
+    if (!rememberPrefetchedMedia(key)) return;
     if (isVideoMedia(photo)) {
       const link = document.createElement('link');
       link.rel = 'prefetch';
-      link.as = 'fetch';
-      link.href = mediaFileURL(photo);
+      link.as = 'image';
+      link.href = mediaThumbURL(photo);
       document.head.appendChild(link);
-      setTimeout(() => link.remove(), 1500);
+      setTimeout(() => link.remove(), 1000);
       return;
     }
     const img = new Image();
+    img.decoding = 'async';
     img.src = mediaFileURL(photo);
   });
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"echogallery/internal/config"
+	imgpkg "echogallery/internal/image"
 	"echogallery/internal/service"
 )
 
@@ -63,6 +64,7 @@ type settingsUpdateRequest struct {
 }
 
 type libraryResponse struct {
+	Index        int    `json:"index"`
 	Name         string `json:"name"`
 	Path         string `json:"path"`
 	LogoAsset    string `json:"logo_asset,omitempty"`
@@ -113,6 +115,7 @@ func buildLibraryResponses(cfg *config.Config) []libraryResponse {
 	resp := make([]libraryResponse, 0, len(cfg.Libraries))
 	for index, library := range cfg.Libraries {
 		item := libraryResponse{
+			Index:       index,
 			Name:        library.Name,
 			Path:        library.Path,
 			LogoAsset:   library.LogoAsset,
@@ -140,6 +143,8 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		prevThumbnailDir := strings.TrimSpace(cfg.ThumbnailDir)
+		prevThumbnailSize := cfg.ThumbnailSize
 		next := *cfg
 		next.Port = req.Port
 		next.StoragePath = req.StoragePath
@@ -174,8 +179,16 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 		cfg.TrashDir = next.TrashDir
 		cfg.UseSystemPlayer = next.UseSystemPlayer
 		cfg.Preferences = next.Preferences
+		if prevThumbnailSize != cfg.ThumbnailSize && prevThumbnailDir != "" {
+			_ = os.RemoveAll(prevThumbnailDir)
+			_ = os.MkdirAll(prevThumbnailDir, 0755)
+		}
+		message := "设置已保存，涉及服务端行为的变更在重启后完全生效"
+		if prevThumbnailSize != cfg.ThumbnailSize {
+			message = "设置已保存，缩略图缓存已重置，后续浏览会按新尺寸重新生成"
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"message": "设置已保存，涉及服务端行为的变更在重启后完全生效",
+			"message": message,
 			"data":    buildSettingsResponse(cfg),
 		})
 	}
@@ -209,9 +222,9 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 		}
 		ext := strings.ToLower(filepath.Ext(file.Filename))
 		switch ext {
-		case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg":
+		case ".png", ".jpg", ".jpeg", ".gif", ".webp":
 		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 png/jpg/jpeg/gif/webp/svg"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 png/jpg/jpeg/gif/webp，上传后会按中心裁剪为正方形"})
 			return
 		}
 
@@ -227,10 +240,16 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 
 		next := *cfg
 		next.Libraries = append([]config.Library(nil), cfg.Libraries...)
-		fileName := fmt.Sprintf("library-%d-%d%s", index, time.Now().UnixNano(), ext)
+		fileName := fmt.Sprintf("library-%d-%d.png", index, time.Now().UnixNano())
 		destPath := filepath.Join(assetDir, fileName)
-		if err := c.SaveUploadedFile(file, destPath); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "保存上传文件失败"})
+		src, err := file.Open()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取上传文件失败"})
+			return
+		}
+		defer src.Close()
+		if err := imgpkg.SaveSquareLibraryLogo(src, imgpkg.DetectMimeType(file.Filename), destPath, imgpkg.DefaultLibraryLogoEdge); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
@@ -247,7 +266,7 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			_ = os.Remove(filepath.Join(assetDir, previous))
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"message": "资源库图像已上传",
+			"message": "资源库图像已上传，已按中心裁剪为正方形",
 			"data":    buildSettingsResponse(cfg),
 		})
 	}

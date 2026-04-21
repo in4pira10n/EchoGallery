@@ -125,3 +125,35 @@ func TestImportExistingPhotos_CreatesAlbumsFromFolders(t *testing.T) {
 		t.Fatalf("期望相册内有 1 张，得到 %d", len(page.Photos))
 	}
 }
+
+func TestImportExistingPhotos_SkipsBrokenSupportedFiles(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	if err := os.WriteFile(filepath.Join(svc.sourcePath, "broken.png"), []byte("not-a-real-png"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(svc.sourcePath, "ok.jpg"), createJPEGBytes(320, 200), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+	if summary.Imported != 1 {
+		t.Fatalf("期望导入 1 张有效媒体，得到 %d", summary.Imported)
+	}
+	if summary.Skipped != 1 {
+		t.Fatalf("期望跳过 1 个损坏文件，得到 %d", summary.Skipped)
+	}
+
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("期望时间线中只有 1 条有效记录，得到 %d", len(page.Photos))
+	}
+	if page.Photos[0].OriginalName != "ok.jpg" {
+		t.Fatalf("期望保留有效文件，得到 %s", page.Photos[0].OriginalName)
+	}
+}

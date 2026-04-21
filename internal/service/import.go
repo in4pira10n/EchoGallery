@@ -98,11 +98,17 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 			for job := range jobCh {
 				photo, imported, jobErr := s.importExistingPhotoFile(job.path, job.originalName, uploadedBy)
 				if jobErr != nil {
-					select {
-					case errCh <- jobErr:
-					default:
+					atomic.AddInt64(&skippedCount, 1)
+					fmt.Fprintf(os.Stderr, "警告: 跳过导入失败的文件 %s: %v\n", job.path, jobErr)
+					if progress != nil {
+						done := int(atomic.AddInt64(&processedCount, 1))
+						if done == len(jobs) || done%10 == 0 {
+							progressMu.Lock()
+							progress(done, len(jobs))
+							progressMu.Unlock()
+						}
 					}
-					return
+					continue
 				}
 				cacheMu.Lock()
 				jobErr = s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache)

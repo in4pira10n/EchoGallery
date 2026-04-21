@@ -1,6 +1,9 @@
 package service
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -105,4 +108,59 @@ func TestSystemOpenCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRevealInFileManager_WindowsExitCodeOneIsIgnored(t *testing.T) {
+	originalOS := currentOS
+	originalExec := execCommand
+	t.Cleanup(func() {
+		currentOS = originalOS
+		execCommand = originalExec
+	})
+
+	currentOS = "windows"
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		cmdArgs := []string{"-test.run=TestRevealInFileManagerHelper", "--", name}
+		cmdArgs = append(cmdArgs, args...)
+		cmd := exec.Command(os.Args[0], cmdArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_EXIT_CODE=1")
+		return cmd
+	}
+
+	if err := revealInFileManager(filepath.Join("demo", "photo.jpg")); err != nil {
+		t.Fatalf("windows exit code 1 应被忽略，得到 %v", err)
+	}
+}
+
+func TestRevealInFileManager_PropagatesOtherErrors(t *testing.T) {
+	originalOS := currentOS
+	originalExec := execCommand
+	t.Cleanup(func() {
+		currentOS = originalOS
+		execCommand = originalExec
+	})
+
+	currentOS = "windows"
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		cmdArgs := []string{"-test.run=TestRevealInFileManagerHelper", "--", name}
+		cmdArgs = append(cmdArgs, args...)
+		cmd := exec.Command(os.Args[0], cmdArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_EXIT_CODE=2")
+		return cmd
+	}
+
+	if err := revealInFileManager(filepath.Join("demo", "photo.jpg")); err == nil {
+		t.Fatal("期望返回非 1 的错误退出码")
+	}
+}
+
+func TestRevealInFileManagerHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	code := 0
+	if _, err := fmt.Sscanf(os.Getenv("HELPER_EXIT_CODE"), "%d", &code); err != nil {
+		code = 0
+	}
+	os.Exit(code)
 }

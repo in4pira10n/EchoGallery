@@ -871,6 +871,10 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			}
 		}
 		if _, err := os.Stat(thumbPath); err != nil {
+			if photo.MediaKind == storage.MediaKindImage {
+				c.File(registrar.MediaPath(photo))
+				return
+			}
 			c.JSON(http.StatusNotFound, gin.H{"error": "缩略图不存在"})
 			return
 		}
