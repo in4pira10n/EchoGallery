@@ -8,6 +8,7 @@ A lightweight local photo gallery app.
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
 - [ ] `New Feature` 相册支持列表 / 大图显示切换
+- [ ] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
 - [ ] `Bug` 资料库图像无法更改
 - [ ] `Bug` 无法回到时间线浏览位置
 - [ ] `Bug` “乱序相册”按 Esc 退出时无论如何都返回时间线而不是原位置
