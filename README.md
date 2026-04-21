@@ -5,12 +5,16 @@ A lightweight local photo gallery app.
 ## TO-DOs
 
 - [x] `Doc` 补充：快捷键指南
+- [ ] `Future Plan` AI 人脸识别
+- [ ] `Future Plan` "回忆" Tab
 - [ ] `New Feature` 多用户 / 访客用户支持
 - [ ] `New Feature` 增加更多格式支持
 - [ ] `New Feature` 相册支持列表 / 大图显示切换
+- [ ] `New Feature` 时间线倒序
 - [ ] `Fix` “缩放”新增“适应高度”选项，按 `Alt + 0` 返回“适应高度”
+- [ ] `Fix` `External HDD` 加载所有时间线媒体时应暂时禁止用户操作并展示进度，待完全加载完成再开放操作；同时优化加载速度
 - [ ] `Bug` 资料库图像无法更改
-- [ ] `Bug` 无法回到时间线浏览位置
+- [ ] `Bug` 浏览时间线媒体返回时，总是从最顶部滚动下来（从“乱序相册”定位到时间线时也是如此）
 - [ ] `Bug` “乱序相册”按 Esc 退出时无论如何都返回时间线而不是原位置
 - [x] `Bug` 某些 PNG 图像缩略图显示失败 / 缺失
 - [x] `Bug` 资料库图像无法上传
