@@ -47,6 +47,11 @@ func (s *PhotoService) ListAlbums(userID int64) ([]*storage.Album, error) {
 	return s.repo.ListAlbums(userID)
 }
 
+// ListAlbumsForPhoto 获取包含指定媒体的相册。
+func (s *PhotoService) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
+	return s.repo.ListAlbumsForPhoto(photoID, userID)
+}
+
 // ListShares 获取用户所有分享链接。
 func (s *PhotoService) ListShares(userID int64) ([]*storage.ShareLink, error) {
 	return s.repo.ListShareLinks(userID)
@@ -220,7 +225,9 @@ func (s *PhotoService) PermanentlyDeletePhoto(id int64, userID int64) error {
 	}
 
 	s.moveManagedFileToTrash(s.MediaPath(photo))
-	s.moveManagedFileToTrash(s.ThumbnailPath(photo))
+	for _, thumbPath := range s.ThumbnailCandidates(photo) {
+		s.moveManagedFileToTrash(thumbPath)
+	}
 	return nil
 }
 
@@ -233,7 +240,9 @@ func (s *PhotoService) EmptyTrash(userID int64) error {
 
 	for _, photo := range photos {
 		s.moveManagedFileToTrash(s.MediaPath(photo))
-		s.moveManagedFileToTrash(s.ThumbnailPath(photo))
+		for _, thumbPath := range s.ThumbnailCandidates(photo) {
+			s.moveManagedFileToTrash(thumbPath)
+		}
 	}
 	return nil
 }

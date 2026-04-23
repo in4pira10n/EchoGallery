@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	webpenc "github.com/gen2brain/webp"
 	"golang.org/x/image/draw"
 	"golang.org/x/image/webp"
 )
@@ -173,10 +174,8 @@ func decodeImage(r io.Reader, mimeType string) (image.Image, error) {
 
 // encodeImage 根据 mimeType 编码图片到 writer
 func encodeImage(w io.Writer, img image.Image) error {
-	// 统一输出更轻量的 JPEG 缩略图，透明背景以白色打底。
-	bounds := img.Bounds()
-	canvas := image.NewRGBA(bounds)
-	draw.Draw(canvas, bounds, &image.Uniform{C: color.White}, image.Point{}, draw.Src)
-	draw.Draw(canvas, bounds, img, bounds.Min, draw.Over)
-	return jpeg.Encode(w, canvas, &jpeg.Options{Quality: 60})
+	return webpenc.Encode(w, img, webpenc.Options{
+		Quality: 72,
+		Method:  4,
+	})
 }

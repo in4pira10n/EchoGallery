@@ -213,7 +213,7 @@ func (c *Config) applyDefaults() {
 	if c.Preferences.Theme == "" {
 		c.Preferences.Theme = "light"
 	}
-	if c.Preferences.GridSize == 0 {
+	if c.Preferences.GridSize < 72 || c.Preferences.GridSize > 260 {
 		c.Preferences.GridSize = 180
 	}
 	if c.Preferences.GridGap == 0 {

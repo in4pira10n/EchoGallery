@@ -15,7 +15,7 @@ import (
 
 func TestPosterPath(t *testing.T) {
 	got := PosterPath("/tmp/storage", "video-1")
-	want := filepath.Join("/tmp/storage", "video-1.jpg")
+	want := filepath.Join("/tmp/storage", "video-1.webp")
 	if got != want {
 		t.Fatalf("期望 %s，得到 %s", want, got)
 	}
@@ -23,7 +23,7 @@ func TestPosterPath(t *testing.T) {
 
 func TestGeneratePosterWithRunner_Success(t *testing.T) {
 	dir := t.TempDir()
-	poster := filepath.Join(dir, "demo.jpg")
+	poster := filepath.Join(dir, "demo.webp")
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		framePath := args[len(args)-1]
 		if err := os.MkdirAll(filepath.Dir(framePath), 0755); err != nil {
@@ -57,7 +57,7 @@ func TestGeneratePosterWithRunner_FFmpegUnavailable(t *testing.T) {
 		return nil, exec.ErrNotFound
 	}
 
-	err := generatePosterWithRunner("demo.mp4", filepath.Join(t.TempDir(), "p.jpg"), &VideoMeta{DurationMS: 120000}, runner, imgpkg.DefaultThumbnailLongEdge)
+	err := generatePosterWithRunner("demo.mp4", filepath.Join(t.TempDir(), "p.webp"), &VideoMeta{DurationMS: 120000}, runner, imgpkg.DefaultThumbnailLongEdge)
 	if err == nil || !strings.Contains(err.Error(), "ffmpeg") {
 		t.Fatalf("期望 ffmpeg 缺失错误，得到 %v", err)
 	}

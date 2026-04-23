@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/rwcarlsen/goexif/exif"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
 )
 
 // SupportedMimeTypes 支持的图片 MIME 类型
@@ -21,6 +23,8 @@ var SupportedMimeTypes = map[string]bool{
 	"image/png":  true,
 	"image/gif":  true,
 	"image/webp": true,
+	"image/bmp":  true,
+	"image/tiff": true,
 }
 
 // Meta 图片元数据
@@ -183,6 +187,10 @@ func DetectMimeType(filename string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".tif", ".tiff":
+		return "image/tiff"
 	default:
 		t := mime.TypeByExtension(ext)
 		if t == "" {

@@ -159,8 +159,8 @@ func TestThumbnailPath_VideoUsesSharedThumbnailDirectory(t *testing.T) {
 	if got != want {
 		t.Fatalf("期望视频缩略图路径与海报路径一致，got=%s want=%s", got, want)
 	}
-	if !strings.HasSuffix(got, "video-uuid.jpg") {
-		t.Fatalf("期望视频缩略图为 jpg 文件，得到 %s", got)
+	if !strings.HasSuffix(got, "video-uuid.webp") {
+		t.Fatalf("期望视频缩略图为 webp 文件，得到 %s", got)
 	}
 }
 

@@ -62,6 +62,34 @@ func TestListAlbums_Success(t *testing.T) {
 	}
 }
 
+func TestListAlbumsForPhoto_Success(t *testing.T) {
+	db := newTestDB(t)
+	album1 := &storage.Album{Name: "A", CreatedBy: 1, CreatedAt: time.Now()}
+	album2 := &storage.Album{Name: "B", CreatedBy: 1, CreatedAt: time.Now()}
+	db.CreateAlbum(album1)
+	db.CreateAlbum(album2)
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "album-photo-in-two"
+	photo.OriginalName = "in-albums.jpg"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存照片失败: %v", err)
+	}
+	if err := db.AddPhotoToAlbum(album1.ID, photo.ID, 1); err != nil {
+		t.Fatalf("添加到相册 A 失败: %v", err)
+	}
+	if err := db.AddPhotoToAlbum(album2.ID, photo.ID, 1); err != nil {
+		t.Fatalf("添加到相册 B 失败: %v", err)
+	}
+
+	albums, err := db.ListAlbumsForPhoto(photo.ID, 1)
+	if err != nil {
+		t.Fatalf("查询媒体所在相册失败: %v", err)
+	}
+	if len(albums) != 2 {
+		t.Fatalf("期望 2 个相册，得到 %d", len(albums))
+	}
+}
+
 func TestUpdateAlbum_Success(t *testing.T) {
 	db := newTestDB(t)
 	album := &storage.Album{Name: "旧名字", CreatedBy: 1, CreatedAt: time.Now()}

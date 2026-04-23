@@ -88,6 +88,44 @@ func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 	return albums, rows.Err()
 }
 
+// ListAlbumsForPhoto 查询包含指定图片/视频的相册。
+func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
+	rows, err := s.db.Query(`
+		SELECT a.id, a.name, a.description, a.cover_photo_id, a.created_by, a.created_at,
+		       COUNT(p.id) as photo_count,
+		       COALESCE(
+		         (SELECT ph.uuid FROM photos ph
+		          WHERE ph.id = a.cover_photo_id AND ph.deleted_at IS NULL LIMIT 1),
+		         (SELECT ph.uuid FROM photos ph
+		          INNER JOIN album_photos ap2 ON ap2.photo_id = ph.id
+		          WHERE ap2.album_id = a.id AND ph.deleted_at IS NULL
+		          ORDER BY ph.taken_at DESC LIMIT 1)
+		       ) as cover_uuid
+		FROM albums a
+		INNER JOIN album_photos target_ap ON target_ap.album_id = a.id AND target_ap.photo_id = ?
+		INNER JOIN photos target_photo ON target_photo.id = target_ap.photo_id
+			AND target_photo.uploaded_by = ? AND target_photo.deleted_at IS NULL
+		LEFT JOIN album_photos ap ON ap.album_id = a.id
+		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
+		WHERE a.created_by = ?
+		GROUP BY a.id
+		ORDER BY a.created_at DESC`, photoID, userID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("查询媒体所在相册失败: %w", err)
+	}
+	defer rows.Close()
+
+	var albums []*storage.Album
+	for rows.Next() {
+		a, err := scanAlbum(rows)
+		if err != nil {
+			return nil, err
+		}
+		albums = append(albums, a)
+	}
+	return albums, rows.Err()
+}
+
 // UpdateAlbum 更新相册信息
 func (s *DB) UpdateAlbum(album *storage.Album) error {
 	result, err := s.db.Exec(`

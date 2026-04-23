@@ -33,6 +33,7 @@ type stubRegistrar struct {
 	getAlbumDownloadEntries func(albumID int64, userID int64) (string, []service.DownloadEntry, error)
 	getShareByToken         func(token string) (*storage.ShareLink, error)
 	listAlbums              func(userID int64) ([]*storage.Album, error)
+	listAlbumsForPhoto      func(photoID int64, userID int64) ([]*storage.Album, error)
 	listShares              func(userID int64) ([]*storage.ShareLink, error)
 	removePhoto             func(albumID int64, photoID int64, userID int64) error
 	updateAlbum             func(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error)
@@ -103,6 +104,13 @@ func (s stubRegistrar) GetAlbumDownloadEntries(albumID int64, userID int64) (str
 }
 
 func (s stubRegistrar) ListAlbums(userID int64) ([]*storage.Album, error) {
+	return s.listAlbums(userID)
+}
+
+func (s stubRegistrar) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
+	if s.listAlbumsForPhoto != nil {
+		return s.listAlbumsForPhoto(photoID, userID)
+	}
 	return s.listAlbums(userID)
 }
 
@@ -194,10 +202,10 @@ func okRegistrar() stubRegistrar {
 		return filepath.Join(tTempStoragePath, photo.UUID+".mp4")
 	}
 	posterFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".posters", photo.UUID+".jpg")
+		return filepath.Join(tTempStoragePath, ".posters", photo.UUID+".webp")
 	}
 	thumbnailFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+filepath.Ext(photo.OriginalName))
+		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".webp")
 	}
 	return stubRegistrar{addPhoto: func(albumID int64, photoID int64, userID int64) error {
 		return nil
@@ -225,6 +233,14 @@ func okRegistrar() stubRegistrar {
 			{ID: 1, Name: "旅行", Description: "春游", CreatedBy: userID, CoverPhotoID: &coverID, PhotoCount: 2},
 			{ID: 2, Name: "收藏", Description: "混合媒体", CreatedBy: userID, PhotoCount: 5},
 		}, nil
+	}, listAlbumsForPhoto: func(photoID int64, userID int64) ([]*storage.Album, error) {
+		if photoID == 11 {
+			return []*storage.Album{
+				{ID: 1, Name: "旅行", Description: "春游", CreatedBy: userID, PhotoCount: 2},
+				{ID: 2, Name: "收藏", Description: "混合媒体", CreatedBy: userID, PhotoCount: 5},
+			}, nil
+		}
+		return []*storage.Album{}, nil
 	}, listShares: func(userID int64) ([]*storage.ShareLink, error) {
 		return []*storage.ShareLink{
 			{ID: 1, Token: "token-1", Type: storage.ShareTypePhoto, TargetID: 11, CreatedBy: userID, CreatedAt: time.Now()},
@@ -790,6 +806,28 @@ func TestListAlbumsMedia_Success(t *testing.T) {
 	}
 	if albums[0].ID != 1 || albums[1].PhotoCount != 5 {
 		t.Fatalf("相册列表响应不正确: %+v", albums)
+	}
+}
+
+func TestListMediaAlbums_Success(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/media/11/albums", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, testConfig().JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	NewRouter(testConfig(), okRegistrar()).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+	var albums []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &albums); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if len(albums) != 2 || albums[0].Name != "旅行" {
+		t.Fatalf("媒体所在相册响应不正确: %+v", albums)
 	}
 }
 
@@ -1367,7 +1405,7 @@ func TestServeThumbnailFile_Success(t *testing.T) {
 		permanentlyDeletePhoto: okRegistrar().permanentlyDeletePhoto,
 		posterPath:             okRegistrar().posterPath,
 		restorePhoto:           okRegistrar().restorePhoto,
-		thumbnailPath:          func(photo *storage.Photo) string { return thumbFile },
+		thumbnailPath:          func(photo *storage.Photo) string { return filepath.Join(thumbDir, photo.UUID+".webp") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/thumbnails/shared.jpg", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
@@ -2277,7 +2315,7 @@ func TestUploadPlaceholder_RejectsUnsupportedVideoExtension(t *testing.T) {
 	cfg.StoragePath = t.TempDir()
 	cfg.AppDataDir = t.TempDir()
 	router := NewRouter(cfg, okRegistrar())
-	req := uploadRequest(t, "/api/media/upload", "demo.avi", mp4Sample(), true)
+	req := uploadRequest(t, "/api/media/upload", "demo.flv", mp4Sample(), true)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
 	w := httptest.NewRecorder()
 
@@ -2458,7 +2496,7 @@ func TestServeMediaFile_Success(t *testing.T) {
 			return &storage.Photo{UUID: uuid, OriginalName: "demo.mp4", MediaKind: storage.MediaKindVideo, MimeType: "video/mp4", UploadedBy: userID}, nil
 		},
 		mediaPath:  func(photo *storage.Photo) string { return mediaFile },
-		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".jpg") },
+		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".webp") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/files/video-1", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
@@ -2491,7 +2529,7 @@ func TestServePoster_Success(t *testing.T) {
 			return &storage.Photo{UUID: uuid, OriginalName: "demo.mp4", MediaKind: storage.MediaKindVideo, MimeType: "video/mp4", UploadedBy: userID}, nil
 		},
 		mediaPath:  func(photo *storage.Photo) string { return filepath.Join(storageDir, photo.UUID+".mp4") },
-		posterPath: func(photo *storage.Photo) string { return posterFile },
+		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".webp") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/posters/video-1", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
@@ -2517,7 +2555,7 @@ func TestServePoster_Returns404WhenMissing(t *testing.T) {
 			return &storage.Photo{UUID: uuid, OriginalName: "demo.mp4", MediaKind: storage.MediaKindVideo, MimeType: "video/mp4", UploadedBy: userID}, nil
 		},
 		mediaPath:  func(photo *storage.Photo) string { return filepath.Join(storageDir, photo.UUID+".mp4") },
-		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".jpg") },
+		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".webp") },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/posters/video-1", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})

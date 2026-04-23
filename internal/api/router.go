@@ -38,6 +38,7 @@ type videoRegistrar interface {
 	GetAlbumDownloadEntries(albumID int64, userID int64) (string, []service.DownloadEntry, error)
 	GetShareByToken(token string) (*storage.ShareLink, error)
 	ListAlbums(userID int64) ([]*storage.Album, error)
+	ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error)
 	ListShares(userID int64) ([]*storage.ShareLink, error)
 	RemovePhoto(albumID int64, photoID int64, userID int64) error
 	UpdateAlbum(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error)
@@ -162,6 +163,7 @@ func NewRouterWithStaticWithRestart(cfg *config.Config, staticFS fs.FS, registra
 		media.GET("", authMiddleware(cfg), handleListMedia(cfg, registrar))
 		media.GET("/favorites", authMiddleware(cfg), handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", authMiddleware(cfg), handleListTrashMedia(cfg, registrar))
+		media.GET("/:id/albums", authMiddleware(cfg), handleListMediaAlbums(cfg, registrar))
 		media.GET("/:id", authMiddleware(cfg), handleGetMedia(cfg, registrar))
 		media.GET("/:id/download", authMiddleware(cfg), handleDownloadMedia(cfg, registrar))
 		media.POST("/:id/play", authMiddleware(cfg), handlePlayMediaWithSystemPlayer(cfg, registrar))
@@ -624,6 +626,31 @@ func handleListAlbumsMedia(cfg *config.Config, registrar videoRegistrar) gin.Han
 	}
 }
 
+func handleListMediaAlbums(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		mediaID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || mediaID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "照片/视频ID 无效"})
+			return
+		}
+		albums, err := registrar.ListAlbumsForPhoto(mediaID, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, albums)
+	}
+}
+
 func handleCreateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if registrar == nil {
@@ -837,6 +864,24 @@ func handleServePhotoFile(cfg *config.Config, registrar videoRegistrar) gin.Hand
 	}
 }
 
+func legacyJPEGPath(path string) string {
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	return base + ".jpg"
+}
+
+func resolveExistingThumbnailPath(preferredPath string) string {
+	if _, err := os.Stat(preferredPath); err == nil {
+		return preferredPath
+	}
+	legacyPath := legacyJPEGPath(preferredPath)
+	if legacyPath != preferredPath {
+		if _, err := os.Stat(legacyPath); err == nil {
+			return legacyPath
+		}
+	}
+	return ""
+}
+
 func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if registrar == nil {
@@ -854,23 +899,25 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 			return
 		}
-		thumbPath := registrar.ThumbnailPath(photo)
-		if _, err := os.Stat(thumbPath); err != nil {
+		thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+		if thumbPath == "" {
 			if photo.MediaKind == storage.MediaKindVideo {
-				if genErr := media.GeneratePoster(registrar.MediaPath(photo), registrar.PosterPath(photo), cfg.ThumbnailSize); genErr == nil {
-					thumbPath = registrar.PosterPath(photo)
+				preferredPosterPath := registrar.PosterPath(photo)
+				if genErr := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, cfg.ThumbnailSize); genErr == nil {
+					thumbPath = resolveExistingThumbnailPath(preferredPosterPath)
 				}
 			} else {
+				preferredThumbPath := registrar.ThumbnailPath(photo)
 				file, openErr := os.Open(registrar.MediaPath(photo))
 				if openErr == nil {
 					defer file.Close()
-					if genErr := image.GenerateThumbnail(file, photo.MimeType, thumbPath, cfg.ThumbnailSize); genErr == nil {
-						thumbPath = registrar.ThumbnailPath(photo)
+					if genErr := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, cfg.ThumbnailSize); genErr == nil {
+						thumbPath = resolveExistingThumbnailPath(preferredThumbPath)
 					}
 				}
 			}
 		}
-		if _, err := os.Stat(thumbPath); err != nil {
+		if thumbPath == "" {
 			if photo.MediaKind == storage.MediaKindImage {
 				c.File(registrar.MediaPath(photo))
 				return
@@ -1182,8 +1229,8 @@ func handleServePoster(cfg *config.Config, registrar videoRegistrar) gin.Handler
 			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
 			return
 		}
-		posterPath := registrar.PosterPath(photo)
-		if _, err := os.Stat(posterPath); err != nil {
+		posterPath := resolveExistingThumbnailPath(registrar.PosterPath(photo))
+		if posterPath == "" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "poster 不存在"})
 			return
 		}
@@ -1213,7 +1260,7 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 		}
 		videoMimeType := media.DetectVideoMimeType(file.Filename)
 		if isVideoUpload && videoMimeType == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持常见视频格式上传（mp4/m4v/mov/webm）"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持常见视频格式上传（mp4/m4v/mov/webm/mkv/avi/mpeg/ts/3gp/ogv）"})
 			return
 		}
 

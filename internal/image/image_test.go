@@ -39,6 +39,9 @@ func TestDetectMimeType(t *testing.T) {
 		{"photo.png", "image/png"},
 		{"photo.gif", "image/gif"},
 		{"photo.webp", "image/webp"},
+		{"photo.bmp", "image/bmp"},
+		{"photo.tif", "image/tiff"},
+		{"photo.tiff", "image/tiff"},
 		{"document.pdf", "application/pdf"},
 	}
 	for _, c := range cases {
@@ -149,7 +152,7 @@ func TestCalcThumbnailSize_Square(t *testing.T) {
 func TestGenerateThumbnail_JPEG(t *testing.T) {
 	data := createTestJPEG(800, 600)
 	r := bytes.NewReader(data)
-	destPath := t.TempDir() + "/thumb.jpg"
+	destPath := t.TempDir() + "/thumb.webp"
 
 	if err := GenerateThumbnail(r, "image/jpeg", destPath, DefaultThumbnailLongEdge); err != nil {
 		t.Fatalf("生成 JPEG 缩略图失败: %v", err)
@@ -158,9 +161,12 @@ func TestGenerateThumbnail_JPEG(t *testing.T) {
 	// 验证缩略图尺寸
 	thumbFile := mustOpenFile(t, destPath)
 	defer thumbFile.Close()
-	cfg, _, err := image.DecodeConfig(thumbFile)
+	cfg, format, err := image.DecodeConfig(thumbFile)
 	if err != nil {
 		t.Fatalf("解码缩略图失败: %v", err)
+	}
+	if format != "webp" {
+		t.Fatalf("缩略图编码格式期望 webp，得到 %s", format)
 	}
 	if cfg.Width != 256 || cfg.Height != 192 {
 		t.Errorf("缩略图尺寸期望 256x192，得到 %dx%d", cfg.Width, cfg.Height)
@@ -170,7 +176,7 @@ func TestGenerateThumbnail_JPEG(t *testing.T) {
 func TestGenerateThumbnail_PNG(t *testing.T) {
 	data := createTestPNG(400, 300)
 	r := bytes.NewReader(data)
-	destPath := t.TempDir() + "/thumb.png"
+	destPath := t.TempDir() + "/thumb.webp"
 
 	if err := GenerateThumbnail(r, "image/png", destPath, DefaultThumbnailLongEdge); err != nil {
 		t.Fatalf("生成 PNG 缩略图失败: %v", err)
@@ -181,7 +187,7 @@ func TestGenerateThumbnail_SmallImage(t *testing.T) {
 	// 小图不应该被放大
 	data := createTestJPEG(200, 150)
 	r := bytes.NewReader(data)
-	destPath := t.TempDir() + "/thumb_small.jpg"
+	destPath := t.TempDir() + "/thumb_small.webp"
 
 	if err := GenerateThumbnail(r, "image/jpeg", destPath, DefaultThumbnailLongEdge); err != nil {
 		t.Fatalf("生成小图缩略图失败: %v", err)
@@ -198,7 +204,7 @@ func TestGenerateThumbnail_SmallImage(t *testing.T) {
 func TestGenerateThumbnail_CreatesDirectory(t *testing.T) {
 	data := createTestJPEG(100, 100)
 	r := bytes.NewReader(data)
-	destPath := t.TempDir() + "/subdir/thumb.jpg"
+	destPath := t.TempDir() + "/subdir/thumb.webp"
 
 	if err := GenerateThumbnail(r, "image/jpeg", destPath, DefaultThumbnailLongEdge); err != nil {
 		t.Fatalf("应该自动创建目录: %v", err)

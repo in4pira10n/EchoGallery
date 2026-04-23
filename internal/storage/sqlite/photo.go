@@ -167,6 +167,14 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 		limit = 30
 	}
 
+	var total int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM photos
+		WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
+		return nil, fmt.Errorf("统计图片失败: %w", err)
+	}
+
 	var rows *sql.Rows
 	var err error
 
@@ -224,9 +232,14 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	}
 	defer rows.Close()
 
-	return collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
+	page, err := collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
 		return p.TakenAt
 	})
+	if err != nil {
+		return nil, err
+	}
+	page.Total = total
+	return page, nil
 }
 
 // ListTrashedPhotos 查询回收站图片

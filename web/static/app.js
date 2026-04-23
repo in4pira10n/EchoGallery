@@ -45,6 +45,9 @@ const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComp
   <polygon points="105,90 105,150 152,120" fill="#f4f1e8"/>
   <text x="120" y="198" font-size="18" text-anchor="middle" fill="#d9e4dd" font-family="sans-serif">VIDEO</text>
 </svg>`)} `;
+const supportedImageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff'];
+const supportedVideoExtensions = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.ts', '.mts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2', '.ogv'];
+
 function formatDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -358,8 +361,23 @@ function initGridScale() {
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
 }
 function setGridScale(size) {
-  state.gridSize = Math.min(260, Math.max(100, Number(size) || 180));
+  state.gridSize = Math.min(260, Math.max(72, Number(size) || 180));
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
+}
+function persistGridScaleSoon() {
+  if (!state.settingsReady) return;
+  if (state.gridScalePersistTimer) clearTimeout(state.gridScalePersistTimer);
+  state.gridScalePersistTimer = setTimeout(() => {
+    state.gridScalePersistTimer = null;
+    persistSettings()
+      .then(() => {
+        const sizeInput = $('#settings-grid-size');
+        const sizeValue = $('#settings-grid-size-value');
+        if (sizeInput) sizeInput.value = String(state.gridSize);
+        if (sizeValue) sizeValue.textContent = `${state.gridSize}px`;
+      })
+      .catch(e => console.error('保存缩放级别失败:', e));
+  }, 500);
 }
 function initDisplaySettings() {
   state.gridGap = 8;
@@ -544,6 +562,16 @@ function lightboxMediaNaturalSize() {
     height: Number(photo.height) || (video && video.videoHeight) || 0,
   };
 }
+function lightboxViewportSize(body) {
+  if (!body) return { width: 0, height: 0 };
+  const style = window.getComputedStyle(body);
+  const horizontalPadding = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
+  const verticalPadding = parseFloat(style.paddingTop || '0') + parseFloat(style.paddingBottom || '0');
+  return {
+    width: Math.max(1, body.clientWidth - horizontalPadding),
+    height: Math.max(1, body.clientHeight - verticalPadding),
+  };
+}
 function applyLightboxZoom() {
   const img = $('#lb-img');
   const video = $('#lb-video');
@@ -554,8 +582,7 @@ function applyLightboxZoom() {
   const { width, height } = lightboxMediaNaturalSize();
   let zoomed = state.lightboxZoom > 100;
   if (body && width > 0 && height > 0) {
-    const viewportWidth = Math.max(1, body.clientWidth);
-    const viewportHeight = Math.max(1, body.clientHeight);
+    const { width: viewportWidth, height: viewportHeight } = lightboxViewportSize(body);
     const fitScale = state.lightboxZoomMode === 'height'
       ? viewportHeight / height
       : Math.min(viewportWidth / width, viewportHeight / height, 1);
@@ -888,7 +915,7 @@ function applyServerSettings(data = {}) {
   state.serverSettings.users = Array.isArray(data.users) ? data.users : [];
   state.theme = data.theme || 'light';
   document.documentElement.dataset.theme = state.theme;
-  state.gridSize = Math.min(260, Math.max(100, Number(data.grid_size) || 180));
+  state.gridSize = Math.min(260, Math.max(72, Number(data.grid_size) || 180));
   state.gridGap = Math.min(24, Math.max(0, Number(data.grid_gap) || 8));
   state.thumbRadius = Math.min(24, Math.max(0, Number(data.thumb_radius) || 8));
   state.sidebarAutoHide = !!data.sidebar_auto_hide;
@@ -1124,7 +1151,7 @@ function handleLightboxKeydown(e) {
 function renderGridScaleControl() {
   return `<label class="grid-scale" title="调整每页显示密度">
     <span>缩放</span>
-    <input type="range" id="grid-scale" min="100" max="260" step="10" value="${state.gridSize}">
+    <input type="range" id="grid-scale" min="72" max="260" step="8" value="${state.gridSize}">
   </label>`;
 }
 function renderTimelineOrderControl() {
@@ -1140,7 +1167,10 @@ function renderAlbumViewModeControl() {
 function bindGridScaleControl() {
   const input = $('#grid-scale');
   if (!input) return;
-  input.addEventListener('input', () => setGridScale(input.value));
+  input.addEventListener('input', () => {
+    setGridScale(input.value);
+    persistGridScaleSoon();
+  });
 }
 async function revealInFinder(photoId) {
   try {
@@ -1167,6 +1197,7 @@ const state = {
   timelineCursor: '',
   timelineHasMore: true,
   timelineLoading: false,
+  timelineTotal: 0,
   trashPhotos: [],
   trashCursor: '',
   trashHasMore: true,
@@ -1178,6 +1209,7 @@ const state = {
   albumCursor: '',
   albumHasMore: true,
   albumLoading: false,
+  pendingAlbumPhotoID: null,
   selected: new Set(),
   lightboxPhotos: [],
   lightboxIndex: 0,
@@ -1247,9 +1279,16 @@ const state = {
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
   loadMoreObserver: null,
+  gridScalePersistTimer: null,
   prefetchedMediaKeys: [],
   prefetchedMediaSet: new Set(),
   blockingInteraction: false,
+  timelineBulkLoading: false,
+  timelineBulkCancelRequested: false,
+  timelineBulkAbortController: null,
+  randomAlbumBulkLoading: false,
+  randomAlbumBulkCancelRequested: false,
+  randomAlbumBulkAbortController: null,
   lightboxPageScrollTop: 0,
   pendingLibraryLogoGuide: null,
 };
@@ -1407,6 +1446,8 @@ ${renderCreateAlbumModal()}
 ${renderShareModal()}
 ${renderAlbumPickerModal()}
 ${renderShareListModal()}
+${renderTimelineLoadAllModal()}
+${renderRandomAlbumLoadAllModal()}
 ${renderLibraryLogoGuideModal()}`;
 
   bindNav();
@@ -1437,7 +1478,10 @@ function bindNav() {
     nav.addEventListener('mouseenter', () => clearSidebarHideTimer());
     nav.addEventListener('mouseleave', () => scheduleSidebarHide());
   }
-  window.addEventListener('resize', syncSidebarUI);
+  window.addEventListener('resize', () => {
+    syncSidebarUI();
+    if ($('#lightbox')?.classList.contains('open')) applyLightboxZoom();
+  });
 }
 
 function toggleDrawer() {
@@ -1481,6 +1525,7 @@ function switchView(view) {
   disconnectLoadMoreObserver();
   state.view = view;
   state.selected.clear();
+  if (view !== 'album-detail') state.pendingAlbumPhotoID = null;
   if (view !== 'album-detail') {
     state.currentAlbumID = null;
     setHashView(view); // c-2: 同步到 hash
@@ -1528,7 +1573,7 @@ async function fetchAllRandomAlbumPhotos() {
   const allPhotos = [];
   let cursor = '';
   let pageCount = 0;
-  showBlockingProgress('正在加载全部时间线媒体', '正在读取第 1 批…');
+  showBlockingProgress('正在加载全部乱序相册媒体', '正在读取第 1 批…');
   for (;;) {
     const params = new URLSearchParams({ limit: '240' });
     if (cursor) params.set('cursor', cursor);
@@ -1548,6 +1593,185 @@ async function fetchAllRandomAlbumPhotos() {
   }
   updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在打乱顺序…`);
   return shuffleRandomAlbumBatch(allPhotos);
+}
+
+async function fetchRandomAlbumPage(cursor, limit, signal) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  const response = await fetch(`/api/media?${params.toString()}`, { signal });
+  if (!response.ok) throw await response.json();
+  return response.json();
+}
+
+function renderRandomAlbumLoadAllModal() {
+  return `<div class="modal-overlay timeline-load-all-modal" id="random-album-load-all-modal">
+  <div class="modal" style="width:500px">
+    <div class="modal-title">立即加载全部乱序相册媒体</div>
+    <p class="modal-copy">会先确保乱序相册已收集完整媒体列表，再批量预加载缩略图。加载期间会暂时锁定 App，减少后续浏览时被缩略图加载打断。</p>
+    <div class="timeline-load-progress">
+      <div class="timeline-load-progress-bar" id="random-album-load-all-bar"></div>
+    </div>
+    <div class="timeline-load-status" id="random-album-load-all-status">准备加载…</div>
+    <div class="modal-footer">
+      <button class="btn" id="random-album-load-all-cancel">取消</button>
+      <button class="btn btn-primary" id="random-album-load-all-start">开始加载</button>
+    </div>
+  </div>
+</div>`;
+}
+
+function openRandomAlbumLoadAllModal() {
+  const modal = $('#random-album-load-all-modal');
+  if (!modal || state.randomAlbumBulkLoading) return;
+  if (state.randomAlbumLoading && !state.randomAlbumLoaded) {
+    showToast('乱序相册正在收集媒体，请稍候');
+    return;
+  }
+  modal.classList.add('open');
+  const total = state.randomAlbumPhotos.length || state.timelineTotal || 0;
+  updateRandomAlbumLoadAllProgress(state.randomAlbumLoaded ? state.randomAlbumPhotos.length : 0, total, '准备加载全部乱序相册媒体…');
+  $('#random-album-load-all-start').disabled = false;
+  $('#random-album-load-all-start').textContent = state.randomAlbumLoaded ? '预加载缩略图' : '开始加载';
+  $('#random-album-load-all-cancel').disabled = false;
+  $('#random-album-load-all-cancel').textContent = '取消';
+  $('#random-album-load-all-cancel').onclick = closeOrCancelRandomAlbumLoadAll;
+  $('#random-album-load-all-start').onclick = loadAllRandomAlbumPhotos;
+}
+
+function closeOrCancelRandomAlbumLoadAll() {
+  if (state.randomAlbumBulkLoading) {
+    state.randomAlbumBulkCancelRequested = true;
+    if (state.randomAlbumBulkAbortController) state.randomAlbumBulkAbortController.abort();
+    updateRandomAlbumLoadAllProgress(state.randomAlbumPhotos.length, state.randomAlbumPhotos.length, '正在取消…');
+    $('#random-album-load-all-cancel').disabled = true;
+    return;
+  }
+  const modal = $('#random-album-load-all-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function updateRandomAlbumLoadAllProgress(loaded, total, message = '') {
+  const bar = $('#random-album-load-all-bar');
+  const status = $('#random-album-load-all-status');
+  const safeLoaded = Math.max(0, Number(loaded) || 0);
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const percent = safeTotal > 0 ? Math.min(100, Math.round((safeLoaded / safeTotal) * 100)) : 0;
+  if (bar) bar.style.width = `${percent}%`;
+  if (status) {
+    const countText = safeTotal > 0 ? `${safeLoaded} / ${safeTotal}` : `${safeLoaded}`;
+    status.textContent = message || `已加载 ${countText} 条媒体`;
+  }
+}
+
+function preloadThumbnail(photo) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = resolve;
+    img.onerror = resolve;
+    img.src = mediaThumbURL(photo);
+  });
+}
+
+async function preloadThumbnailsInBatches(photos, onProgress, shouldCancel) {
+  const batchSize = 24;
+  let loaded = 0;
+  for (let i = 0; i < photos.length; i += batchSize) {
+    if (shouldCancel && shouldCancel()) break;
+    const batch = photos.slice(i, i + batchSize);
+    await Promise.allSettled(batch.map(preloadThumbnail));
+    loaded += batch.length;
+    if (onProgress) onProgress(Math.min(loaded, photos.length), photos.length);
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+}
+
+async function loadAllRandomAlbumPhotos() {
+  if (state.randomAlbumBulkLoading) return;
+  state.randomAlbumBulkLoading = true;
+  state.randomAlbumBulkCancelRequested = false;
+  state.blockingInteraction = true;
+  const startBtn = $('#random-album-load-all-start');
+  const cancelBtn = $('#random-album-load-all-cancel');
+  if (startBtn) {
+    startBtn.disabled = true;
+    startBtn.textContent = '加载中…';
+  }
+  if (cancelBtn) {
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = '取消加载';
+  }
+  try {
+    let photos = state.randomAlbumLoaded ? [...state.randomAlbumPhotos] : [];
+    if (!state.randomAlbumLoaded) {
+      const allPhotos = [];
+      let cursor = '';
+      let total = 0;
+      let pageCount = 0;
+      state.randomAlbumLoading = true;
+      updateRandomAlbumLoadAllProgress(0, 0, '正在读取第 1 批媒体…');
+      while (!state.randomAlbumBulkCancelRequested) {
+        state.randomAlbumBulkAbortController = new AbortController();
+        const page = await fetchRandomAlbumPage(cursor, 300, state.randomAlbumBulkAbortController.signal);
+        const nextPhotos = page.photos || [];
+        if (Number.isFinite(Number(page.total))) total = Number(page.total);
+        allPhotos.push(...nextPhotos);
+        pageCount += 1;
+        updateRandomAlbumLoadAllProgress(allPhotos.length, total, `正在收集媒体… 已读取 ${allPhotos.length}${total ? ` / ${total}` : ''} 条`);
+        const loadMore = $('#load-more');
+        if (loadMore) loadMore.innerHTML = `<div class="spinner"></div>正在收集全部媒体… ${allPhotos.length}${total ? ` / ${total}` : ''}`;
+        if (!page.has_more || !page.next_cursor) break;
+        cursor = page.next_cursor;
+        if (pageCount % 4 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      if (state.randomAlbumBulkCancelRequested) throw new DOMException('Aborted', 'AbortError');
+      updateRandomAlbumLoadAllProgress(allPhotos.length, total || allPhotos.length, '正在打乱顺序…');
+      photos = shuffleRandomAlbumBatch(allPhotos);
+      state.randomAlbumPhotos = photos;
+      state.randomAlbumCursor = '';
+      state.randomAlbumHasMore = false;
+      state.randomAlbumLoaded = true;
+      state.randomAlbumLoading = false;
+      if (state.view === 'random-album') renderRandomAlbumGrid();
+    }
+
+    updateRandomAlbumLoadAllProgress(0, photos.length, '正在预加载缩略图…');
+    await preloadThumbnailsInBatches(
+      photos,
+      (loaded, total) => updateRandomAlbumLoadAllProgress(loaded, total, `正在预加载缩略图… ${loaded} / ${total}`),
+      () => state.randomAlbumBulkCancelRequested,
+    );
+    if (state.randomAlbumBulkCancelRequested) {
+      updateRandomAlbumLoadAllProgress(0, photos.length, '已取消预加载');
+      showToast('已取消加载全部乱序相册');
+    } else {
+      updateRandomAlbumLoadAllProgress(photos.length, photos.length, `加载完成，共 ${photos.length} 条媒体`);
+      showToast('全部乱序相册媒体已加载');
+      setTimeout(() => $('#random-album-load-all-modal')?.classList.remove('open'), 700);
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      updateRandomAlbumLoadAllProgress(0, state.randomAlbumPhotos.length, '已取消加载');
+      showToast('已取消加载全部乱序相册');
+    } else {
+      console.error(e);
+      updateRandomAlbumLoadAllProgress(0, state.randomAlbumPhotos.length, '加载失败，请稍后重试');
+      showToast('加载全部乱序相册失败');
+    }
+  } finally {
+    state.randomAlbumBulkLoading = false;
+    state.randomAlbumLoading = false;
+    state.randomAlbumBulkAbortController = null;
+    state.blockingInteraction = false;
+    if (startBtn) {
+      startBtn.disabled = false;
+      startBtn.textContent = '重新加载';
+    }
+    if (cancelBtn) {
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = '关闭';
+    }
+  }
 }
 
 async function loadMoreRandomAlbum() {
@@ -1571,8 +1795,9 @@ async function loadMoreRandomAlbum() {
 async function renderRandomAlbum() {
   $('#topbar-title').textContent = '乱序相册';
   $('#topbar-meta').innerHTML = `<div class="topbar-hint">会先收集当前资源库的全部媒体，再统一打乱成一个随机顺序。</div>` + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="reshuffle-btn">${icons.shuffle} 重新打乱</button>`;
+  $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="random-load-all-btn" type="button">加载全部</button><button class="btn btn-sm" id="reshuffle-btn">${icons.shuffle} 重新打乱</button></div>`;
   bindGridScaleControl();
+  $('#random-load-all-btn').addEventListener('click', openRandomAlbumLoadAllModal);
   $('#reshuffle-btn').addEventListener('click', async () => {
     state.randomAlbumSeed = Date.now();
     state.randomAlbumPhotos = [];
@@ -1995,7 +2220,7 @@ function renderSettingsContent() {
     <div class="settings-group">
       <div class="settings-control">
         <label for="settings-grid-size"><span>缩略图大小</span><span id="settings-grid-size-value">${state.gridSize}px</span></label>
-        <input class="input" id="settings-grid-size" type="range" min="100" max="260" step="10" value="${state.gridSize}">
+        <input class="input" id="settings-grid-size" type="range" min="72" max="260" step="8" value="${state.gridSize}">
       </div>
       <div class="settings-control">
         <label for="settings-grid-gap"><span>图像间距</span><span id="settings-grid-gap-value">${state.gridGap}px</span></label>
@@ -2244,13 +2469,14 @@ function renderSettingsContent() {
 async function renderTimeline() {
   $('#topbar-title').textContent = '时间线';
   $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = `<button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button>`;
+  $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="timeline-load-all-btn" type="button">加载全部</button><button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button></div>`;
   bindGridScaleControl();
   $('#timeline-order-btn').addEventListener('click', () => {
     state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
     state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
     switchView('timeline');
   });
+  $('#timeline-load-all-btn').addEventListener('click', openTimelineLoadAllModal);
   $('#upload-btn').addEventListener('click', openUploadModal);
 
   $('#content').innerHTML = `
@@ -2274,6 +2500,7 @@ async function renderTimeline() {
   state.photos = [];
   state.timelineCursor = '';
   state.timelineHasMore = true;
+  state.timelineTotal = 0;
   const hasPendingFocus = !!state.pendingTimelinePhotoID;
   await loadShareMap();   // b-2: 加载分享状态
   await loadMoreTimeline();
@@ -2287,6 +2514,155 @@ function setTimelineJumpStatus(message = '') {
   if (!status) return;
   status.textContent = message;
   status.hidden = !message;
+}
+
+function renderTimelineLoadAllModal() {
+  return `<div class="modal-overlay timeline-load-all-modal" id="timeline-load-all-modal">
+  <div class="modal" style="width:500px">
+    <div class="modal-title">立即加载全部时间线媒体</div>
+    <p class="modal-copy">加载期间会暂时锁定 App，只优先读取时间线和缩略图，减少后续浏览时被分页加载打断。</p>
+    <div class="timeline-load-progress">
+      <div class="timeline-load-progress-bar" id="timeline-load-all-bar"></div>
+    </div>
+    <div class="timeline-load-status" id="timeline-load-all-status">准备加载…</div>
+    <div class="modal-footer">
+      <button class="btn" id="timeline-load-all-cancel">取消</button>
+      <button class="btn btn-primary" id="timeline-load-all-start">开始加载</button>
+    </div>
+  </div>
+</div>`;
+}
+
+function openTimelineLoadAllModal() {
+  const modal = $('#timeline-load-all-modal');
+  if (!modal || state.timelineBulkLoading) return;
+  if (!state.timelineHasMore) {
+    showToast('时间线已全部加载');
+    return;
+  }
+  modal.classList.add('open');
+  updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal || state.photos.length || 0, '准备加载全部时间线媒体…');
+  $('#timeline-load-all-start').disabled = false;
+  $('#timeline-load-all-start').textContent = '开始加载';
+  $('#timeline-load-all-cancel').disabled = false;
+  $('#timeline-load-all-cancel').textContent = '取消';
+  $('#timeline-load-all-cancel').onclick = closeOrCancelTimelineLoadAll;
+  $('#timeline-load-all-start').onclick = loadAllTimelinePhotos;
+}
+
+function closeOrCancelTimelineLoadAll() {
+  if (state.timelineBulkLoading) {
+    state.timelineBulkCancelRequested = true;
+    if (state.timelineBulkAbortController) state.timelineBulkAbortController.abort();
+    updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal, '正在取消…');
+    $('#timeline-load-all-cancel').disabled = true;
+    return;
+  }
+  const modal = $('#timeline-load-all-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function updateTimelineLoadAllProgress(loaded, total, message = '') {
+  const bar = $('#timeline-load-all-bar');
+  const status = $('#timeline-load-all-status');
+  const safeLoaded = Math.max(0, Number(loaded) || 0);
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const percent = safeTotal > 0 ? Math.min(100, Math.round((safeLoaded / safeTotal) * 100)) : 0;
+  if (bar) bar.style.width = `${percent}%`;
+  if (status) {
+    const countText = safeTotal > 0 ? `${safeLoaded} / ${safeTotal}` : `${safeLoaded}`;
+    status.textContent = message || `已加载 ${countText} 条媒体`;
+  }
+}
+
+function preloadTimelineThumbnails(photos) {
+  (photos || []).forEach(photo => {
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = mediaThumbURL(photo);
+  });
+}
+
+async function fetchTimelinePage(cursor, limit, signal) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    order: state.timelineOrder === 'asc' ? 'asc' : 'desc',
+  });
+  if (cursor) params.set('cursor', cursor);
+  const response = await fetch(`/api/media?${params.toString()}`, { signal });
+  if (!response.ok) throw await response.json();
+  return response.json();
+}
+
+async function loadAllTimelinePhotos() {
+  if (state.timelineBulkLoading) return;
+  state.timelineBulkLoading = true;
+  state.timelineBulkCancelRequested = false;
+  state.blockingInteraction = true;
+  disconnectLoadMoreObserver();
+  $('#timeline-load-all-start').disabled = true;
+  $('#timeline-load-all-start').textContent = '加载中…';
+  $('#timeline-load-all-cancel').disabled = false;
+  $('#timeline-load-all-cancel').textContent = '取消加载';
+  try {
+    let cursor = state.timelineCursor;
+    let hasMore = state.timelineHasMore;
+    let loaded = state.photos.length;
+    let total = state.timelineTotal || loaded;
+    preloadTimelineThumbnails(state.photos);
+    updateTimelineLoadAllProgress(loaded, total, `正在加载… 已读取 ${loaded} 条`);
+
+    while (hasMore && !state.timelineBulkCancelRequested) {
+      state.timelineBulkAbortController = new AbortController();
+      const page = await fetchTimelinePage(cursor, 300, state.timelineBulkAbortController.signal);
+      const photos = page.photos || [];
+      if (Number.isFinite(Number(page.total))) total = Number(page.total);
+      state.timelineTotal = total;
+      state.photos.push(...photos);
+      state.timelineCursor = page.next_cursor || '';
+      state.timelineHasMore = page.has_more || false;
+      cursor = state.timelineCursor;
+      hasMore = state.timelineHasMore;
+      loaded = state.photos.length;
+      renderTimelineGroups(photos, loaded - photos.length);
+      preloadTimelineThumbnails(photos);
+      updateTimelineLoadAllProgress(loaded, total, `正在加载… 已读取 ${loaded}${total ? ` / ${total}` : ''} 条`);
+      const loadMore = $('#load-more');
+      if (loadMore) loadMore.innerHTML = `<div class="spinner"></div>正在加载全部时间线… ${loaded}${total ? ` / ${total}` : ''}`;
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+
+    if (state.timelineBulkCancelRequested) {
+      updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal, `已取消，当前已加载 ${state.photos.length} 条`);
+      showToast('已取消加载全部时间线');
+    } else {
+      state.timelineHasMore = false;
+      updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal || state.photos.length, `加载完成，共 ${state.photos.length} 条媒体`);
+      showToast('全部时间线媒体已加载');
+      setTimeout(() => $('#timeline-load-all-modal')?.classList.remove('open'), 700);
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal, `已取消，当前已加载 ${state.photos.length} 条`);
+      showToast('已取消加载全部时间线');
+    } else {
+      console.error(e);
+      updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal, '加载失败，请稍后重试');
+      showToast('加载全部时间线失败');
+    }
+  } finally {
+    state.timelineBulkLoading = false;
+    state.timelineBulkAbortController = null;
+    state.blockingInteraction = false;
+    $('#timeline-load-all-start').disabled = false;
+    $('#timeline-load-all-start').textContent = '重新加载';
+    $('#timeline-load-all-cancel').disabled = false;
+    $('#timeline-load-all-cancel').textContent = '关闭';
+    updateLoadMoreUI('load-more', state.timelineHasMore);
+    if (state.view === 'timeline') {
+      observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading);
+    }
+  }
 }
 
 async function renderFavorites() {
@@ -2326,7 +2702,7 @@ async function renderFavorites() {
 }
 
 async function loadMoreTimeline() {
-  if (state.timelineLoading || !state.timelineHasMore) return;
+  if (state.timelineLoading || state.timelineBulkLoading || !state.timelineHasMore) return;
   state.timelineLoading = true;
   try {
     const params = new URLSearchParams({
@@ -2336,6 +2712,7 @@ async function loadMoreTimeline() {
     if (state.timelineCursor) params.set('cursor', state.timelineCursor);
     const url = `/api/media?${params.toString()}`;
     const page = await api.get(url);
+    state.timelineTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.timelineTotal;
     state.photos.push(...(page.photos || []));
     state.timelineCursor = page.next_cursor || '';
     state.timelineHasMore = page.has_more || false;
@@ -2344,7 +2721,7 @@ async function loadMoreTimeline() {
   finally {
     state.timelineLoading = false;
     updateLoadMoreUI('load-more', state.timelineHasMore);
-    maybeLoadMoreImmediately('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading);
+    maybeLoadMoreImmediately('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading);
   }
 }
 
@@ -2457,7 +2834,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteToggle = opts.trashMode
     ? ''
-    : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}" type="button" aria-label="${photo.is_favorite ? '取消收藏' : '加入收藏'}">${icons.favoriteSmall}</button>`;
+    : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}" type="button" aria-label="${photo.is_favorite ? '取消收藏' : '加入收藏'}" title="${photo.is_favorite ? '已收藏，点击取消' : '加入个人收藏'}">${icons.favoriteSmall}</button>`;
   const shareBadge = isShared
     ? `<span class="share-badge">${icons.shareSmall}</span>` : '';
   const mediaBadge = isVideoMedia(photo)
@@ -2524,7 +2901,7 @@ function findPhotoThumb(id) {
   return document.querySelector(`.photo-thumb[data-id="${id}"]`);
 }
 
-function photoContextMenuItems(photo, thumbEl, listRef) {
+function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
   const isSelected = state.selected.has(photo.id);
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteLabel = photo.is_favorite ? '取消收藏' : '加入个人收藏';
@@ -2536,6 +2913,12 @@ function photoContextMenuItems(photo, thumbEl, listRef) {
     { label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     { label: '下载', action: () => triggerDownload(`/api/media/${photo.id}/download`) },
   ];
+  if (containingAlbums.length) {
+    items.push('-');
+    containingAlbums.forEach(album => {
+      items.push({ label: `在相册中查看：${album.name}`, action: () => openInAlbum(album, photo.id) });
+    });
+  }
   items.push(
     '-',
     { label: '添加到相册…', action: () => openAlbumPickerModal([photo.id]) },
@@ -2547,8 +2930,14 @@ function photoContextMenuItems(photo, thumbEl, listRef) {
 }
 
 // 时间线图片右键菜单
-function showPhotoContextMenu(x, y, photo, thumbEl, listRef) {
-  showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef));
+async function showPhotoContextMenu(x, y, photo, thumbEl, listRef) {
+  let albums = [];
+  try {
+    albums = await api.get(`/api/media/${photo.id}/albums`);
+  } catch (e) {
+    console.error('加载媒体所在相册失败:', e);
+  }
+  showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef, albums || []));
 }
 
 // 回收站图片右键菜单 (b-4)
@@ -2586,6 +2975,7 @@ function updateFavoriteButtonsInDOM(photoId, favorite) {
   document.querySelectorAll(`.photo-thumb[data-id="${photoId}"] .favorite-toggle`).forEach(button => {
     button.classList.toggle('active', favorite);
     button.setAttribute('aria-label', favorite ? '取消收藏' : '加入收藏');
+    button.title = favorite ? '已收藏，点击取消' : '加入个人收藏';
   });
 }
 
@@ -2742,6 +3132,13 @@ function openInTimeline(photoId) {
   switchView('timeline');
 }
 
+function openInAlbum(album, photoId) {
+  if (!album || !album.id) return;
+  state.pendingAlbumPhotoID = photoId;
+  closeLightbox();
+  openAlbumDetail(album);
+}
+
 async function focusPendingTimelinePhoto() {
   if (!state.pendingTimelinePhotoID) return false;
   const photoId = state.pendingTimelinePhotoID;
@@ -2752,6 +3149,7 @@ async function focusPendingTimelinePhoto() {
     setTimelineJumpStatus(`正在时间线中定位媒体… 已加载 ${state.photos.length} 条`);
     updateBlockingProgress(`已加载 ${state.photos.length} 条媒体，继续向下查找…`);
     await loadMoreTimeline();
+    if (state.timelineBulkLoading) break;
     thumb = findPhotoThumb(photoId);
   }
   state.pendingTimelinePhotoID = null;
@@ -2805,16 +3203,23 @@ function renderAlbumGrid() {
   wrap.appendChild(grid);
 }
 
+function isFolderAlbum(album) {
+  return (album && album.description || '').trim() === '自动从文件夹导入';
+}
+
 function makeAlbumCard(album) {
-  const card = el('div', `album-card${state.albumViewMode === 'list' ? ' list' : ''}`);
+  const albumKind = isFolderAlbum(album) ? 'folder' : 'user';
+  const albumKindLabel = albumKind === 'folder' ? '文件夹' : '自建';
+  const card = el('div', `album-card album-card-${albumKind}${state.albumViewMode === 'list' ? ' list' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const coverHtml = album.cover_uuid
-    ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${album.name}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
+    ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(album.name)}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
     : `<div class="album-cover-empty">${icons.photo}</div>`;
   card.innerHTML = `
 <div class="album-cover">${coverHtml}</div>
 <div class="album-info">
-  <div class="album-name">${album.name}</div>
+  <div class="album-meta-row"><span class="album-kind">${albumKindLabel}</span></div>
+  <div class="album-name">${escapeHTML(album.name)}</div>
   <div class="album-count">${album.photo_count || 0} 条照片/视频</div>
 </div>`;
   card.addEventListener('click', () => openAlbumDetail(album));
@@ -2890,9 +3295,11 @@ async function renderAlbumDetail() {
   $('#delete-sel-btn').addEventListener('click', deleteSelected);
   $('#add-to-album-btn').addEventListener('click', () => openAlbumPickerModal(null));
   state.albumPhotos = []; state.albumCursor = ''; state.albumHasMore = true;
+  const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   await loadMoreAlbumPhotos();
+  const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
   observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
-  restoreViewScroll('album-detail', album.id);
+  if (!hasPendingAlbumFocus || !focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
 }
 async function loadMoreAlbumPhotos() {
   if (state.albumLoading || !state.albumHasMore || !state.currentAlbum) return;
@@ -2911,6 +3318,25 @@ async function loadMoreAlbumPhotos() {
     updateLoadMoreUI('load-more', state.albumHasMore);
     maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   }
+}
+
+async function focusPendingAlbumPhoto() {
+  if (!state.pendingAlbumPhotoID) return false;
+  const photoId = state.pendingAlbumPhotoID;
+  let thumb = findPhotoThumb(photoId);
+  while (!thumb && state.albumHasMore && !state.albumLoading) {
+    await loadMoreAlbumPhotos();
+    thumb = findPhotoThumb(photoId);
+  }
+  state.pendingAlbumPhotoID = null;
+  if (!thumb) {
+    showToast('目标媒体暂未在当前相册中找到');
+    return false;
+  }
+  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  thumb.classList.add('photo-thumb-focus');
+  setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
+  return true;
 }
 function renderAlbumGroups(newPhotos) {
   const container = $('#album-groups');
@@ -3078,6 +3504,7 @@ function updateLoadMoreUI(id, hasMore) {
 // 当首屏内容不足、底部哨兵一直在可视区时，IntersectionObserver 可能只触发一次，
 // 这里在每次加载结束后主动检查一次，确保能继续把后续页面补出来。
 function maybeLoadMoreImmediately(id, loadFn, canLoad) {
+  if (state.blockingInteraction) return;
   const sentinel = document.getElementById(id);
   if (!sentinel || !canLoad()) return;
   const rect = sentinel.getBoundingClientRect();
@@ -3092,31 +3519,40 @@ function maybeLoadMoreImmediately(id, loadFn, canLoad) {
 function renderLightbox() {
   return `<div class="lightbox" id="lightbox">
   <div class="lightbox-header">
-    <span class="lb-title" id="lb-title"></span>
-    <label class="lightbox-zoom-wrap" for="lb-zoom">
-      <span id="lb-zoom-value">100%</span>
-      <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="300" step="10" aria-label="媒体缩放">
-    </label>
-    <button class="btn-icon lightbox-fit-height" style="color:#ccc" id="lb-fit-height" title="适应高度（Alt + 0）">适应高度</button>
-    <div class="lightbox-slideshow-controls">
-      <button class="btn-icon lightbox-play-btn" style="color:#ccc" id="lb-slideshow-toggle"></button>
-      <select class="lightbox-select" id="lb-slideshow-mode" aria-label="播放模式">
-        <option value="sequential">顺序</option>
-        <option value="random">随机</option>
-      </select>
-      <label class="lightbox-slider-wrap" for="lb-slideshow-interval">
-        <span id="lb-slideshow-interval-value">5 秒</span>
-        <input class="lightbox-slider" id="lb-slideshow-interval" type="range" min="1" max="30" step="1" aria-label="播放间隔">
-      </label>
-      <label class="lightbox-loop-toggle" for="lb-slideshow-loop">
-        <input type="checkbox" id="lb-slideshow-loop">
-        <span>循环</span>
-      </label>
+    <div class="lightbox-header-main">
+      <button class="btn-icon lightbox-back-btn" id="lb-close">${icons.prev}<span>返回</span></button>
+      <span class="lb-title" id="lb-title"></span>
     </div>
-    <button class="btn-icon" style="color:#ccc" id="lb-download">下载</button>
-    <button class="btn-icon" style="color:#ccc" id="lb-favorite">${icons.favorite}</button>
-    <button class="btn-icon" style="color:#ccc" id="lb-share">${icons.share}</button>
-    <button class="btn-icon" style="color:#ccc" id="lb-close">${icons.prev} 返回</button>
+    <div class="lightbox-header-controls">
+      <div class="lightbox-control-pill lightbox-zoom-panel">
+        <label class="lightbox-zoom-wrap" for="lb-zoom">
+          <span class="lightbox-control-label">缩放</span>
+          <span id="lb-zoom-value">100%</span>
+          <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="300" step="10" aria-label="媒体缩放">
+        </label>
+        <button class="btn-icon lightbox-fit-height" id="lb-fit-height" title="适应高度（Alt + 0）">适应高度</button>
+      </div>
+      <div class="lightbox-control-pill lightbox-slideshow-controls">
+        <button class="btn-icon lightbox-play-btn" id="lb-slideshow-toggle"></button>
+        <select class="lightbox-select" id="lb-slideshow-mode" aria-label="播放模式">
+          <option value="sequential">顺序</option>
+          <option value="random">随机</option>
+        </select>
+        <label class="lightbox-slider-wrap" for="lb-slideshow-interval">
+          <span id="lb-slideshow-interval-value">5 秒</span>
+          <input class="lightbox-slider" id="lb-slideshow-interval" type="range" min="1" max="30" step="1" aria-label="播放间隔">
+        </label>
+        <label class="lightbox-loop-toggle" for="lb-slideshow-loop">
+          <input type="checkbox" id="lb-slideshow-loop">
+          <span>循环</span>
+        </label>
+      </div>
+    </div>
+    <div class="lightbox-action-group">
+      <button class="btn-icon" id="lb-download">下载</button>
+      <button class="btn-icon" id="lb-favorite">${icons.favorite}</button>
+      <button class="btn-icon" id="lb-share">${icons.share}</button>
+    </div>
   </div>
   <div class="lightbox-body">
     <div class="lightbox-loading" id="lb-loading"><div class="spinner"></div><span>媒体加载中…</span></div>
@@ -3149,7 +3585,18 @@ function bindGlobal() {
   window.addEventListener('scroll', () => saveViewScroll(), { passive: true });
   document.addEventListener('keydown', e => {
     if (handleViewNumberShortcut(e)) return;
-    if (e.key === 'Escape') closeContextMenu();
+    if (e.key === 'Escape') {
+      if (_ctxMenu) {
+        closeContextMenu();
+        return;
+      }
+      if (!$('#lightbox').classList.contains('open') && state.view === 'album-detail' && !document.querySelector('.modal-overlay.open')) {
+        e.preventDefault();
+        switchView('albums');
+        return;
+      }
+      closeContextMenu();
+    }
     if (!$('#lightbox').classList.contains('open')) return;
     handleLightboxKeydown(e);
   }, true);
@@ -3266,12 +3713,19 @@ function lbRender() {
     img.removeAttribute('src');
     video.classList.remove('hidden');
     video.preload = 'auto';
-    video.onloadeddata = () => setLightboxMediaLoading(false);
+    video.onloadeddata = () => {
+      setLightboxMediaLoading(false);
+      applyLightboxZoom();
+    };
+    video.onloadedmetadata = applyLightboxZoom;
     video.onerror = () => setLightboxMediaLoading(false);
     video.src = mediaFileURL(p);
     video.poster = mediaThumbURL(p);
     video.load();
-    if (video.readyState >= 2) setLightboxMediaLoading(false);
+    if (video.readyState >= 2) {
+      setLightboxMediaLoading(false);
+      applyLightboxZoom();
+    }
     if (state.slideshowPlaying || state.experimentalAutoplayVideo) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
@@ -3279,14 +3733,21 @@ function lbRender() {
     video.classList.add('hidden');
     video.preload = 'metadata';
     video.onloadeddata = null;
+    video.onloadedmetadata = null;
     video.onerror = null;
     video.removeAttribute('src');
     video.load();
     img.classList.remove('hidden');
-    img.onload = () => setLightboxMediaLoading(false);
+    img.onload = () => {
+      setLightboxMediaLoading(false);
+      applyLightboxZoom();
+    };
     img.onerror = () => setLightboxMediaLoading(false);
     img.src = mediaFileURL(p);
-    if (img.complete) setLightboxMediaLoading(false);
+    if (img.complete) {
+      setLightboxMediaLoading(false);
+      applyLightboxZoom();
+    }
   }
   $('#lb-title').textContent = p.original_name;
   $('#lb-favorite').innerHTML = `${icons.favorite} ${p.is_favorite ? '取消收藏' : '收藏'}`;
@@ -3461,8 +3922,8 @@ function renderUploadModal() {
     <div class="upload-zone" id="drop-zone">
       ${icons.upload}
       <div style="margin-top:8px">拖拽图片或视频到这里，或点击选择文件</div>
-      <div style="font-size:.8rem;margin-top:4px">支持 JPG、PNG、GIF、WebP、MP4、MOV、M4V、WebM</div>
-      <input type="file" id="file-input" accept="image/*,.mp4,.mov,.m4v,.webm,video/*" multiple aria-hidden="true">
+      <div style="font-size:.8rem;margin-top:4px">支持 JPG、PNG、GIF、WebP、BMP、TIFF、MP4、MOV、M4V、WebM、MKV、AVI、MPEG、TS、3GP、OGV</div>
+      <input type="file" id="file-input" accept="image/*,.bmp,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi,.ts,.mts,.m2ts,.mpg,.mpeg,.3gp,.3g2,.ogv,video/*" multiple aria-hidden="true">
     </div>
     <div class="upload-queue" id="upload-queue"></div>
     <div class="modal-footer">
@@ -3510,9 +3971,9 @@ function bindUploadZone() {
 }
 async function handleFiles(fileList) {
   const files = [...fileList].filter(f => {
-    if (f.type.startsWith('image/')) return true;
     const name = (f.name || '').toLowerCase();
-    return f.type.startsWith('video/') || ['.mp4', '.mov', '.m4v', '.webm'].some(ext => name.endsWith(ext));
+    if (f.type.startsWith('image/') || supportedImageExtensions.some(ext => name.endsWith(ext))) return true;
+    return f.type.startsWith('video/') || supportedVideoExtensions.some(ext => name.endsWith(ext));
   });
   if (!files.length) return;
   const queue = $('#upload-queue');
@@ -3555,7 +4016,7 @@ async function uploadFile(file, id, job) {
   if (stat) { stat.textContent = '上传中'; stat.className = 'up-status'; }
   const fd = new FormData();
   const lowerName = (file.name || '').toLowerCase();
-  const isVideo = file.type.startsWith('video/') || ['.mp4', '.mov', '.m4v', '.webm'].some(ext => lowerName.endsWith(ext));
+  const isVideo = file.type.startsWith('video/') || supportedVideoExtensions.some(ext => lowerName.endsWith(ext));
   fd.append(isVideo ? 'media' : 'photo', file);
   // 传递浏览器 File 对象的本地最后修改时间，供后端在无 EXIF 时作为回退时间。
   if (file.lastModified) {

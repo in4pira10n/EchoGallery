@@ -45,6 +45,10 @@ func (s *AlbumService) ListAlbums(userID int64) ([]*storage.Album, error) {
 	return s.repo.ListAlbums(userID)
 }
 
+func (s *AlbumService) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
+	return s.repo.ListAlbumsForPhoto(photoID, userID)
+}
+
 // UpdateAlbum 更新相册信息
 func (s *AlbumService) UpdateAlbum(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error) {
 	album, err := s.repo.GetAlbumByID(id, userID)

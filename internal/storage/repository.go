@@ -58,6 +58,9 @@ type Repository interface {
 	// ListAlbums 查询用户的所有相册
 	ListAlbums(userID int64) ([]*Album, error)
 
+	// ListAlbumsForPhoto 查询包含指定图片/视频的相册
+	ListAlbumsForPhoto(photoID int64, userID int64) ([]*Album, error)
+
 	// UpdateAlbum 更新相册信息（名称、描述、封面）
 	UpdateAlbum(album *Album) error
 

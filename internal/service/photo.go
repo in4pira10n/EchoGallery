@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -157,7 +158,29 @@ func (s *PhotoService) ThumbnailPath(photo *storage.Photo) string {
 	if photo != nil && photo.MediaKind == storage.MediaKindVideo {
 		return s.PosterPath(photo)
 	}
+	return filepath.Join(s.thumbnailPath, photo.UUID+".webp")
+}
+
+func (s *PhotoService) LegacyThumbnailPath(photo *storage.Photo) string {
+	if photo == nil {
+		return ""
+	}
 	return filepath.Join(s.thumbnailPath, photo.UUID+".jpg")
+}
+
+func (s *PhotoService) ThumbnailCandidates(photo *storage.Photo) []string {
+	if photo == nil {
+		return nil
+	}
+	if photo.MediaKind == storage.MediaKindVideo {
+		candidates := []string{s.PosterPath(photo)}
+		legacy := filepath.Join(s.thumbnailPath, photo.UUID+".jpg")
+		if !strings.EqualFold(legacy, candidates[0]) {
+			candidates = append(candidates, legacy)
+		}
+		return candidates
+	}
+	return []string{s.ThumbnailPath(photo), s.LegacyThumbnailPath(photo)}
 }
 
 // ManagedMediaRelPath 返回应用内部托管媒体文件的相对路径。

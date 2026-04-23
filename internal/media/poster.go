@@ -19,7 +19,7 @@ import (
 var ErrPosterGeneratorUnavailable = errors.New("ffmpeg 不可用")
 
 func PosterPath(storagePath, uuid string) string {
-	return filepath.Join(storagePath, uuid+".jpg")
+	return filepath.Join(storagePath, uuid+".webp")
 }
 
 func GeneratePoster(videoPath, posterPath string, maxEdge int) error {

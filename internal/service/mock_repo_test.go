@@ -182,6 +182,23 @@ func (m *mockRepo) ListAlbums(userID int64) ([]*storage.Album, error) {
 	return albums, nil
 }
 
+func (m *mockRepo) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
+	var albums []*storage.Album
+	for albumID, photoIDs := range m.albumPhotos {
+		a, ok := m.albums[albumID]
+		if !ok || a.CreatedBy != userID {
+			continue
+		}
+		for _, id := range photoIDs {
+			if id == photoID {
+				albums = append(albums, a)
+				break
+			}
+		}
+	}
+	return albums, nil
+}
+
 func (m *mockRepo) UpdateAlbum(album *storage.Album) error {
 	m.albums[album.ID] = album
 	return nil
