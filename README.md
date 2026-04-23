@@ -2,6 +2,8 @@
 
 A lightweight local photo gallery app.
 
+<img width="1440" height="900" alt="截屏2026-04-23 下午9 40 45 (2)" src="https://github.com/user-attachments/assets/3df413ae-91f5-4087-a7d2-9a9032a65e7d" />
+
 ## Intro
 
 EchoGallery 是一个本地相册管理 Web 应用，适合想在自己电脑或局域网内浏览、管理和分享照片/视频的用户。
