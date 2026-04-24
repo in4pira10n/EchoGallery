@@ -68,14 +68,10 @@ function formatSize(bytes) {
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / 1048576).toFixed(1) + ' MB';
 }
-function formatSizeExact(bytes) {
-  if (!Number.isFinite(Number(bytes)) || Number(bytes) < 0) return '—';
-  return `${formatSize(Number(bytes))} (${Number(bytes).toLocaleString('zh-CN')} B)`;
-}
-function fileExtension(name) {
-  const ext = String(name || '').split('.').pop();
-  if (!ext || ext === String(name || '')) return '—';
-  return ext.toUpperCase();
+function formatSizeMB(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '—';
+  return `${(value / 1048576).toFixed(1)} MB`;
 }
 function escapeHTML(value) {
   return String(value == null ? '' : value)
@@ -537,6 +533,26 @@ function initLightboxZoom() {
   state.lightboxZoom = 100;
   state.lightboxZoomMode = 'height';
 }
+function resetLightboxFocusPoint() {
+  state.lightboxFocusPoint = {
+    mediaX: 0.5,
+    mediaY: 0.5,
+    viewportX: 0.5,
+    viewportY: 0.5,
+  };
+  state.lightboxPointerClientX = 0;
+  state.lightboxPointerClientY = 0;
+  state.lightboxPointerInside = false;
+}
+function resetLightboxTemporaryZoom() {
+  syncLightboxTemporaryZoom(false);
+}
+function lightboxEffectiveZoomState() {
+  if (state.lightboxBoostActive) {
+    return { zoom: 300, mode: 'scale' };
+  }
+  return { zoom: state.lightboxZoom, mode: state.lightboxZoomMode };
+}
 function setLightboxZoom(value) {
   state.lightboxZoom = Math.min(300, Math.max(50, Number(value) || 100));
   state.lightboxZoomMode = 'scale';
@@ -562,15 +578,64 @@ function lightboxMediaNaturalSize() {
     height: Number(photo.height) || (video && video.videoHeight) || 0,
   };
 }
-function lightboxViewportSize(body) {
+function lightboxViewportMetrics(body) {
   if (!body) return { width: 0, height: 0 };
   const style = window.getComputedStyle(body);
-  const horizontalPadding = parseFloat(style.paddingLeft || '0') + parseFloat(style.paddingRight || '0');
-  const verticalPadding = parseFloat(style.paddingTop || '0') + parseFloat(style.paddingBottom || '0');
+  const paddingLeft = parseFloat(style.paddingLeft || '0');
+  const paddingRight = parseFloat(style.paddingRight || '0');
+  const paddingTop = parseFloat(style.paddingTop || '0');
+  const paddingBottom = parseFloat(style.paddingBottom || '0');
   return {
-    width: Math.max(1, body.clientWidth - horizontalPadding),
-    height: Math.max(1, body.clientHeight - verticalPadding),
+    width: Math.max(1, body.clientWidth - paddingLeft - paddingRight),
+    height: Math.max(1, body.clientHeight - paddingTop - paddingBottom),
+    paddingLeft,
+    paddingTop,
+    paddingRight,
+    paddingBottom,
   };
+}
+function lightboxViewportSize(body) {
+  const { width, height } = lightboxViewportMetrics(body);
+  return { width, height };
+}
+function currentLightboxMediaElement() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!photo) return null;
+  return isVideoMedia(photo) ? $('#lb-video') : $('#lb-img');
+}
+function clampLightboxValue(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+function updateLightboxFocusPointFromPointer(clientX, clientY) {
+  const body = $('#lightbox .lightbox-body');
+  const media = currentLightboxMediaElement();
+  if (!body || !media) return;
+  const bodyRect = body.getBoundingClientRect();
+  const insideBody = clientX >= bodyRect.left && clientX <= bodyRect.right && clientY >= bodyRect.top && clientY <= bodyRect.bottom;
+  state.lightboxPointerClientX = clientX;
+  state.lightboxPointerClientY = clientY;
+  state.lightboxPointerInside = insideBody;
+  if (!insideBody) return;
+  const mediaRect = media.getBoundingClientRect();
+  const metrics = lightboxViewportMetrics(body);
+  const viewportX = clampLightboxValue((clientX - bodyRect.left - metrics.paddingLeft) / metrics.width, 0, 1);
+  const viewportY = clampLightboxValue((clientY - bodyRect.top - metrics.paddingTop) / metrics.height, 0, 1);
+  const mediaX = mediaRect.width > 0
+    ? clampLightboxValue((clientX - mediaRect.left) / mediaRect.width, 0, 1)
+    : 0.5;
+  const mediaY = mediaRect.height > 0
+    ? clampLightboxValue((clientY - mediaRect.top) / mediaRect.height, 0, 1)
+    : 0.5;
+  state.lightboxFocusPoint = { mediaX, mediaY, viewportX, viewportY };
+}
+function syncLightboxTemporaryZoom(active) {
+  const next = !!active;
+  if (state.lightboxBoostActive === next) return;
+  if (next && state.lightboxPointerInside) {
+    updateLightboxFocusPointFromPointer(state.lightboxPointerClientX, state.lightboxPointerClientY);
+  }
+  state.lightboxBoostActive = next;
+  applyLightboxZoom();
 }
 function applyLightboxZoom() {
   const img = $('#lb-img');
@@ -580,13 +645,15 @@ function applyLightboxZoom() {
   const body = $('#lightbox .lightbox-body');
   const fitHeightBtn = $('#lb-fit-height');
   const { width, height } = lightboxMediaNaturalSize();
-  let zoomed = state.lightboxZoom > 100;
+  const focusPoint = state.lightboxFocusPoint || { mediaX: 0.5, mediaY: 0.5, viewportX: 0.5, viewportY: 0.5 };
+  const effective = lightboxEffectiveZoomState();
+  let zoomed = effective.zoom > 100;
   if (body && width > 0 && height > 0) {
     const { width: viewportWidth, height: viewportHeight } = lightboxViewportSize(body);
-    const fitScale = state.lightboxZoomMode === 'height'
+    const fitScale = effective.mode === 'height'
       ? viewportHeight / height
       : Math.min(viewportWidth / width, viewportHeight / height, 1);
-    const displayScale = fitScale * (state.lightboxZoom / 100);
+    const displayScale = fitScale * (effective.zoom / 100);
     const targetWidth = Math.max(1, Math.round(width * displayScale));
     const targetHeight = Math.max(1, Math.round(height * displayScale));
     if (img) {
@@ -604,6 +671,18 @@ function applyLightboxZoom() {
       video.style.height = `${targetHeight}px`;
     }
     zoomed = targetWidth > viewportWidth || targetHeight > viewportHeight;
+    const media = currentLightboxMediaElement();
+    if (media) {
+      const bodyRect = body.getBoundingClientRect();
+      const mediaRect = media.getBoundingClientRect();
+      const metrics = lightboxViewportMetrics(body);
+      const mediaLeft = mediaRect.left - bodyRect.left - metrics.paddingLeft + body.scrollLeft;
+      const mediaTop = mediaRect.top - bodyRect.top - metrics.paddingTop + body.scrollTop;
+      const targetScrollLeft = mediaLeft + targetWidth * focusPoint.mediaX - viewportWidth * focusPoint.viewportX;
+      const targetScrollTop = mediaTop + targetHeight * focusPoint.mediaY - viewportHeight * focusPoint.viewportY;
+      body.scrollLeft = clampLightboxValue(targetScrollLeft, 0, Math.max(0, body.scrollWidth - body.clientWidth));
+      body.scrollTop = clampLightboxValue(targetScrollTop, 0, Math.max(0, body.scrollHeight - body.clientHeight));
+    }
   } else {
     if (img) {
       img.style.transform = '';
@@ -621,8 +700,8 @@ function applyLightboxZoom() {
     }
   }
   if (body) body.classList.toggle('zoomed', zoomed);
-  if (fitHeightBtn) fitHeightBtn.classList.toggle('active', state.lightboxZoomMode === 'height');
-  if (label) label.textContent = state.lightboxZoomMode === 'height' ? '适应高度' : `${state.lightboxZoom}%`;
+  if (fitHeightBtn) fitHeightBtn.classList.toggle('active', effective.mode === 'height' && !state.lightboxBoostActive);
+  if (label) label.textContent = effective.mode === 'height' ? '适应高度' : `${effective.zoom}%`;
   if (input) input.value = String(state.lightboxZoom);
 }
 function initExperimentalSettings() {
@@ -821,7 +900,37 @@ function normalizeKeyToken(token) {
   if (upper === 'LEFT') return 'ARROWLEFT';
   if (upper === 'UP') return 'ARROWUP';
   if (upper === 'DOWN') return 'ARROWDOWN';
+  if (upper === 'CMD' || upper === 'COMMAND' || upper === 'SUPER' || upper === 'WIN') return 'META';
+  if (upper === 'CONTROL') return 'CTRL';
+  if (upper === 'OPTION') return 'ALT';
   return upper;
+}
+function keyTokenWithModifiers(base, modifiers = []) {
+  const order = ['CTRL', 'ALT', 'SHIFT', 'META'];
+  const uniqueModifiers = Array.from(new Set((modifiers || []).map(normalizeKeyToken)))
+    .filter(token => order.includes(token))
+    .sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return uniqueModifiers.length ? `${uniqueModifiers.join('+')}+${base}` : base;
+}
+function parseKeyBindingToken(spec) {
+  const parts = String(spec || '').split('+').map(part => part.trim()).filter(Boolean);
+  if (!parts.length) return '';
+  const modifiers = [];
+  let basePart = parts.pop();
+  parts.forEach(part => {
+    const normalized = normalizeKeyToken(part);
+    if (['CTRL', 'ALT', 'SHIFT', 'META'].includes(normalized)) modifiers.push(normalized);
+  });
+  if (basePart === ' ') basePart = 'SPACE';
+  const isSingleLetter = /^[A-Za-z]$/.test(basePart);
+  let base = normalizeKeyToken(basePart);
+  if (isSingleLetter) {
+    if (basePart === basePart.toUpperCase() && basePart !== basePart.toLowerCase() && !modifiers.includes('SHIFT')) {
+      modifiers.push('SHIFT');
+    }
+    base = basePart.toUpperCase();
+  }
+  return keyTokenWithModifiers(base, modifiers);
 }
 function parsePlayerKeymap(content) {
   const map = {};
@@ -832,7 +941,9 @@ function parsePlayerKeymap(content) {
     if (parts.length < 2) return;
     const key = parts.shift();
     const command = parts.shift();
-    map[normalizeKeyToken(key)] = { command, args: parts };
+    const bindingToken = parseKeyBindingToken(key);
+    if (!bindingToken) return;
+    map[bindingToken] = { command, args: parts };
   });
   return map;
 }
@@ -1111,8 +1222,13 @@ function executePlayerKeyAction(binding) {
 }
 function keyEventToken(e) {
   const raw = e.key && e.key.length === 1 ? e.key.toUpperCase() : e.key.toUpperCase();
-  if (raw === ' ') return 'SPACE';
-  return normalizeKeyToken(raw);
+  const base = raw === ' ' ? 'SPACE' : normalizeKeyToken(raw);
+  const modifiers = [];
+  if (e.ctrlKey && base !== 'CTRL') modifiers.push('CTRL');
+  if (e.altKey && base !== 'ALT') modifiers.push('ALT');
+  if (e.shiftKey && base !== 'SHIFT') modifiers.push('SHIFT');
+  if (e.metaKey && base !== 'META') modifiers.push('META');
+  return keyTokenWithModifiers(base, modifiers);
 }
 function handleLightboxKeydown(e) {
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === '0') {
@@ -1235,6 +1351,16 @@ const state = {
   pendingTimelinePhotoID: null,
   lightboxZoom: 100,
   lightboxZoomMode: 'height',
+  lightboxBoostActive: false,
+  lightboxFocusPoint: {
+    mediaX: 0.5,
+    mediaY: 0.5,
+    viewportX: 0.5,
+    viewportY: 0.5,
+  },
+  lightboxPointerClientX: 0,
+  lightboxPointerClientY: 0,
+  lightboxPointerInside: false,
   gridGap: 8,
   thumbRadius: 8,
   serverSettings: {
@@ -2466,11 +2592,51 @@ function renderSettingsContent() {
 }
 
 // ── 时间线视图 ─────────────────────────────────────────
+function renderSelectionBarMarkup({ countLabel = '条已选', extraAction = '' } = {}) {
+  return `<span id="sel-bar" class="selected-bar">
+    <span class="selected-count" id="sel-count">0</span> ${countLabel}
+    <button class="btn btn-sm" id="download-sel-btn">下载选中</button>
+    <button class="btn btn-sm" id="add-to-album-btn">${icons.album} 添加到相册</button>
+    ${extraAction}
+    <button class="btn-icon" id="clear-sel-btn">${icons.close}</button>
+  </span>`;
+}
+
+function bindSelectionBarHandlers({ extraButtonID = '', extraAction } = {}) {
+  $('#clear-sel-btn')?.addEventListener('click', clearSelection);
+  $('#download-sel-btn')?.addEventListener('click', downloadSelected);
+  $('#add-to-album-btn')?.addEventListener('click', () => openAlbumPickerModal(null));
+  if (extraButtonID && typeof extraAction === 'function') {
+    $(`#${extraButtonID}`)?.addEventListener('click', extraAction);
+  }
+  updateSelectionBar();
+}
+
+function renderTrashSelectionBarMarkup() {
+  return `<span id="trash-sel-bar" class="selected-bar">
+    <span class="selected-count" id="trash-sel-count">0</span> 条已选
+    <button class="btn btn-sm" id="restore-sel-btn">${icons.prev} 批量恢复</button>
+    <button class="btn btn-sm" id="hard-delete-sel-btn">${icons.trash} 批量删除</button>
+    <button class="btn-icon" id="trash-clear-sel-btn">${icons.close}</button>
+  </span>`;
+}
+
+function bindTrashSelectionBarHandlers() {
+  $('#trash-clear-sel-btn')?.addEventListener('click', () => { clearSelection(); updateTrashSelBar(); });
+  $('#restore-sel-btn')?.addEventListener('click', restoreSelected);
+  $('#hard-delete-sel-btn')?.addEventListener('click', hardDeleteSelected);
+  updateTrashSelBar();
+}
+
 async function renderTimeline() {
   $('#topbar-title').textContent = '时间线';
-  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderGridScaleControl();
+  $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
+    countLabel: '张已选',
+    extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
+  }) + `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="timeline-load-all-btn" type="button">加载全部</button><button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button></div>`;
   bindGridScaleControl();
+  bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
   $('#timeline-order-btn').addEventListener('click', () => {
     state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
     state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
@@ -2480,22 +2646,8 @@ async function renderTimeline() {
   $('#upload-btn').addEventListener('click', openUploadModal);
 
   $('#content').innerHTML = `
-<div class="toolbar">
-  <span id="sel-bar" class="selected-bar">
-    <span class="selected-count" id="sel-count">0</span> 张已选
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="download-sel-btn">下载选中</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="add-to-album-btn">${icons.album} 添加到相册</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="delete-sel-btn">${icons.trash} 删除</button>
-    <button class="btn-icon" style="color:#fff" id="clear-sel-btn">${icons.close}</button>
-  </span>
-</div>
 <div id="timeline-groups"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-
-  $('#clear-sel-btn').addEventListener('click', clearSelection);
-  $('#download-sel-btn').addEventListener('click', downloadSelected);
-  $('#delete-sel-btn').addEventListener('click', deleteSelected);
-  $('#add-to-album-btn').addEventListener('click', () => openAlbumPickerModal(null));
 
   state.photos = [];
   state.timelineCursor = '';
@@ -2667,28 +2819,18 @@ async function loadAllTimelinePhotos() {
 
 async function renderFavorites() {
   $('#topbar-title').textContent = '个人收藏';
-  $('#topbar-meta').innerHTML = `<span class="topbar-hint" id="favorite-total-hint">共 ${state.favoriteTotal || 0} 条</span>${renderGridScaleControl()}`;
+  $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
+    countLabel: '条已选',
+    extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.favorite} 取消收藏</button>`,
+  }) + `<span class="topbar-hint" id="favorite-total-hint">共 ${state.favoriteTotal || 0} 条</span>${renderGridScaleControl()}`;
   $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="download-all-favorites-btn">下载全部收藏</button>`;
   bindGridScaleControl();
+  bindSelectionBarHandlers({ extraButtonID: 'unfavorite-sel-btn', extraAction: unfavoriteSelected });
 
   $('#content').innerHTML = `
-<div class="toolbar">
-  <span id="sel-bar" class="selected-bar">
-    <span class="selected-count" id="sel-count">0</span> 条已选
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="download-sel-btn">下载选中</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="add-to-album-btn">${icons.album} 添加到相册</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="unfavorite-sel-btn">${icons.favorite} 取消收藏</button>
-    <button class="btn-icon" style="color:#fff" id="clear-sel-btn">${icons.close}</button>
-  </span>
-</div>
 <div id="favorite-groups"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-
-  $('#clear-sel-btn').addEventListener('click', clearSelection);
-  $('#download-sel-btn').addEventListener('click', downloadSelected);
   $('#download-all-favorites-btn').addEventListener('click', downloadAllFavorites);
-  $('#add-to-album-btn').addEventListener('click', () => openAlbumPickerModal(null));
-  $('#unfavorite-sel-btn').addEventListener('click', unfavoriteSelected);
 
   state.favoritePhotos = [];
   state.favoriteCursor = '';
@@ -3258,9 +3400,14 @@ async function renderAlbumDetail() {
     return;
   }
   $('#topbar-title').textContent = album.name;
-  $('#topbar-meta').innerHTML = renderGridScaleControl();
-  $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="download-album-btn">下载相册</button><button class="btn btn-danger btn-sm" id="delete-album-btn">删除相册</button><button class="btn btn-sm" id="back-albums-btn">← 返回相册</button>`;
+  $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
+    countLabel: '条已选',
+    extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
+  }) + renderGridScaleControl();
+  $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="back-albums-btn">返回相册</button><button class="btn btn-sm" id="download-album-btn">下载相册</button><button class="btn btn-danger btn-sm" id="delete-album-btn">删除相册</button>`;
   bindGridScaleControl();
+  bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
+  $('#back-albums-btn').addEventListener('click', () => switchView('albums'));
   $('#download-album-btn').addEventListener('click', () => {
     withButtonBusy($('#download-album-btn'), '打包中…', async () => {
 		triggerDownload(`/api/media/albums/${album.id}/download`);
@@ -3277,23 +3424,9 @@ async function renderAlbumDetail() {
       alert('删除相册失败: ' + (e.error || e));
     }
   });
-  $('#back-albums-btn').addEventListener('click', () => switchView('albums'));
 
   $('#content').innerHTML = `
-<div class="toolbar">
-  <span id="sel-bar" class="selected-bar">
-    <span class="selected-count" id="sel-count">0</span> 条已选
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="download-sel-btn">下载选中</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="add-to-album-btn">${icons.album} 添加到相册</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="delete-sel-btn">${icons.trash} 删除</button>
-    <button class="btn-icon" style="color:#fff" id="clear-sel-btn">${icons.close}</button>
-  </span>
-</div>
 <div id="album-groups"></div><div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-  $('#clear-sel-btn').addEventListener('click', clearSelection);
-  $('#download-sel-btn').addEventListener('click', downloadSelected);
-  $('#delete-sel-btn').addEventListener('click', deleteSelected);
-  $('#add-to-album-btn').addEventListener('click', () => openAlbumPickerModal(null));
   state.albumPhotos = []; state.albumCursor = ''; state.albumHasMore = true;
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   await loadMoreAlbumPhotos();
@@ -3363,28 +3496,17 @@ function renderAlbumGroups(newPhotos) {
 // ── 回收站 (b-4 修复) ─────────────────────────────────
 async function renderTrash() {
   $('#topbar-title').textContent = '回收站';
-  $('#topbar-meta').innerHTML = renderGridScaleControl();
+  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-danger btn-sm" id="empty-trash-btn">${icons.trash} 清空回收站</button>`;
   bindGridScaleControl();
+  bindTrashSelectionBarHandlers();
   $('#empty-trash-btn').addEventListener('click', emptyTrash);
 
   // c-5: 加入批量恢复工具栏
   $('#content').innerHTML = `
-<div class="toolbar">
-  <span id="trash-sel-bar" class="selected-bar">
-    <span class="selected-count" id="trash-sel-count">0</span> 条已选
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="restore-sel-btn">${icons.prev} 批量恢复</button>
-    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);border-color:transparent;color:#fff" id="hard-delete-sel-btn">${icons.trash} 批量删除</button>
-    <button class="btn-icon" style="color:#fff" id="trash-clear-sel-btn">${icons.close}</button>
-  </span>
-</div>
 <p style="font-size:.82rem;color:var(--text2);margin-bottom:8px">左键预览，右键或长按恢复/删除，点击勾选图标批量操作</p>
 <div id="trash-groups"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-
-  $('#trash-clear-sel-btn').addEventListener('click', () => { clearSelection(); updateTrashSelBar(); });
-  $('#restore-sel-btn').addEventListener('click', restoreSelected);
-  $('#hard-delete-sel-btn').addEventListener('click', hardDeleteSelected);
 
   state.trashPhotos = []; state.trashCursor = ''; state.trashHasMore = true;
   await loadMoreTrash();
@@ -3583,7 +3705,7 @@ function unlockPageScrollForLightbox() {
 function bindGlobal() {
   document.addEventListener('click', () => closeContextMenu());
   window.addEventListener('scroll', () => saveViewScroll(), { passive: true });
-  document.addEventListener('keydown', e => {
+  window.addEventListener('keydown', e => {
     if (handleViewNumberShortcut(e)) return;
     if (e.key === 'Escape') {
       if (_ctxMenu) {
@@ -3598,13 +3720,24 @@ function bindGlobal() {
       closeContextMenu();
     }
     if (!$('#lightbox').classList.contains('open')) return;
+    if (e.ctrlKey || e.metaKey || e.key === 'Control' || e.key === 'Meta') syncLightboxTemporaryZoom(true);
     handleLightboxKeydown(e);
   }, true);
+  window.addEventListener('keyup', e => {
+    if (!$('#lightbox').classList.contains('open')) return;
+    if (!e.ctrlKey && !e.metaKey && (e.key === 'Control' || e.key === 'Meta')) syncLightboxTemporaryZoom(false);
+  }, true);
+  window.addEventListener('blur', () => resetLightboxTemporaryZoom());
   document.addEventListener('fullscreenchange', () => {
     const lightbox = $('#lightbox');
     if (!lightbox || !lightbox.classList.contains('open')) return;
     if (!document.fullscreenElement) exitLightboxToContext();
   });
+  document.addEventListener('mousemove', e => {
+    if (!$('#lightbox').classList.contains('open')) return;
+    updateLightboxFocusPointFromPointer(e.clientX, e.clientY);
+    if (state.lightboxBoostActive && state.lightboxPointerInside) applyLightboxZoom();
+  }, { passive: true });
   document.addEventListener('click', e => {
     if (e.target.closest('#lb-close')) exitLightboxToContext();
     if (e.target.closest('#lb-prev'))  lbNav(-1);
@@ -3647,6 +3780,8 @@ async function openLightbox(photos, index) {
   state.lightboxReturnView = state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
   state.slideshowRandomQueue = [];
+  resetLightboxFocusPoint();
+  resetLightboxTemporaryZoom();
   setLightboxMediaLoading(true);
   applyLightboxZoom();
   lockPageScrollForLightbox();
@@ -3658,6 +3793,8 @@ function closeLightbox() {
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
   setLightboxMediaLoading(false);
+  resetLightboxFocusPoint();
+  resetLightboxTemporaryZoom();
   const video = $('#lb-video');
   if (video) {
     video.pause();
@@ -3703,6 +3840,7 @@ function lbGoTo(index, options = {}) {
 function lbRender() {
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
+  resetLightboxFocusPoint();
   const img = $('#lb-img');
   const video = $('#lb-video');
   setLightboxMediaLoading(true);
@@ -3760,16 +3898,10 @@ function lbRender() {
   const items = [
     ['类型', isVideoMedia(p) ? '视频' : '图片'],
     ['MIME', p.mime_type || '—'],
-    ['扩展名', fileExtension(p.original_name)],
     ['拍摄时间', formatDateTime(p.taken_at)],
-    ['上传时间', formatDateTime(p.uploaded_at)],
     ['尺寸', p.width && p.height ? `${p.width} × ${p.height}` : '—'],
-    ['宽高比', aspectRatioLabel(p.width, p.height)],
-    ['时长', isVideoMedia(p) && p.duration_ms ? formatDuration(p.duration_ms) : '—'],
-    ['文件大小', formatSizeExact(p.size)],
-    ['文件名', p.original_name],
-    ['媒体 ID', String(p.id || '—')],
-    ['UUID', p.uuid || '—'],
+    ['宽高比（近似）', aspectRatioLabel(p.width, p.height)],
+    ['大小（MB）', formatSizeMB(p.size)],
   ];
   $('#lb-info').innerHTML = items.map(([k, v]) => `<div class="lb-info-item" title="${escapeHTML(`${k}: ${v}`)}"><span class="lb-info-key">${escapeHTML(k)}</span><span class="lb-info-value">${escapeHTML(v)}</span></div>`).join('');
 }
