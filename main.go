@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +23,8 @@ import (
 
 const restartDelayEnv = "ECHOGALLERY_RESTART_DELAY_MS"
 const portFallbackScanLimit = 20
+
+var shutdownRequested = make(chan struct{}, 1)
 
 func main() {
 	if delay := strings.TrimSpace(os.Getenv(restartDelayEnv)); delay != "" {
@@ -188,14 +192,14 @@ func main() {
 		cfg.Port = actualPort
 	}
 
-	app := api.NewRouterWithStaticWithRestart(cfg, webFS, photoService, restartCurrentProcess)
+	app := api.NewRouterWithStaticWithLifecycle(cfg, webFS, photoService, restartCurrentProcess, shutdownCurrentProcess)
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("HTTP 服务已启动: http://%s%s\n", host, addr)
 	} else {
 		fmt.Printf("HTTP 服务已启动: http://127.0.0.1%s\n", addr)
 	}
-	if err := http.Serve(listener, app); err != nil {
+	if err := serveWithGracefulShutdown(listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -221,10 +225,46 @@ func startSetupServer(state api.SetupState) {
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("局域网访问地址: http://%s%s\n", host, addr)
 	}
-	if err := http.Serve(listener, app); err != nil {
+	if err := serveWithGracefulShutdown(listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func serveWithGracefulShutdown(listener net.Listener, handler http.Handler) error {
+	server := &http.Server{Handler: handler}
+	errCh := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return shutdownHTTPServer(server, errCh)
+	case <-shutdownRequested:
+		return shutdownHTTPServer(server, errCh)
+	}
+}
+
+func shutdownHTTPServer(server *http.Server, errCh <-chan error) error {
+	fmt.Println("\n正在关闭 EchoGallery...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+		return err
+	}
+	return <-errCh
 }
 
 func listenTCPWithFallback(preferredPort int) (net.Listener, int, error) {
@@ -278,6 +318,17 @@ func restartCurrentProcess() error {
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		os.Exit(0)
+	}()
+	return nil
+}
+
+func shutdownCurrentProcess() error {
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		select {
+		case shutdownRequested <- struct{}{}:
+		default:
+		}
 	}()
 	return nil
 }

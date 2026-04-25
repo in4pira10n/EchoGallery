@@ -82,6 +82,14 @@ type ListPhotosParams struct {
 	OnlyFavorite bool   // true 时仅查询个人收藏
 }
 
+// SearchPhotosParams 查询媒体搜索结果参数。
+type SearchPhotosParams struct {
+	UserID int64
+	Query  string
+	Cursor string
+	Limit  int
+}
+
 // ListAlbumPhotosParams 查询相册内图片参数
 type ListAlbumPhotosParams struct {
 	AlbumID int64

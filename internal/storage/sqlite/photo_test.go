@@ -361,6 +361,54 @@ func TestSoftDeletePhoto_And_Restore(t *testing.T) {
 	}
 }
 
+func TestSearchPhotos_FiltersAndPaginates(t *testing.T) {
+	db := newTestDB(t)
+	base := time.Date(2024, 1, 2, 12, 0, 0, 0, time.UTC)
+	items := []*storage.Photo{
+		makePhoto(1, base.Add(3*time.Hour)),
+		makePhoto(1, base.Add(2*time.Hour)),
+		makePhoto(1, base.Add(1*time.Hour)),
+		makePhoto(2, base.Add(4*time.Hour)),
+	}
+	items[0].UUID = "search-photo"
+	items[0].OriginalName = "Mountain Sunrise.jpg"
+	items[1].UUID = "search-video"
+	items[1].OriginalName = "Family Movie.mp4"
+	items[1].MediaKind = storage.MediaKindVideo
+	items[1].MimeType = "video/mp4"
+	items[2].UUID = "deleted-photo"
+	items[2].OriginalName = "Mountain Deleted.jpg"
+	items[3].UUID = "other-user"
+	items[3].OriginalName = "Mountain Private.jpg"
+	for _, photo := range items {
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatalf("保存媒体失败: %v", err)
+		}
+	}
+	if err := db.SoftDeletePhoto(items[2].ID, 1, 1); err != nil {
+		t.Fatalf("软删除媒体失败: %v", err)
+	}
+
+	page, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "mountain", Limit: 1})
+	if err != nil {
+		t.Fatalf("搜索失败: %v", err)
+	}
+	if len(page.Photos) != 1 || page.HasMore || page.Total != 1 {
+		t.Fatalf("期望仅返回未删除且归属当前用户的 1 条结果，got len=%d hasMore=%v total=%d", len(page.Photos), page.HasMore, page.Total)
+	}
+	if page.Photos[0].ID != items[0].ID {
+		t.Fatalf("返回了错误的媒体 ID: %d", page.Photos[0].ID)
+	}
+
+	videoPage, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "video", Limit: 10})
+	if err != nil {
+		t.Fatalf("按类型搜索失败: %v", err)
+	}
+	if len(videoPage.Photos) != 1 || videoPage.Photos[0].ID != items[1].ID {
+		t.Fatalf("期望按 mime/media kind 命中视频，得到 %d 条", len(videoPage.Photos))
+	}
+}
+
 func TestHardDeleteTrashedPhotos(t *testing.T) {
 	db := newTestDB(t)
 	p1 := makePhoto(1, time.Now())

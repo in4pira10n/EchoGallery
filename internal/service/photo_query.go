@@ -32,6 +32,11 @@ func (s *PhotoService) GetFavorites(params storage.ListPhotosParams) (*storage.P
 	return s.repo.ListFavoritePhotos(params)
 }
 
+// SearchMedia 搜索用户媒体（游标分页）。
+func (s *PhotoService) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+	return s.repo.SearchPhotos(params)
+}
+
 // GetAlbumMedia 获取相册内媒体（游标分页）。
 func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error) {
 	return s.repo.ListAlbumPhotos(params)

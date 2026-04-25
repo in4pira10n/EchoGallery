@@ -119,7 +119,9 @@ func generatePosterWithQuickLook(videoPath, posterPath string, maxEdge int) erro
 	if maxEdge <= 0 {
 		maxEdge = imgpkg.DefaultThumbnailLongEdge
 	}
-	out, err := exec.Command("qlmanage", "-t", "-s", strconv.Itoa(maxEdge), "-o", tmpDir, videoPath).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "qlmanage", "-t", "-s", strconv.Itoa(maxEdge), "-o", tmpDir, videoPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("Quick Look 生成缩略图失败: %w: %s", err, strings.TrimSpace(string(out)))
 	}

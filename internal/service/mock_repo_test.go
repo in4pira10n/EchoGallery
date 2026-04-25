@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"echogallery/internal/storage"
@@ -105,6 +106,23 @@ func (m *mockRepo) ListFavoritePhotos(params storage.ListPhotosParams) (*storage
 	var photos []*storage.Photo
 	for _, p := range m.photos {
 		if p.UploadedBy == params.UserID && p.DeletedAt == nil && p.IsFavorite {
+			photos = append(photos, p)
+		}
+	}
+	return &storage.PhotoPage{Photos: photos}, nil
+}
+
+func (m *mockRepo) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+	var photos []*storage.Photo
+	query := strings.ToLower(params.Query)
+	for _, p := range m.photos {
+		if p.UploadedBy != params.UserID || p.DeletedAt != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(p.OriginalName), query) ||
+			strings.Contains(strings.ToLower(p.UUID), query) ||
+			strings.Contains(strings.ToLower(p.MimeType), query) ||
+			strings.Contains(strings.ToLower(string(p.MediaKind)), query) {
 			photos = append(photos, p)
 		}
 	}

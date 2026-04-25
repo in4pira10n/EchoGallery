@@ -253,6 +253,7 @@ const icons = {
   autoplay: '',
   play: '',
   pause: '',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>',
 };
 const svgIconFiles = {
   timeline: 'timeline.svg',
@@ -865,6 +866,171 @@ function renderNavLogo() {
   const logoMark = logoText ? `<span class="nav-logo-mark">${logoText.slice(0, 3)}</span>` : icons.photo;
   return `${logoMark} ${logoText || 'EchoGallery'}`;
 }
+
+function renderSearchOverlay() {
+  return `<div class="search-overlay" id="search-overlay" aria-hidden="true">
+  <div class="search-panel" role="dialog" aria-modal="true" aria-label="全局搜索">
+    <div class="search-box">
+      <span class="search-box-icon">${icons.search}</span>
+      <input id="global-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索文件名、类型、UUID">
+      <button class="btn-icon search-close-btn" id="search-close-btn" type="button" aria-label="关闭">${icons.close}</button>
+    </div>
+    <div class="search-status" id="search-status"></div>
+    <div class="search-results" id="search-results"></div>
+    <button class="btn search-more-btn" id="search-more-btn" type="button">加载更多</button>
+  </div>
+</div>`;
+}
+
+function openGlobalSearch(prefill = '') {
+  const overlay = $('#search-overlay');
+  const input = $('#global-search-input');
+  if (!overlay || !input) return;
+  state.searchOpen = true;
+  overlay.classList.add('open');
+  overlay.setAttribute('aria-hidden', 'false');
+  if (prefill) input.value = prefill;
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  renderSearchResults();
+  if (input.value.trim() && input.value.trim() !== state.searchQuery) scheduleGlobalSearch();
+}
+
+function closeGlobalSearch() {
+  state.searchOpen = false;
+  if (state.searchAbortController) state.searchAbortController.abort();
+  if (state.searchTimer) clearTimeout(state.searchTimer);
+  state.searchAbortController = null;
+  state.searchTimer = null;
+  $('#search-overlay')?.classList.remove('open');
+  $('#search-overlay')?.setAttribute('aria-hidden', 'true');
+}
+
+function resetSearchResults(query = '') {
+  state.searchQuery = query;
+  state.searchResults = [];
+  state.searchCursor = '';
+  state.searchHasMore = false;
+  state.searchTotal = 0;
+  const resultsEl = $('#search-results');
+  if (resultsEl) resultsEl.scrollTop = 0;
+}
+
+function scheduleGlobalSearch() {
+  const input = $('#global-search-input');
+  if (!input) return;
+  const query = input.value.trim();
+  if (state.searchTimer) clearTimeout(state.searchTimer);
+  if (!query) {
+    if (state.searchAbortController) state.searchAbortController.abort();
+    resetSearchResults('');
+    state.searchLoading = false;
+    renderSearchResults();
+    return;
+  }
+  state.searchTimer = setTimeout(() => runGlobalSearch(query, { reset: true }), 260);
+}
+
+async function runGlobalSearch(query, { reset = false } = {}) {
+  if (!query || (state.searchLoading && !reset)) return;
+  if (state.searchAbortController) state.searchAbortController.abort();
+  const controller = new AbortController();
+  state.searchAbortController = controller;
+  if (reset) resetSearchResults(query);
+  state.searchLoading = true;
+  renderSearchResults();
+  try {
+    const params = new URLSearchParams({ q: query, limit: '36' });
+    if (!reset && state.searchCursor) params.set('cursor', state.searchCursor);
+    const response = await fetch(`/api/media/search?${params.toString()}`, { signal: controller.signal });
+    if (!response.ok) throw await response.json();
+    const page = await response.json();
+    const photos = page.photos || [];
+    state.searchResults = reset ? photos : state.searchResults.concat(photos);
+    state.searchCursor = page.next_cursor || '';
+    state.searchHasMore = !!page.has_more;
+    state.searchTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.searchResults.length;
+  } catch (e) {
+    if (!e || e.name !== 'AbortError') {
+      console.error(e);
+      showToast('搜索失败，请稍后重试');
+    }
+  } finally {
+    if (state.searchAbortController === controller) {
+      state.searchLoading = false;
+      state.searchAbortController = null;
+      renderSearchResults();
+    }
+  }
+}
+
+function searchResultMeta(photo) {
+  const kind = isVideoMedia(photo) ? '视频' : '图片';
+  const size = formatSizeMB(photo.size);
+  const date = formatDateTime(photo.taken_at);
+  return [kind, date, size].filter(value => value && value !== '—').join(' · ');
+}
+
+function renderSearchResults() {
+  const resultsEl = $('#search-results');
+  const statusEl = $('#search-status');
+  const moreBtn = $('#search-more-btn');
+  if (!resultsEl || !statusEl || !moreBtn) return;
+  const query = $('#global-search-input')?.value.trim() || state.searchQuery;
+  if (!query) {
+    statusEl.textContent = '';
+    resultsEl.innerHTML = `<div class="search-empty">输入关键词开始搜索</div>`;
+    moreBtn.classList.remove('visible');
+    return;
+  }
+  if (state.searchLoading && !state.searchResults.length) {
+    statusEl.textContent = '搜索中…';
+    resultsEl.innerHTML = `<div class="search-empty"><div class="spinner"></div></div>`;
+    moreBtn.classList.remove('visible');
+    return;
+  }
+  statusEl.textContent = state.searchTotal ? `找到 ${state.searchTotal} 条结果` : (state.searchResults.length ? `找到 ${state.searchResults.length} 条结果` : '');
+  if (!state.searchResults.length) {
+    resultsEl.innerHTML = `<div class="search-empty">没有匹配结果</div>`;
+  } else {
+    resultsEl.innerHTML = '';
+    const fragment = document.createDocumentFragment();
+    state.searchResults.forEach((photo, index) => {
+      const card = el('button', 'search-result-card');
+      card.type = 'button';
+      card.innerHTML = `
+        <span class="search-result-thumb">
+          <img loading="lazy" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photo.original_name || '')}">
+          ${isVideoMedia(photo) ? '<span class="search-result-kind">视频</span>' : ''}
+        </span>
+        <span class="search-result-main">
+          <strong>${escapeHTML(photo.original_name || '未命名媒体')}</strong>
+          <span>${escapeHTML(searchResultMeta(photo))}</span>
+        </span>`;
+      const img = $('img', card);
+      if (img && isVideoMedia(photo)) img.onerror = () => { img.onerror = null; img.src = videoPosterPlaceholder; };
+      if (img && !isVideoMedia(photo)) {
+        img.onerror = () => {
+          if (img.dataset.fallbackApplied === '1') return;
+          img.dataset.fallbackApplied = '1';
+          img.src = mediaFileURL(photo);
+        };
+      }
+      card.addEventListener('click', () => {
+        closeGlobalSearch();
+        openLightbox(state.searchResults, index);
+      });
+      fragment.appendChild(card);
+    });
+    resultsEl.appendChild(fragment);
+  }
+  moreBtn.classList.toggle('visible', state.searchHasMore);
+  moreBtn.disabled = state.searchLoading;
+  moreBtn.textContent = state.searchLoading ? '加载中…' : '加载更多';
+}
+
 function viewShortcutMap() {
   return ['timeline', 'favorites', 'random-album', 'albums', 'trash', 'settings'];
 }
@@ -891,6 +1057,17 @@ function handleViewNumberShortcut(e) {
   closeDrawer();
   switchView(view);
   return true;
+}
+function handleSearchShortcut(e) {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+    if (shouldIgnoreGlobalShortcut(e.target) && e.target?.id !== 'global-search-input') return false;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (state.searchOpen) closeGlobalSearch();
+    else openGlobalSearch();
+    return true;
+  }
+  return false;
 }
 function normalizeKeyToken(token) {
   const upper = token.toUpperCase();
@@ -1013,6 +1190,9 @@ async function saveServerSettings(payload) {
 }
 async function restartApp() {
   return api.post('/api/settings/restart', {});
+}
+async function shutdownApp() {
+  return api.post('/api/settings/shutdown', {});
 }
 function applyServerSettings(data = {}) {
   state.serverSettings.port = Number(data.port) || 8080;
@@ -1408,6 +1588,15 @@ const state = {
   gridScalePersistTimer: null,
   prefetchedMediaKeys: [],
   prefetchedMediaSet: new Set(),
+  searchOpen: false,
+  searchQuery: '',
+  searchResults: [],
+  searchCursor: '',
+  searchHasMore: false,
+  searchLoading: false,
+  searchTotal: 0,
+  searchTimer: null,
+  searchAbortController: null,
   blockingInteraction: false,
   timelineBulkLoading: false,
   timelineBulkCancelRequested: false,
@@ -1550,6 +1739,7 @@ function renderApp() {
     <div class="nav-bottom">
       <a class="nav-item" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} 源码仓库</a>
       <a class="nav-item" href="#" id="theme-btn"><span class="theme-icon">${isDark ? icons.sun : icons.moon}</span> 切换主题</a>
+      <a class="nav-item nav-item-danger" href="#" id="shutdown-btn">${icons.logout} 退出程序</a>
       <a class="nav-item" href="#" id="logout-btn">${icons.logout} 退出登录</a>
     </div>
   </nav>
@@ -1561,12 +1751,14 @@ function renderApp() {
       <button class="btn-icon sidebar-pin-btn" id="sidebar-pin-btn" aria-label="切换侧边栏模式"></button>
       <span class="topbar-title" id="topbar-title"></span>
       <div class="topbar-meta" id="topbar-meta"></div>
+      <button class="btn-icon global-search-btn" id="global-search-btn" type="button" aria-label="搜索" title="搜索">${icons.search}</button>
       <div id="topbar-actions"></div>
     </div>
     <div class="content" id="content"></div>
   </div>
 </div>
 ${renderLightbox()}
+${renderSearchOverlay()}
 ${renderUploadModal()}
 ${renderCreateAlbumModal()}
 ${renderShareModal()}
@@ -1590,6 +1782,7 @@ function bindNav() {
   const navLogoBtn = $('#nav-logo-btn');
   if (navLogoBtn) navLogoBtn.addEventListener('click', () => openLibrarySettings());
   $('#theme-btn').addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
+  $('#shutdown-btn').addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
   $('#logout-btn').addEventListener('click', e => { e.preventDefault(); logout(); });
 
   // 汉堡按钮 / 抽屉 (b-6)
@@ -3471,6 +3664,15 @@ async function focusPendingAlbumPhoto() {
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
   return true;
 }
+
+function focusPhotoThumbInCurrentView(photoId) {
+  const thumb = findPhotoThumb(photoId);
+  if (!thumb) return false;
+  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  thumb.classList.add('photo-thumb-focus');
+  setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
+  return true;
+}
 function renderAlbumGroups(newPhotos) {
   const container = $('#album-groups');
   if (!container) return;
@@ -3706,8 +3908,14 @@ function bindGlobal() {
   document.addEventListener('click', () => closeContextMenu());
   window.addEventListener('scroll', () => saveViewScroll(), { passive: true });
   window.addEventListener('keydown', e => {
+    if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
     if (e.key === 'Escape') {
+      if (state.searchOpen) {
+        e.preventDefault();
+        closeGlobalSearch();
+        return;
+      }
       if (_ctxMenu) {
         closeContextMenu();
         return;
@@ -3747,6 +3955,13 @@ function bindGlobal() {
     if (e.target.closest('#lb-share')) lbShare();
     if (e.target.closest('#lb-fit-height')) setLightboxFitHeight();
     if (e.target.closest('#lb-slideshow-toggle')) toggleSlideshow();
+    if (e.target.closest('#global-search-btn')) openGlobalSearch();
+    if (e.target.closest('#search-close-btn')) closeGlobalSearch();
+    if (e.target.closest('#search-overlay') && !e.target.closest('.search-panel')) closeGlobalSearch();
+    if (e.target.closest('#search-more-btn') && state.searchHasMore) runGlobalSearch(state.searchQuery, { reset: false });
+  });
+  document.addEventListener('input', e => {
+    if (e.target.matches('#global-search-input')) scheduleGlobalSearch();
   });
   document.addEventListener('contextmenu', e => {
     if (!$('#lightbox').classList.contains('open')) return;
@@ -3809,7 +4024,10 @@ function closeLightbox() {
 function exitLightboxToContext() {
   const returnView = state.lightboxReturnView;
   const returnAlbumID = state.lightboxReturnAlbumID;
+  const currentPhotoID = state.lightboxPhotos[state.lightboxIndex]?.id || null;
   closeLightbox();
+  if (currentPhotoID && returnView === 'album-detail') state.pendingAlbumPhotoID = currentPhotoID;
+  if (currentPhotoID && returnView === 'timeline') state.pendingTimelinePhotoID = currentPhotoID;
   if (returnView === 'album-detail' && returnAlbumID && state.view !== 'album-detail') {
     if (state.currentAlbum && state.currentAlbum.id !== returnAlbumID) state.currentAlbum = null;
     state.currentAlbumID = returnAlbumID;
@@ -3817,6 +4035,18 @@ function exitLightboxToContext() {
     setHashView('album-detail', returnAlbumID);
     $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
     renderAlbumDetail();
+    return;
+  }
+  if (currentPhotoID && returnView === 'album-detail') {
+    focusPendingAlbumPhoto();
+    return;
+  }
+  if (currentPhotoID && returnView === 'timeline') {
+    focusPendingTimelinePhoto();
+    return;
+  }
+  if (currentPhotoID && ['favorites', 'random-album'].includes(returnView)) {
+    focusPhotoThumbInCurrentView(currentPhotoID);
   }
 }
 function lbNav(dir) {
@@ -4477,6 +4707,19 @@ function renderShareList() {
 }
 
 // ── 登出 ──────────────────────────────────────────────
+async function shutdownFromUI() {
+  if (!confirm('确定要退出 EchoGallery 吗？这会关闭当前服务进程。')) return;
+  try {
+    await shutdownApp();
+    showToast('EchoGallery 正在退出');
+    setTimeout(() => {
+      document.body.innerHTML = '<div class="empty"><p>EchoGallery 已退出，可以关闭此页面。</p></div>';
+    }, 500);
+  } catch (e) {
+    alert('退出失败: ' + ((e && e.error) || e));
+  }
+}
+
 async function logout() {
   await fetch('/api/auth/logout', { method: 'POST' });
   location.reload();

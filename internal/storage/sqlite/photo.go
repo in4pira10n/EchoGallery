@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"echogallery/internal/storage"
@@ -160,6 +161,11 @@ func (s *DB) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*stora
 	return p, err
 }
 
+func escapeLikePattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
+}
+
 // ListPhotos 查询用户图片（时间线，游标分页）
 func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	limit := params.Limit
@@ -229,6 +235,65 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询图片失败: %w", err)
+	}
+	defer rows.Close()
+
+	page, err := collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
+		return p.TakenAt
+	})
+	if err != nil {
+		return nil, err
+	}
+	page.Total = total
+	return page, nil
+}
+
+// SearchPhotos 搜索用户媒体（时间倒序，游标分页）。
+func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	query := strings.TrimSpace(params.Query)
+	if query == "" {
+		return &storage.PhotoPage{}, nil
+	}
+	pattern := "%" + escapeLikePattern(query) + "%"
+
+	where := `uploaded_by = ? AND deleted_at IS NULL AND (
+		original_name LIKE ? ESCAPE '\' OR
+		uuid LIKE ? ESCAPE '\' OR
+		mime_type LIKE ? ESCAPE '\' OR
+		media_kind LIKE ? ESCAPE '\'
+	)`
+	args := []interface{}{params.UserID, pattern, pattern, pattern, pattern}
+
+	var total int
+	countQuery := "SELECT COUNT(*) FROM photos WHERE " + where
+	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("统计搜索结果失败: %w", err)
+	}
+
+	if params.Cursor != "" {
+		c, err := decodeCursor(params.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		where += " AND (taken_at < ? OR (taken_at = ? AND id < ?))"
+		args = append(args, c.TakenAt, c.TakenAt, c.ID)
+	}
+	args = append(args, limit+1)
+
+	rows, err := s.db.Query(`
+		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+		       storage_rel_path, source_rel_path, is_favorite,
+		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+		FROM photos
+		WHERE `+where+`
+		ORDER BY taken_at DESC, id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("搜索媒体失败: %w", err)
 	}
 	defer rows.Close()
 

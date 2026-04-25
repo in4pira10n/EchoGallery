@@ -208,6 +208,20 @@ func handleRestartApp(restart func() error) gin.HandlerFunc {
 	}
 }
 
+func handleShutdownApp(shutdown func() error) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if shutdown == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持全局退出"})
+			return
+		}
+		if err := shutdown(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "正在退出 EchoGallery"})
+	}
+}
+
 func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		index, err := parseLibraryIndex(c.Param("index"), len(cfg.Libraries))

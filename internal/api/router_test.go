@@ -48,6 +48,7 @@ type stubRegistrar struct {
 	getFavorites            func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTrash                func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTimeline             func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	searchMedia             func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	mediaPath               func(photo *storage.Photo) string
 	permanentlyDeletePhoto  func(id int64, userID int64) error
 	playWithSystemPlayer    func(id int64, userID int64) error
@@ -156,6 +157,10 @@ func (s stubRegistrar) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Ph
 
 func (s stubRegistrar) GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	return s.getTimeline(params)
+}
+
+func (s stubRegistrar) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+	return s.searchMedia(params)
 }
 
 func (s stubRegistrar) MediaPath(photo *storage.Photo) string {
@@ -362,6 +367,17 @@ func okRegistrar() stubRegistrar {
 				UploadedBy:   params.UserID,
 			},
 		}, NextCursor: "", HasMore: false}, nil
+	}, searchMedia: func(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+		return &storage.PhotoPage{Photos: []*storage.Photo{
+			{
+				ID:           4,
+				UUID:         "search-1",
+				OriginalName: "search-result.jpg",
+				MediaKind:    storage.MediaKindImage,
+				MimeType:     "image/jpeg",
+				UploadedBy:   params.UserID,
+			},
+		}, NextCursor: "", HasMore: false, Total: 1}, nil
 	}, mediaPath: mediaFilePath, permanentlyDeletePhoto: func(id int64, userID int64) error {
 		return nil
 	}, playWithSystemPlayer: func(id int64, userID int64) error {

@@ -32,6 +32,9 @@ type Repository interface {
 	// ListFavoritePhotos 查询个人收藏（游标分页）
 	ListFavoritePhotos(params ListPhotosParams) (*PhotoPage, error)
 
+	// SearchPhotos 搜索用户媒体（游标分页，不包含已删除）
+	SearchPhotos(params SearchPhotosParams) (*PhotoPage, error)
+
 	// SoftDeletePhoto 软删除图片
 	SoftDeletePhoto(id int64, userID int64, deletedBy int64) error
 

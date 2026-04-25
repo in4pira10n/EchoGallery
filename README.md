@@ -115,12 +115,11 @@ http://127.0.0.1:8080
 - [ ] `Doc` 视频演示
 - [ ] `Future Plan` AI 人脸识别
 - [ ] `Future Plan` "回忆" Tab
-- [ ] `Future Plan` 手机端适配
-- [ ] `Future Plan` 全局搜索
+- [x] `Future Plan` 全局搜索
 - [ ] `Future Plan` 自动检查和安装更新
 - [ ] `Future Plan` 多用户 / 访客用户支持
-- [ ] `Enhancement` 去掉灯箱顶部、底部栏的黑色遮罩，将圆角矩形元素使用半透明 + 背景模糊处理，加强照片大图浏览沉浸感
-- [ ] `New Feature` 按住 `Ctrl`（Windows）或 `Command`（Mac）会将缩放等级暂时调满并聚焦鼠标当前区域
+- [x] `Enhancement` 去掉灯箱顶部、底部栏的黑色遮罩，将圆角矩形元素使用半透明 + 背景模糊处理，加强照片大图浏览沉浸感
+- [x] `New Feature` 按住 `Ctrl`（Windows）或 `Command`（Mac）会将缩放等级暂时调满并聚焦鼠标当前区域
 - [x] `Fix` user-select return none（防止意外框选内容影响体验）
 - [x] `Fix` 修改复选框处理区域的位置为顶部中间（同“时间线”“缩放”等内容）
 - [x] `Fix` 更改并重新排布底部信息从左到右为：类型、MIME、拍摄时间、尺寸、宽高比（近似）、大小（MB）
