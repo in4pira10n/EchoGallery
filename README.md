@@ -181,4 +181,5 @@ http://127.0.0.1:8080
 - [gin-gonic/gin](https://github.com/gin-gonic/gin)
 - [modernc/sqlite](https://github.com/modernc/sqlite)
 - [rwcarlsen/goexif](https://github.com/rwcarlsen/goexif)
+- [DoYoungDo/PhotoAlbum](https://github.com/DoYoungDo/PhotoAlbum)
 - 以及本项目依赖的其它开源库
