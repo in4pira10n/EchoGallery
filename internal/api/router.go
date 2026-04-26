@@ -51,6 +51,7 @@ type videoRegistrar interface {
 	GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error)
 	GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	GetTrash(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
 	SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	PermanentlyDeletePhoto(id int64, userID int64) error
 	PlayWithSystemPlayer(id int64, userID int64) error
@@ -128,6 +129,10 @@ func NewRouterWithStaticWithRestart(cfg *config.Config, staticFS fs.FS, registra
 }
 
 func NewRouterWithStaticWithLifecycle(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error) http.Handler {
+	return NewRouterWithStaticWithLifecycleAndBuild(cfg, staticFS, registrar, restart, shutdown, LibraryBuildHooks{})
+}
+
+func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error, buildHooks LibraryBuildHooks) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
@@ -146,6 +151,8 @@ func NewRouterWithStaticWithLifecycle(cfg *config.Config, staticFS fs.FS, regist
 	r.PUT("/api/settings", authMiddleware(cfg), handleUpdateSettings(cfg))
 	r.POST("/api/settings/restart", authMiddleware(cfg), handleRestartApp(restart))
 	r.POST("/api/settings/shutdown", authMiddleware(cfg), handleShutdownApp(shutdown))
+	r.GET("/api/library-build/status", authMiddleware(cfg), handleGetLibraryBuildStatus(buildHooks))
+	r.PUT("/api/library-build/exit-after-complete", authMiddleware(cfg), handleSetLibraryBuildExitAfterComplete(buildHooks))
 	r.POST("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleServeLibraryLogo(cfg))
@@ -168,6 +175,7 @@ func NewRouterWithStaticWithLifecycle(cfg *config.Config, staticFS fs.FS, regist
 		media.DELETE("/shares/:id", authMiddleware(cfg), handleDeleteShareMedia(cfg, registrar))
 		media.GET("", authMiddleware(cfg), handleListMedia(cfg, registrar))
 		media.GET("/search", authMiddleware(cfg), handleSearchMedia(cfg, registrar))
+		media.GET("/random", authMiddleware(cfg), handleListRandomMedia(cfg, registrar))
 		media.GET("/favorites", authMiddleware(cfg), handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", authMiddleware(cfg), handleListTrashMedia(cfg, registrar))
 		media.GET("/:id/albums", authMiddleware(cfg), handleListMediaAlbums(cfg, registrar))
@@ -1164,10 +1172,11 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 			return
 		}
 		page, err := registrar.GetTimeline(storage.ListPhotosParams{
-			UserID:  userID,
-			Cursor:  c.Query("cursor"),
-			Limit:   mediaPageLimit(c),
-			Reverse: mediaPageReverse(c),
+			UserID:    userID,
+			Cursor:    c.Query("cursor"),
+			Limit:     mediaPageLimit(c),
+			Reverse:   mediaPageReverse(c),
+			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1201,10 +1210,44 @@ func handleSearchMedia(cfg *config.Config, registrar videoRegistrar) gin.Handler
 			limit = 60
 		}
 		page, err := registrar.SearchMedia(storage.SearchPhotosParams{
-			UserID: userID,
-			Query:  query,
-			Cursor: c.Query("cursor"),
-			Limit:  limit,
+			UserID:       userID,
+			Query:        query,
+			Cursor:       c.Query("cursor"),
+			Limit:        limit,
+			MediaKind:    mediaSearchKind(c),
+			OnlyFavorite: mediaSearchFavorite(c),
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, page)
+	}
+}
+
+func handleListRandomMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		seed := time.Now().UnixNano()
+		if raw := strings.TrimSpace(c.Query("seed")); raw != "" {
+			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				seed = parsed
+			}
+		}
+		page, err := registrar.GetRandomMedia(storage.RandomPhotosParams{
+			UserID:    userID,
+			Seed:      seed,
+			Cursor:    c.Query("cursor"),
+			Limit:     mediaPageLimit(c),
+			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1228,6 +1271,26 @@ func mediaPageLimit(c *gin.Context) int {
 		return 300
 	}
 	return limit
+}
+
+func mediaSearchKind(c *gin.Context) string {
+	raw := strings.TrimSpace(strings.ToLower(c.Query("kind")))
+	if raw == "" {
+		raw = strings.TrimSpace(strings.ToLower(c.Query("type")))
+	}
+	switch raw {
+	case "photo", "image", "photos", "images":
+		return storage.MediaKindImage
+	case "video", "videos":
+		return storage.MediaKindVideo
+	default:
+		return ""
+	}
+}
+
+func mediaSearchFavorite(c *gin.Context) bool {
+	raw := strings.TrimSpace(strings.ToLower(c.Query("favorite")))
+	return raw == "1" || raw == "true" || raw == "yes"
 }
 
 func mediaPageReverse(c *gin.Context) bool {

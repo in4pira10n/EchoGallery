@@ -37,6 +37,11 @@ func (s *PhotoService) SearchMedia(params storage.SearchPhotosParams) (*storage.
 	return s.repo.SearchPhotos(params)
 }
 
+// GetRandomMedia 获取乱序相册媒体（游标分页）。
+func (s *PhotoService) GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
+	return s.repo.ListRandomPhotos(params)
+}
+
 // GetAlbumMedia 获取相册内媒体（游标分页）。
 func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error) {
 	return s.repo.ListAlbumPhotos(params)

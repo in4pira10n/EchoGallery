@@ -96,7 +96,7 @@ img { display: block; max-width: 100%; }
   z-index: 20;
 }
 #app.sidebar-auto-hide .nav {
-  margin-left: calc(var(--nav-w) * -1 + var(--nav-peek));
+  margin-left: calc(var(--nav-w) * -1);
   box-shadow: none;
 }
 #app.sidebar-auto-hide .nav.sidebar-visible {
@@ -178,6 +178,11 @@ img { display: block; max-width: 100%; }
 .nav-item-danger:hover { background: rgba(192,57,43,.12); color: var(--danger); }
 .nav-spacer { flex: 1; }
 .nav-bottom { border-top: 1px solid var(--nav-border-color); padding-top: 12px; }
+.nav-separator {
+  height: 1px;
+  margin: 10px 20px;
+  background: var(--nav-border-color);
+}
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .topbar {
@@ -800,6 +805,9 @@ body.lightbox-page-lock {
   color: var(--text2);
   font-size: .86rem;
 }
+.blocking-progress-cancel {
+  margin-top: 2px;
+}
 
 @media (max-width: 640px) {
   .lightbox-info {
@@ -902,6 +910,60 @@ body.lightbox-page-lock {
 .modal-title { font-size: 1rem; font-weight: 700; margin-bottom: 16px; }
 .modal-copy { font-size: .88rem; color: var(--text2); margin-bottom: 16px; }
 .modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+.library-logo-crop-modal {
+  width: min(520px, calc(100vw - 28px));
+}
+.library-logo-crop-stage {
+  position: relative;
+  width: min(320px, calc(100vw - 84px));
+  aspect-ratio: 1;
+  margin: 8px auto 16px;
+  overflow: hidden;
+  border-radius: 24px;
+  background:
+    linear-gradient(45deg, rgba(0,0,0,.08) 25%, transparent 25% 75%, rgba(0,0,0,.08) 75%),
+    linear-gradient(45deg, rgba(0,0,0,.08) 25%, transparent 25% 75%, rgba(0,0,0,.08) 75%);
+  background-position: 0 0, 10px 10px;
+  background-size: 20px 20px;
+  cursor: grab;
+  touch-action: none;
+}
+.library-logo-crop-stage:active {
+  cursor: grabbing;
+}
+.library-logo-crop-stage img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform-origin: center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.library-logo-crop-mask {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--accent);
+  border-radius: 24px;
+  box-shadow:
+    inset 0 0 0 999px rgba(0,0,0,.08),
+    inset 0 0 0 1px rgba(255,255,255,.44),
+    0 0 0 6px var(--accent-faint),
+    0 12px 36px var(--accent-soft);
+  pointer-events: none;
+}
+.library-logo-crop-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text2);
+  font-size: .86rem;
+}
+.library-logo-crop-control input {
+  flex: 1;
+}
 
 /* ===== 全局搜索 ===== */
 .search-overlay {
@@ -937,6 +999,27 @@ body.lightbox-page-lock {
   padding: 14px 16px;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 42%, transparent);
+}
+.search-filters {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px 0;
+  overflow-x: auto;
+}
+.search-filter {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 11px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--text2);
+  font-size: .8rem;
+}
+.search-filter.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
 }
 .search-box-icon,
 .search-box-icon svg {
@@ -1008,6 +1091,18 @@ body.lightbox-page-lock {
   height: 100%;
   object-fit: cover;
 }
+.search-result-album-icon {
+  width: 100%;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.search-result-album-icon svg {
+  width: 28px;
+  height: 28px;
+}
 .search-result-kind {
   position: absolute;
   left: 5px;
@@ -1051,6 +1146,106 @@ body.lightbox-page-lock {
   justify-content: center;
 }
 .search-more-btn.visible { display: inline-flex; }
+
+/* ===== 资源库构建 ===== */
+.library-build-page {
+  min-height: calc(100vh - 104px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.library-build-panel {
+  width: min(760px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+.library-build-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+.library-build-heading h2 {
+  font-size: 1.15rem;
+  margin-bottom: 6px;
+}
+.library-build-heading p {
+  color: var(--text2);
+  font-size: .9rem;
+}
+.library-build-badge {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--accent-faint);
+  color: var(--accent);
+  font-size: .78rem;
+  font-weight: 700;
+}
+.library-build-progress {
+  height: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+}
+.library-build-progress-fill {
+  min-width: 8px;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-h));
+  transition: width .25s ease;
+}
+.library-build-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+}
+.library-build-stats div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg);
+}
+.library-build-stats strong,
+.library-build-stats span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-build-stats strong {
+  font-size: .95rem;
+}
+.library-build-stats span {
+  margin-top: 4px;
+  color: var(--text2);
+  font-size: .75rem;
+}
+.library-build-error {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(192,57,43,.10);
+  color: var(--danger);
+  font-size: .86rem;
+}
+.library-build-exit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: .88rem;
+}
+.library-build-exit input {
+  accent-color: var(--accent);
+}
 .timeline-load-progress {
   height: 12px;
   overflow: hidden;
@@ -1527,6 +1722,20 @@ body.lightbox-page-lock {
   }
   .search-results {
     grid-template-columns: 1fr;
+  }
+  .library-build-page {
+    padding: 8px;
+    place-items: stretch;
+  }
+  .library-build-panel {
+    padding: 18px;
+    border-radius: 14px;
+  }
+  .library-build-heading {
+    flex-direction: column;
+  }
+  .library-build-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .settings-control label {
     flex-direction: column;

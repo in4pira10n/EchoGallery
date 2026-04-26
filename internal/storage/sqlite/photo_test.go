@@ -318,6 +318,40 @@ func TestListPhotos_ReverseOrder(t *testing.T) {
 	}
 }
 
+func TestListRandomPhotos_PaginatesWithoutLoadingAll(t *testing.T) {
+	db := newTestDB(t)
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 7; i++ {
+		p := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		p.UUID = fmt.Sprintf("random-%d", i)
+		p.RandomSortKey = int64(i + 1)
+		if err := db.SavePhoto(p); err != nil {
+			t.Fatalf("保存测试图片失败: %v", err)
+		}
+	}
+
+	var got []int64
+	cursor := ""
+	for {
+		page, err := db.ListRandomPhotos(storage.RandomPhotosParams{UserID: 1, Seed: 5, Cursor: cursor, Limit: 3, SkipTotal: cursor != ""})
+		if err != nil {
+			t.Fatalf("乱序分页失败: %v", err)
+		}
+		for _, p := range page.Photos {
+			got = append(got, p.RandomSortKey)
+		}
+		if !page.HasMore {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	want := []int64{5, 6, 7, 1, 2, 3, 4}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("乱序分页顺序错误，得到 %v，期望 %v", got, want)
+	}
+}
+
 func TestListPhotos_UserIsolation(t *testing.T) {
 	db := newTestDB(t)
 	db.SavePhoto(makePhoto(1, time.Now()))

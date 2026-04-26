@@ -238,7 +238,7 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 		switch ext {
 		case ".png", ".jpg", ".jpeg", ".gif", ".webp":
 		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 png/jpg/jpeg/gif/webp，上传后会按中心裁剪为正方形"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 png/jpg/jpeg/gif/webp"})
 			return
 		}
 
@@ -280,7 +280,7 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			_ = os.Remove(filepath.Join(assetDir, previous))
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"message": "资源库图像已上传，已按中心裁剪为正方形",
+			"message": "资源库头像已上传",
 			"data":    buildSettingsResponse(cfg),
 		})
 	}

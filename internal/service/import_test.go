@@ -89,6 +89,34 @@ func TestImportExistingPhotos_Idempotent(t *testing.T) {
 	}
 }
 
+func TestImportExistingPhotos_UsesSourceIndexOnSecondScan(t *testing.T) {
+	sourceDir := t.TempDir()
+	dataDir := t.TempDir()
+	trashDir := t.TempDir()
+	repo := newMockRepo()
+	svc := newPhotoServiceSync(repo, sourceDir, dataDir, trashDir)
+	if err := os.WriteFile(filepath.Join(svc.sourcePath, "IMG_0003.jpg"), createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	repo.sourceRelPathLookupCount = 0
+
+	second, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("二次导入失败: %v", err)
+	}
+
+	if second.Imported != 0 || second.Skipped != 1 {
+		t.Fatalf("二次扫描应直接跳过已索引媒体，得到 imported=%d skipped=%d", second.Imported, second.Skipped)
+	}
+	if repo.sourceRelPathLookupCount != 0 {
+		t.Fatalf("二次扫描不应逐文件查询源路径，得到 %d 次", repo.sourceRelPathLookupCount)
+	}
+}
+
 func TestImportExistingPhotos_CreatesAlbumsFromFolders(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	if err := os.MkdirAll(filepath.Join(svc.sourcePath, "旅行", "第一天"), 0755); err != nil {

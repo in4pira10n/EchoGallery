@@ -10,11 +10,12 @@ import (
 
 // mockRepo 用于测试的 Repository mock 实现
 type mockRepo struct {
-	photos      map[int64]*storage.Photo
-	albums      map[int64]*storage.Album
-	albumPhotos map[int64][]int64 // albumID -> []photoID
-	shareLinks  map[int64]*storage.ShareLink
-	nextID      int64
+	photos                   map[int64]*storage.Photo
+	albums                   map[int64]*storage.Album
+	albumPhotos              map[int64][]int64 // albumID -> []photoID
+	shareLinks               map[int64]*storage.ShareLink
+	nextID                   int64
+	sourceRelPathLookupCount int
 }
 
 func newMockRepo() *mockRepo {
@@ -74,12 +75,28 @@ func (m *mockRepo) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Photo,
 }
 
 func (m *mockRepo) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*storage.Photo, error) {
+	m.sourceRelPathLookupCount++
 	for _, p := range m.photos {
 		if p.SourceRelPath == sourceRelPath && p.UploadedBy == userID {
 			return p, nil
 		}
 	}
 	return nil, nil
+}
+
+func (m *mockRepo) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaInfo, error) {
+	index := make(map[string]storage.SourceMediaInfo)
+	for _, p := range m.photos {
+		if p.UploadedBy == userID && p.SourceRelPath != "" {
+			index[p.SourceRelPath] = storage.SourceMediaInfo{
+				ID:            p.ID,
+				SourceRelPath: p.SourceRelPath,
+				Size:          p.Size,
+				SourceModUnix: p.SourceModUnix,
+			}
+		}
+	}
+	return index, nil
 }
 
 func (m *mockRepo) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
@@ -127,6 +144,10 @@ func (m *mockRepo) SearchPhotos(params storage.SearchPhotosParams) (*storage.Pho
 		}
 	}
 	return &storage.PhotoPage{Photos: photos}, nil
+}
+
+func (m *mockRepo) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
+	return m.ListPhotos(storage.ListPhotosParams{UserID: params.UserID, Limit: params.Limit})
 }
 
 func (m *mockRepo) SoftDeletePhoto(id int64, userID int64, deletedBy int64) error {

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,123 @@ const restartDelayEnv = "ECHOGALLERY_RESTART_DELAY_MS"
 const portFallbackScanLimit = 20
 
 var shutdownRequested = make(chan struct{}, 1)
+
+type libraryBuildState struct {
+	mu                sync.Mutex
+	status            api.LibraryBuildStatus
+	shutdownAfterDone func() error
+}
+
+func newLibraryBuildState(shutdown func() error) *libraryBuildState {
+	return &libraryBuildState{
+		shutdownAfterDone: shutdown,
+		status: api.LibraryBuildStatus{
+			Status:  "idle",
+			Message: "当前没有扫描任务",
+		},
+	}
+}
+
+func (s *libraryBuildState) Status() api.LibraryBuildStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status := s.status
+	now := time.Now()
+	var started time.Time
+	if status.StartedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, status.StartedAt); err == nil {
+			started = parsed
+		}
+	}
+	if !started.IsZero() {
+		end := now
+		if status.FinishedAt != "" {
+			if parsed, err := time.Parse(time.RFC3339, status.FinishedAt); err == nil {
+				end = parsed
+			}
+		}
+		status.ElapsedSeconds = int64(end.Sub(started).Seconds())
+		if status.Done > 0 && status.Total > status.Done && status.Status == "running" {
+			perItem := end.Sub(started).Seconds() / float64(status.Done)
+			status.ETASeconds = int64(perItem * float64(status.Total-status.Done))
+		}
+	}
+	if status.Total > 0 {
+		status.Percent = float64(status.Done) / float64(status.Total) * 100
+		if status.Percent > 100 {
+			status.Percent = 100
+		}
+	}
+	return status
+}
+
+func (s *libraryBuildState) SetExitAfterComplete(enabled bool) (api.LibraryBuildStatus, error) {
+	s.mu.Lock()
+	s.status.ExitAfterComplete = enabled
+	status := s.status
+	s.mu.Unlock()
+	if enabled && (status.Status == "completed" || status.Status == "error") && s.shutdownAfterDone != nil {
+		_ = s.shutdownAfterDone()
+	}
+	return s.Status(), nil
+}
+
+func (s *libraryBuildState) start(message string) {
+	now := time.Now().Format(time.RFC3339)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status.Status = "discovering"
+	s.status.Message = message
+	s.status.StartedAt = now
+	s.status.UpdatedAt = now
+	s.status.FinishedAt = ""
+	s.status.Done = 0
+	s.status.Total = 0
+	s.status.Imported = 0
+	s.status.Skipped = 0
+	s.status.Error = ""
+}
+
+func (s *libraryBuildState) progress(done, total int) {
+	now := time.Now().Format(time.RFC3339)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if total > 0 {
+		s.status.Status = "running"
+		s.status.Message = "正在扫描与构建资源库"
+	}
+	s.status.Done = done
+	s.status.Total = total
+	s.status.UpdatedAt = now
+}
+
+func (s *libraryBuildState) finish(summary *service.ImportSummary, err error) {
+	now := time.Now().Format(time.RFC3339)
+	exitAfterComplete := false
+	s.mu.Lock()
+	if err != nil {
+		s.status.Status = "error"
+		s.status.Message = "资源库构建失败"
+		s.status.Error = err.Error()
+	} else {
+		s.status.Status = "completed"
+		s.status.Message = "资源库构建完成"
+		if summary != nil {
+			s.status.Imported = summary.Imported
+			s.status.Skipped = summary.Skipped
+		}
+		if s.status.Total == 0 {
+			s.status.Percent = 100
+		}
+	}
+	s.status.UpdatedAt = now
+	s.status.FinishedAt = now
+	exitAfterComplete = s.status.ExitAfterComplete
+	s.mu.Unlock()
+	if exitAfterComplete && s.shutdownAfterDone != nil {
+		_ = s.shutdownAfterDone()
+	}
+}
 
 func main() {
 	if delay := strings.TrimSpace(os.Getenv(restartDelayEnv)); delay != "" {
@@ -146,42 +264,7 @@ func main() {
 	photoService := service.NewPhotoService(repo, cfg.StoragePath, managedDataDir, trashDir)
 	photoService.SetThumbnailRoot(thumbDir)
 	photoService.SetThumbnailSize(cfg.ThumbnailSize)
-	if len(cfg.Users) > 0 {
-		summary, err := photoService.ImportExistingPhotos(1, func(done, total int) {
-			if total == 0 {
-				return
-			}
-			const width = 28
-			filled := done * width / total
-			if filled < 0 {
-				filled = 0
-			}
-			if filled > width {
-				filled = width
-			}
-			fmt.Printf("\r资源库扫描中 [%s%s] %d/%d", strings.Repeat("#", filled), strings.Repeat("-", width-filled), done, total)
-			if done == total {
-				fmt.Print("\n")
-			}
-		})
-		if err != nil {
-			if os.IsPermission(err) || strings.Contains(strings.ToLower(err.Error()), "permission denied") {
-				startSetupServer(api.SetupState{
-					Mode:               api.SetupModeLibraryRecovery,
-					Message:            fmt.Sprintf("当前资源库无法访问，可能是权限不足: %v。请更换或新建资源库。", err),
-					Libraries:          cfg.Libraries,
-					CurrentStoragePath: cfg.StoragePath,
-					Port:               cfg.Port,
-				})
-				return
-			}
-			fmt.Fprintf(os.Stderr, "错误: 导入历史图片失败: %v\n", err)
-			os.Exit(1)
-		}
-		if summary.Imported > 0 {
-			fmt.Printf("已导入 %d 张历史图片\n", summary.Imported)
-		}
-	}
+	buildState := newLibraryBuildState(shutdownCurrentProcess)
 	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
@@ -192,12 +275,18 @@ func main() {
 		cfg.Port = actualPort
 	}
 
-	app := api.NewRouterWithStaticWithLifecycle(cfg, webFS, photoService, restartCurrentProcess, shutdownCurrentProcess)
+	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, photoService, restartCurrentProcess, shutdownCurrentProcess, api.LibraryBuildHooks{
+		Status:               buildState.Status,
+		SetExitAfterComplete: buildState.SetExitAfterComplete,
+	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("HTTP 服务已启动: http://%s%s\n", host, addr)
 	} else {
 		fmt.Printf("HTTP 服务已启动: http://127.0.0.1%s\n", addr)
+	}
+	if len(cfg.Users) > 0 {
+		go runLibraryBuild(photoService, buildState)
 	}
 	if err := serveWithGracefulShutdown(listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
@@ -229,6 +318,35 @@ func startSetupServer(state api.SetupState) {
 		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runLibraryBuild(photoService *service.PhotoService, buildState *libraryBuildState) {
+	buildState.start("正在发现资源库中的媒体文件")
+	summary, err := photoService.ImportExistingPhotos(1, func(done, total int) {
+		buildState.progress(done, total)
+		if total == 0 {
+			return
+		}
+		const width = 28
+		filled := done * width / total
+		if filled < 0 {
+			filled = 0
+		}
+		if filled > width {
+			filled = width
+		}
+		fmt.Printf("\r资源库扫描中 [%s%s] %d/%d", strings.Repeat("#", filled), strings.Repeat("-", width-filled), done, total)
+		if done == total {
+			fmt.Print("\n")
+		}
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: 导入历史图片失败: %v\n", err)
+	}
+	if summary != nil && summary.Imported > 0 {
+		fmt.Printf("已导入 %d 张历史图片\n", summary.Imported)
+	}
+	buildState.finish(summary, err)
 }
 
 func serveWithGracefulShutdown(listener net.Listener, handler http.Handler) error {

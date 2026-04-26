@@ -100,10 +100,6 @@ function libraryVisualSeed(library = {}) {
     'echogallery'
   ).trim().toLowerCase();
 }
-function defaultLibraryLogoURL(library = {}) {
-  const seed = libraryVisualSeed(library);
-  return `https://picsum.photos/seed/${encodeURIComponent(`echogallery-${seed || 'default'}`)}/320/320`;
-}
 function libraryLogoAssetURL(library = {}) {
   const asset = String(library.logo_asset || library.logoAsset || '').trim();
   const index = Number.isFinite(Number(library.index)) ? Number(library.index) : Number(library.logo_index);
@@ -111,7 +107,10 @@ function libraryLogoAssetURL(library = {}) {
   return `/api/settings/libraries/${index}/logo?v=${encodeURIComponent(asset)}`;
 }
 function resolveLibraryLogoURL(library = {}) {
-  return library.logo_image_url || library.logoImageUrl || libraryLogoAssetURL(library) || defaultLibraryLogoURL(library);
+  const explicit = library.logo_image_url || library.logoImageUrl || libraryLogoAssetURL(library);
+  if (explicit) return explicit;
+  const key = libraryVisualSeed(library);
+  return state.libraryRandomLogos && state.libraryRandomLogos[key] || '';
 }
 function normalizeHexColor(value) {
   const input = String(value || '').trim();
@@ -244,6 +243,7 @@ const icons = {
   check: '',
   photo: '',
   logout: '',
+  shutdown: '',
   plus: '',
   settings: '',
   shareSmall: '',
@@ -272,6 +272,7 @@ const svgIconFiles = {
   check: 'check.svg',
   photo: 'photo.svg',
   logout: 'logout.svg',
+  shutdown: 'shutdown.svg',
   plus: 'plus.svg',
   shareSmall: 'share-small.svg',
   favoriteSmall: 'favorite-small.svg',
@@ -796,6 +797,26 @@ function currentLibraryBrand() {
   }
   return resolveActiveLibrary(state.serverSettings.libraries || [], state.serverSettings.storage_path || '');
 }
+async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
+  if (!library || library.logo_asset || library.logo_image_url || library.logoImageUrl || state.libraryRandomLogoLoading) return;
+  const key = libraryVisualSeed(library);
+  if (!key || state.libraryRandomLogos[key] || state.libraryRandomLogoTried[key]) return;
+  state.libraryRandomLogoTried[key] = true;
+  state.libraryRandomLogoLoading = true;
+  try {
+    const seed = Date.now() + Math.floor(Math.random() * 100000);
+    const page = await api.get(`/api/media/random?limit=1&seed=${seed}`);
+    const photo = page.photos && page.photos[0];
+    if (photo && photo.uuid) {
+      state.libraryRandomLogos[key] = mediaThumbURL(photo);
+      applyLibraryBranding();
+    }
+  } catch (e) {
+    console.warn('随机资源库头像加载失败', e);
+  } finally {
+    state.libraryRandomLogoLoading = false;
+  }
+}
 function libraryFallbackText(library = {}, limit = 3) {
   const label = String(library.name || library.path || 'EchoGallery').trim();
   return escapeHTML((label || 'EG').slice(0, limit));
@@ -846,12 +867,14 @@ function applyLibraryBranding() {
     favicon.rel = 'icon';
     document.head.appendChild(favicon);
   }
-  favicon.href = current ? resolveLibraryLogoURL(current) : createTextFavicon(current && current.name ? current.name : 'PA');
+  const logoURL = current ? resolveLibraryLogoURL(current) : '';
+  favicon.href = logoURL || createTextFavicon(current && current.name ? current.name : 'PA');
   const navLogo = document.querySelector('.nav-logo');
   if (navLogo) {
     navLogo.innerHTML = renderNavLogo();
     applyNavLogoFallback(navLogo, current || {});
   }
+  ensureRandomLibraryLogo(current);
 }
 async function refreshVideoThumbnails() {
   return api.post('/api/settings/video-thumbnails/refresh', {});
@@ -860,7 +883,11 @@ function renderNavLogo() {
   const current = currentLibraryBrand();
   if (current) {
     const label = current.name || 'EchoGallery';
-    return `<span class="nav-logo-media"><img class="nav-logo-image" src="${resolveLibraryLogoURL(current)}" alt="${escapeHTML(label)}"></span><span class="nav-logo-text">${escapeHTML(label)}</span>`;
+    const logoURL = resolveLibraryLogoURL(current);
+    const media = logoURL
+      ? `<img class="nav-logo-image" src="${logoURL}" alt="${escapeHTML(label)}">`
+      : `<span class="nav-logo-mark">${libraryFallbackText(current)}</span>`;
+    return `<span class="nav-logo-media">${media}</span><span class="nav-logo-text">${escapeHTML(label)}</span>`;
   }
   const logoText = current && current.name ? current.name.trim() : '';
   const logoMark = logoText ? `<span class="nav-logo-mark">${logoText.slice(0, 3)}</span>` : icons.photo;
@@ -875,11 +902,22 @@ function renderSearchOverlay() {
       <input id="global-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索文件名、类型、UUID">
       <button class="btn-icon search-close-btn" id="search-close-btn" type="button" aria-label="关闭">${icons.close}</button>
     </div>
+    <div class="search-filters" id="search-filters">
+      ${renderSearchFilterButton('all', '全部')}
+      ${renderSearchFilterButton('photo', '照片')}
+      ${renderSearchFilterButton('video', '视频')}
+      ${renderSearchFilterButton('album', '相册')}
+      ${renderSearchFilterButton('favorite', '个人收藏')}
+    </div>
     <div class="search-status" id="search-status"></div>
     <div class="search-results" id="search-results"></div>
     <button class="btn search-more-btn" id="search-more-btn" type="button">加载更多</button>
   </div>
 </div>`;
+}
+
+function renderSearchFilterButton(value, label) {
+  return `<button class="search-filter${state.searchFilter === value ? ' active' : ''}" type="button" data-search-filter="${value}">${label}</button>`;
 }
 
 function openGlobalSearch(prefill = '') {
@@ -911,6 +949,7 @@ function closeGlobalSearch() {
 function resetSearchResults(query = '') {
   state.searchQuery = query;
   state.searchResults = [];
+  state.searchAlbumResults = [];
   state.searchCursor = '';
   state.searchHasMore = false;
   state.searchTotal = 0;
@@ -942,16 +981,34 @@ async function runGlobalSearch(query, { reset = false } = {}) {
   state.searchLoading = true;
   renderSearchResults();
   try {
-    const params = new URLSearchParams({ q: query, limit: '36' });
-    if (!reset && state.searchCursor) params.set('cursor', state.searchCursor);
-    const response = await fetch(`/api/media/search?${params.toString()}`, { signal: controller.signal });
-    if (!response.ok) throw await response.json();
-    const page = await response.json();
-    const photos = page.photos || [];
-    state.searchResults = reset ? photos : state.searchResults.concat(photos);
-    state.searchCursor = page.next_cursor || '';
-    state.searchHasMore = !!page.has_more;
-    state.searchTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.searchResults.length;
+    const includeMedia = state.searchFilter !== 'album';
+    const includeAlbums = state.searchFilter === 'all' || state.searchFilter === 'album';
+    let mediaTotal = 0;
+    if (includeMedia) {
+      const params = new URLSearchParams({ q: query, limit: '36' });
+      if (state.searchFilter === 'photo') params.set('kind', 'image');
+      if (state.searchFilter === 'video') params.set('kind', 'video');
+      if (state.searchFilter === 'favorite') params.set('favorite', '1');
+      if (!reset && state.searchCursor) params.set('cursor', state.searchCursor);
+      const response = await fetch(`/api/media/search?${params.toString()}`, { signal: controller.signal });
+      if (!response.ok) throw await response.json();
+      const page = await response.json();
+      const photos = page.photos || [];
+      state.searchResults = reset ? photos : state.searchResults.concat(photos);
+      state.searchCursor = page.next_cursor || '';
+      state.searchHasMore = !!page.has_more;
+      mediaTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.searchResults.length;
+    } else {
+      state.searchResults = [];
+      state.searchCursor = '';
+      state.searchHasMore = false;
+    }
+    if (includeAlbums && reset) {
+      state.searchAlbumResults = await searchAlbums(query, controller.signal);
+    } else if (!includeAlbums) {
+      state.searchAlbumResults = [];
+    }
+    state.searchTotal = mediaTotal + state.searchAlbumResults.length;
   } catch (e) {
     if (!e || e.name !== 'AbortError') {
       console.error(e);
@@ -964,6 +1021,19 @@ async function runGlobalSearch(query, { reset = false } = {}) {
       renderSearchResults();
     }
   }
+}
+
+async function searchAlbums(query, signal) {
+  if (!state.searchAlbumCache) {
+    const response = await fetch('/api/media/albums', { signal });
+    if (!response.ok) throw await response.json();
+    state.searchAlbumCache = await response.json();
+  }
+  const needle = query.trim().toLowerCase();
+  return (state.searchAlbumCache || []).filter(album => {
+    const haystack = `${album.name || ''} ${album.description || ''}`.toLowerCase();
+    return haystack.includes(needle);
+  }).slice(0, 24);
 }
 
 function searchResultMeta(photo) {
@@ -992,11 +1062,32 @@ function renderSearchResults() {
     return;
   }
   statusEl.textContent = state.searchTotal ? `找到 ${state.searchTotal} 条结果` : (state.searchResults.length ? `找到 ${state.searchResults.length} 条结果` : '');
-  if (!state.searchResults.length) {
+  if (!state.searchResults.length && !state.searchAlbumResults.length) {
     resultsEl.innerHTML = `<div class="search-empty">没有匹配结果</div>`;
   } else {
     resultsEl.innerHTML = '';
     const fragment = document.createDocumentFragment();
+    state.searchAlbumResults.forEach(album => {
+      const card = el('button', 'search-result-card search-result-album');
+      card.type = 'button';
+      const cover = album.cover_uuid
+        ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(album.name || '')}">`
+        : `<span class="search-result-album-icon">${icons.album}</span>`;
+      card.innerHTML = `
+        <span class="search-result-thumb">
+          ${cover}
+          <span class="search-result-kind">相册</span>
+        </span>
+        <span class="search-result-main">
+          <strong>${escapeHTML(album.name || '未命名相册')}</strong>
+          <span>${album.photo_count || 0} 条媒体${album.description ? ` · ${escapeHTML(album.description)}` : ''}</span>
+        </span>`;
+      card.addEventListener('click', () => {
+        closeGlobalSearch();
+        openAlbumDetail(album);
+      });
+      fragment.appendChild(card);
+    });
     state.searchResults.forEach((photo, index) => {
       const card = el('button', 'search-result-card');
       card.type = 'button';
@@ -1193,6 +1284,12 @@ async function restartApp() {
 }
 async function shutdownApp() {
   return api.post('/api/settings/shutdown', {});
+}
+async function fetchLibraryBuildStatus() {
+  return api.get('/api/library-build/status');
+}
+async function setLibraryBuildExitAfterComplete(enabled) {
+  return api.put('/api/library-build/exit-after-complete', { enabled });
 }
 function applyServerSettings(data = {}) {
   state.serverSettings.port = Number(data.port) || 8080;
@@ -1489,6 +1586,8 @@ const state = {
   randomAlbumHasMore: true,
   randomAlbumSeed: Date.now(),
   randomAlbumLoaded: false,
+  randomAlbumTotal: 0,
+  randomAlbumAbortController: null,
   timelineOrder: 'desc',
   timelineCursor: '',
   timelineHasMore: true,
@@ -1590,13 +1689,18 @@ const state = {
   prefetchedMediaSet: new Set(),
   searchOpen: false,
   searchQuery: '',
+  searchFilter: 'all',
   searchResults: [],
+  searchAlbumResults: [],
+  searchAlbumCache: null,
   searchCursor: '',
   searchHasMore: false,
   searchLoading: false,
   searchTotal: 0,
   searchTimer: null,
   searchAbortController: null,
+  libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
+  libraryBuildPollTimer: null,
   blockingInteraction: false,
   timelineBulkLoading: false,
   timelineBulkCancelRequested: false,
@@ -1606,6 +1710,10 @@ const state = {
   randomAlbumBulkAbortController: null,
   lightboxPageScrollTop: 0,
   pendingLibraryLogoGuide: null,
+  pendingLibraryLogoCrop: null,
+  libraryRandomLogos: {},
+  libraryRandomLogoTried: {},
+  libraryRandomLogoLoading: false,
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -1656,18 +1764,29 @@ function rememberPrefetchedMedia(key) {
   return true;
 }
 
-function showBlockingProgress(title, detail = '') {
+function showBlockingProgress(title, detail = '', options = {}) {
   state.blockingInteraction = true;
   let overlay = $('#blocking-progress');
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.id = 'blocking-progress';
     overlay.className = 'blocking-progress';
-    overlay.innerHTML = `<div class="blocking-progress-card"><div class="spinner"></div><strong></strong><span></span></div>`;
+    overlay.innerHTML = `<div class="blocking-progress-card"><div class="spinner"></div><strong></strong><span></span><button class="btn btn-sm blocking-progress-cancel" type="button" hidden>取消</button></div>`;
     document.body.appendChild(overlay);
   }
   $('strong', overlay).textContent = title;
   $('span', overlay).textContent = detail;
+  const cancelBtn = $('.blocking-progress-cancel', overlay);
+  if (cancelBtn) {
+    if (typeof options.onCancel === 'function') {
+      cancelBtn.hidden = false;
+      cancelBtn.textContent = options.cancelText || '取消';
+      cancelBtn.onclick = options.onCancel;
+    } else {
+      cancelBtn.hidden = true;
+      cancelBtn.onclick = null;
+    }
+  }
   overlay.classList.add('show');
 }
 function updateBlockingProgress(detail = '') {
@@ -1739,8 +1858,9 @@ function renderApp() {
     <div class="nav-bottom">
       <a class="nav-item" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} 源码仓库</a>
       <a class="nav-item" href="#" id="theme-btn"><span class="theme-icon">${isDark ? icons.sun : icons.moon}</span> 切换主题</a>
-      <a class="nav-item nav-item-danger" href="#" id="shutdown-btn">${icons.logout} 退出程序</a>
       <a class="nav-item" href="#" id="logout-btn">${icons.logout} 退出登录</a>
+      <div class="nav-separator" aria-hidden="true"></div>
+      <a class="nav-item nav-item-danger" href="#" id="shutdown-btn">${icons.shutdown} 退出程序</a>
     </div>
   </nav>
   <div class="main">
@@ -1772,6 +1892,7 @@ ${renderLibraryLogoGuideModal()}`;
   bindGlobal();
   syncSidebarUI();
   ensureSettingsDataLoaded();
+  startLibraryBuildPolling();
   renderView();
 }
 
@@ -1853,7 +1974,81 @@ function switchView(view) {
   applyLibraryBranding();
   renderView();
 }
+function isLibraryBuildBlocking(status = state.libraryBuildStatus) {
+  return ['discovering', 'running', 'error'].includes(status && status.status);
+}
+function formatSecondsShort(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const rest = Math.floor(value % 60);
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return `${hours} 小时 ${mins} 分`;
+  }
+  if (minutes > 0) return `${minutes} 分 ${rest} 秒`;
+  return `${rest} 秒`;
+}
+async function refreshLibraryBuildStatus() {
+  try {
+    const previousBlocking = isLibraryBuildBlocking();
+    const status = await fetchLibraryBuildStatus();
+    state.libraryBuildStatus = status || { status: 'idle' };
+    const nextBlocking = isLibraryBuildBlocking();
+    if (nextBlocking || previousBlocking) renderView();
+    if (['discovering', 'running'].includes(state.libraryBuildStatus.status)) {
+      clearTimeout(state.libraryBuildPollTimer);
+      state.libraryBuildPollTimer = setTimeout(refreshLibraryBuildStatus, 1000);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+function startLibraryBuildPolling() {
+  clearTimeout(state.libraryBuildPollTimer);
+  refreshLibraryBuildStatus();
+}
+function renderLibraryBuild() {
+  const status = state.libraryBuildStatus || {};
+  const running = ['discovering', 'running'].includes(status.status);
+  const total = Number(status.total) || 0;
+  const done = Number(status.done) || 0;
+  const percent = total > 0 ? Math.min(100, Math.max(0, Number(status.percent) || done / total * 100)) : (running ? 8 : 100);
+  $('#topbar-title').textContent = '扫描与构建资源库';
+  $('#topbar-meta').innerHTML = '';
+  $('#topbar-actions').innerHTML = '';
+  $('#content').innerHTML = `
+<div class="library-build-page">
+  <section class="library-build-panel">
+    <div class="library-build-heading">
+      <div>
+        <h2>${escapeHTML(status.message || '正在准备资源库')}</h2>
+        <p>${running ? 'EchoGallery 正在建立媒体索引，完成后会自动进入资源库。' : '资源库构建需要处理后才能继续。'}</p>
+      </div>
+      <span class="library-build-badge">${running ? '运行中' : '需要处理'}</span>
+    </div>
+    <div class="library-build-progress">
+      <div class="library-build-progress-fill" style="width:${percent}%"></div>
+    </div>
+    <div class="library-build-stats">
+      <div><strong>${total > 0 ? `${done} / ${total}` : '发现媒体中'}</strong><span>处理进度</span></div>
+      <div><strong>${Math.round(percent)}%</strong><span>完成度</span></div>
+      <div><strong>${formatSecondsShort(status.elapsed_seconds)}</strong><span>已用时间</span></div>
+      <div><strong>${status.eta_seconds > 0 ? formatSecondsShort(status.eta_seconds) : '计算中'}</strong><span>预计剩余</span></div>
+    </div>
+    ${status.error ? `<div class="library-build-error">${escapeHTML(status.error)}</div>` : ''}
+    <label class="library-build-exit">
+      <input type="checkbox" id="library-build-exit-after" ${status.exit_after_complete ? 'checked' : ''}>
+      <span>构建完成后自动退出应用</span>
+    </label>
+  </section>
+</div>`;
+}
 function renderView() {
+  if (isLibraryBuildBlocking()) {
+    renderLibraryBuild();
+    return;
+  }
   switch (state.view) {
     case 'timeline':     renderTimeline();    break;
     case 'favorites':    renderFavorites();   break;
@@ -1878,10 +2073,11 @@ function appendRandomAlbumGrid(photos) {
   if (!wrap) return;
   let grid = $('#random-album-grid');
   if (!grid) {
-    wrap.innerHTML = '';
     grid = el('div', 'photo-grid');
     grid.id = 'random-album-grid';
-    wrap.appendChild(grid);
+    const loadMore = $('#load-more');
+    if (loadMore) wrap.insertBefore(grid, loadMore);
+    else wrap.appendChild(grid);
   }
   const fragment = document.createDocumentFragment();
   photos.forEach(photo => fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos)));
@@ -1892,12 +2088,25 @@ async function fetchAllRandomAlbumPhotos() {
   const allPhotos = [];
   let cursor = '';
   let pageCount = 0;
-  showBlockingProgress('正在加载全部乱序相册媒体', '正在读取第 1 批…');
+  let cancelled = false;
+  let controller = null;
+  showBlockingProgress('正在加载全部乱序相册媒体', '正在读取第 1 批…', {
+    cancelText: '取消整理',
+    onCancel: () => {
+      cancelled = true;
+      if (controller) controller.abort();
+      updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在取消…`);
+    },
+  });
   for (;;) {
+    if (cancelled) throw new DOMException('Aborted', 'AbortError');
     const params = new URLSearchParams({ limit: '240' });
+    params.set('seed', String(state.randomAlbumSeed));
     if (cursor) params.set('cursor', cursor);
-    const url = `/api/media?${params.toString()}`;
-    const page = await api.get(url);
+    controller = new AbortController();
+    const response = await fetch(`/api/media/random?${params.toString()}`, { signal: controller.signal });
+    if (!response.ok) throw await response.json();
+    const page = await response.json();
     const nextPhotos = page.photos || [];
     allPhotos.push(...nextPhotos);
     pageCount += 1;
@@ -1910,14 +2119,14 @@ async function fetchAllRandomAlbumPhotos() {
     cursor = page.next_cursor;
     if (pageCount % 8 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
   }
-  updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在打乱顺序…`);
-  return shuffleRandomAlbumBatch(allPhotos);
+  updateBlockingProgress(`已读取 ${allPhotos.length} 条媒体，正在完成整理…`);
+  return allPhotos;
 }
 
 async function fetchRandomAlbumPage(cursor, limit, signal) {
-  const params = new URLSearchParams({ limit: String(limit) });
+  const params = new URLSearchParams({ limit: String(limit), seed: String(state.randomAlbumSeed) });
   if (cursor) params.set('cursor', cursor);
-  const response = await fetch(`/api/media?${params.toString()}`, { signal });
+  const response = await fetch(`/api/media/random?${params.toString()}`, { signal });
   if (!response.ok) throw await response.json();
   return response.json();
 }
@@ -2044,8 +2253,8 @@ async function loadAllRandomAlbumPhotos() {
         if (pageCount % 4 === 0) await new Promise(resolve => requestAnimationFrame(resolve));
       }
       if (state.randomAlbumBulkCancelRequested) throw new DOMException('Aborted', 'AbortError');
-      updateRandomAlbumLoadAllProgress(allPhotos.length, total || allPhotos.length, '正在打乱顺序…');
-      photos = shuffleRandomAlbumBatch(allPhotos);
+      updateRandomAlbumLoadAllProgress(allPhotos.length, total || allPhotos.length, '正在整理完成…');
+      photos = allPhotos;
       state.randomAlbumPhotos = photos;
       state.randomAlbumCursor = '';
       state.randomAlbumHasMore = false;
@@ -2094,26 +2303,34 @@ async function loadAllRandomAlbumPhotos() {
 }
 
 async function loadMoreRandomAlbum() {
-  if (state.randomAlbumLoading) return;
+  if (state.randomAlbumLoading || !state.randomAlbumHasMore) return;
   state.randomAlbumLoading = true;
   try {
-    state.randomAlbumPhotos = await fetchAllRandomAlbumPhotos();
-    state.randomAlbumCursor = '';
-    state.randomAlbumHasMore = false;
-    state.randomAlbumLoaded = true;
+    state.randomAlbumAbortController = new AbortController();
+    const page = await fetchRandomAlbumPage(state.randomAlbumCursor, 60, state.randomAlbumAbortController.signal);
+    const photos = page.photos || [];
+    state.randomAlbumTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.randomAlbumTotal;
+    state.randomAlbumPhotos.push(...photos);
+    state.randomAlbumCursor = page.next_cursor || '';
+    state.randomAlbumHasMore = page.has_more || false;
+    state.randomAlbumLoaded = !state.randomAlbumHasMore;
+    appendRandomAlbumGrid(photos);
   } catch (e) {
-    console.error(e);
-    throw e;
+    if (!e || e.name !== 'AbortError') {
+      console.error(e);
+      throw e;
+    }
   } finally {
     state.randomAlbumLoading = false;
-    hideBlockingProgress();
-    renderRandomAlbumGrid();
+    state.randomAlbumAbortController = null;
+    updateRandomAlbumLoadMoreUI();
+    maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
   }
 }
 
 async function renderRandomAlbum() {
   $('#topbar-title').textContent = '乱序相册';
-  $('#topbar-meta').innerHTML = `<div class="topbar-hint">会先收集当前资源库的全部媒体，再统一打乱成一个随机顺序。</div>` + renderGridScaleControl();
+  $('#topbar-meta').innerHTML = `<div class="topbar-hint">按随机顺序分页浏览，不再一次性整理整个资源库。</div>` + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="random-load-all-btn" type="button">加载全部</button><button class="btn btn-sm" id="reshuffle-btn">${icons.shuffle} 重新打乱</button></div>`;
   bindGridScaleControl();
   $('#random-load-all-btn').addEventListener('click', openRandomAlbumLoadAllModal);
@@ -2121,26 +2338,33 @@ async function renderRandomAlbum() {
     state.randomAlbumSeed = Date.now();
     state.randomAlbumPhotos = [];
     state.randomAlbumCursor = '';
-    state.randomAlbumHasMore = false;
+    state.randomAlbumHasMore = true;
     state.randomAlbumLoaded = false;
-    $('#content').innerHTML = `<div id="random-album-wrap"><div class="load-more" id="load-more"><div class="spinner"></div>正在收集全部媒体并打乱…</div></div>`;
+    state.randomAlbumTotal = 0;
+    $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
+    renderRandomAlbumGrid();
     await loadMoreRandomAlbum();
     restoreViewScroll('random-album');
   });
 
-  if (state.randomAlbumLoaded) {
+  if (state.randomAlbumPhotos.length) {
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
     renderRandomAlbumGrid();
+    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
     restoreViewScroll('random-album');
     return;
   }
 
-  $('#content').innerHTML = `<div id="random-album-wrap"><div class="load-more" id="load-more"><div class="spinner"></div>正在收集全部媒体并打乱…</div></div>`;
+  $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
+  renderRandomAlbumGrid();
   try {
     state.randomAlbumPhotos = [];
     state.randomAlbumCursor = '';
-    state.randomAlbumHasMore = false;
+    state.randomAlbumHasMore = true;
+    state.randomAlbumLoaded = false;
+    state.randomAlbumTotal = 0;
     await loadMoreRandomAlbum();
+    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
     restoreViewScroll('random-album');
   } catch (e) {
     $('#random-album-wrap').innerHTML = `<p style="color:var(--danger)">加载失败: ${(e && e.error) || e}</p>`;
@@ -2151,16 +2375,33 @@ async function renderRandomAlbum() {
 function renderRandomAlbumGrid() {
   const wrap = $('#random-album-wrap');
   if (!wrap) return;
-  if (!state.randomAlbumPhotos.length) {
+  if (!state.randomAlbumPhotos.length && !state.randomAlbumHasMore && !state.randomAlbumLoading) {
     wrap.innerHTML = `<div class="empty">${icons.shuffle}<p>还没有可浏览的媒体</p></div>`;
     return;
   }
   wrap.innerHTML = '';
-  appendRandomAlbumGrid(state.randomAlbumPhotos);
+  if (state.randomAlbumPhotos.length) appendRandomAlbumGrid(state.randomAlbumPhotos);
   const loadMore = el('div', 'load-more');
   loadMore.id = 'load-more';
-  loadMore.textContent = `已随机载入 ${state.randomAlbumPhotos.length} 条媒体`;
   wrap.appendChild(loadMore);
+  updateRandomAlbumLoadMoreUI();
+}
+
+function updateRandomAlbumLoadMoreUI() {
+  const loadMore = $('#load-more');
+  if (!loadMore || state.view !== 'random-album') return;
+  if (state.randomAlbumLoading) {
+    loadMore.innerHTML = `<div class="spinner"></div>正在载入乱序媒体… 已读取 ${state.randomAlbumPhotos.length}${state.randomAlbumTotal ? ` / ${state.randomAlbumTotal}` : ''} 条 <button class="btn btn-sm" id="random-page-cancel" type="button">取消</button>`;
+    $('#random-page-cancel')?.addEventListener('click', () => {
+      if (state.randomAlbumAbortController) state.randomAlbumAbortController.abort();
+    });
+    return;
+  }
+  if (state.randomAlbumHasMore) {
+    loadMore.innerHTML = `已随机载入 ${state.randomAlbumPhotos.length}${state.randomAlbumTotal ? ` / ${state.randomAlbumTotal}` : ''} 条媒体`;
+    return;
+  }
+  loadMore.textContent = `已随机载入 ${state.randomAlbumPhotos.length} 条媒体`;
 }
 
 async function renderSettings() {
@@ -2194,9 +2435,7 @@ function renderLibrarySettingsRows() {
   return libraries.map((library, index) => `
     <div class="settings-library-row" data-library-index="${index}" data-logo-asset="${escapeHTML(library.logo_asset || '')}" data-logo-preview-url="${escapeHTML(library.logo_image_url || '')}" data-logo-action="">
       <div class="settings-library-logo-block">
-        <div class="settings-library-logo-preview has-image">
-          <img src="${resolveLibraryLogoURL(library)}" alt="${escapeHTML(library.name || '资源库 Logo')}">
-        </div>
+        <div class="settings-library-logo-preview"></div>
         <label class="settings-library-color-control">
           <span>主色</span>
           <input class="settings-library-accent" type="color" value="${resolveLibraryAccentColor(library)}">
@@ -2208,7 +2447,7 @@ function renderLibrarySettingsRows() {
           </label>
           <button class="btn btn-sm settings-library-clear-logo" type="button" ${library.logo_asset ? '' : 'disabled'}>移除图像</button>
         </div>
-        <div class="settings-library-logo-hint">${library.logo_asset ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示' : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示'}</div>
+        <div class="settings-library-logo-hint">${library.logo_asset ? '已设置资源库头像；重新上传可在弹窗中手动裁剪构图' : '未设置头像；侧栏会从当前资源库缩略图中随机挑选一张作为头像'}</div>
       </div>
       <div class="settings-library-fields">
         <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(library.name)}">
@@ -2259,18 +2498,20 @@ function buildLibraryLogoPreview(row, library = {}) {
   const logoURL = row.dataset.logoPreviewUrl || resolveLibraryLogoURL(displayLibrary);
   const accent = resolveLibraryAccentColor(displayLibrary);
   if (preview) {
-    preview.classList.add('has-image');
-    preview.innerHTML = `<img src="${logoURL}" alt="${escapeHTML(displayName || '资源库 Logo')}">`;
+    preview.classList.toggle('has-image', !!logoURL);
+    preview.innerHTML = logoURL
+      ? `<img src="${logoURL}" alt="${escapeHTML(displayName || '资源库 Logo')}">`
+      : `<span>${libraryFallbackText(displayLibrary)}</span>`;
     preview.style.borderColor = rgbaColor(accent, .35);
     preview.style.boxShadow = `inset 0 0 0 1px ${rgbaColor(accent, .12)}`;
     applyLibraryPreviewFallback(preview, displayLibrary);
   }
   if (hint) {
-    if (file) hint.textContent = `待上传：${file.name}，保存后会按中心裁剪为正方形，并在侧栏以圆形显示`;
+    if (file) hint.textContent = `待上传：${file.name}，保存后会使用你在弹窗中裁剪的头像`;
     else if (row.dataset.logoAction === 'remove') hint.textContent = '保存后将移除资源库图像';
     else hint.textContent = row.dataset.logoAsset
-      ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示'
-      : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示';
+      ? '已设置资源库头像；重新上传可在弹窗中手动裁剪构图'
+      : '未设置头像；侧栏会从当前资源库缩略图中随机挑选一张作为头像';
   }
   if (clearBtn) clearBtn.disabled = !row.dataset.logoAsset && !file && row.dataset.logoAction !== 'remove';
 }
@@ -2288,9 +2529,7 @@ function createLibrarySettingsRow(library = {}, index = 0) {
   row.dataset.logoAction = '';
   row.innerHTML = `
     <div class="settings-library-logo-block">
-      <div class="settings-library-logo-preview has-image">
-        <img src="${resolveLibraryLogoURL(library)}" alt="${escapeHTML(name || '资源库 Logo')}">
-      </div>
+      <div class="settings-library-logo-preview"></div>
       <label class="settings-library-color-control">
         <span>主色</span>
         <input class="settings-library-accent" type="color" value="${accentColor}">
@@ -2302,7 +2541,7 @@ function createLibrarySettingsRow(library = {}, index = 0) {
         </label>
         <button class="btn btn-sm settings-library-clear-logo" type="button" ${logoAsset ? '' : 'disabled'}>移除图像</button>
       </div>
-      <div class="settings-library-logo-hint">${logoAsset ? '已设置资源库图像，重新上传会按中心裁剪为正方形，并在侧栏以圆形显示' : '未设置资源库图像；上传后会按中心裁剪为正方形，并在侧栏以圆形显示'}</div>
+      <div class="settings-library-logo-hint">${logoAsset ? '已设置资源库头像；重新上传可在弹窗中手动裁剪构图' : '未设置头像；侧栏会从当前资源库缩略图中随机挑选一张作为头像'}</div>
     </div>
     <div class="settings-library-fields">
       <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(name)}">
@@ -2661,13 +2900,13 @@ function renderSettingsContent() {
       logoInput.addEventListener('change', e => {
         const file = e.target.files && e.target.files[0];
         if (!file) return;
-        openLibraryLogoGuideModal(() => {
+        openLibraryLogoGuideModal(file, croppedFile => {
           if (row.dataset.logoPreviewUrl && row.dataset.logoPreviewUrl.startsWith('blob:')) {
             URL.revokeObjectURL(row.dataset.logoPreviewUrl);
           }
-          row._pendingLogoFile = file;
+          row._pendingLogoFile = croppedFile;
           row.dataset.logoAction = 'upload';
-          row.dataset.logoPreviewUrl = URL.createObjectURL(file);
+          row.dataset.logoPreviewUrl = URL.createObjectURL(croppedFile);
           buildLibraryLogoPreview(row);
           applyLibraryBranding();
           setSettingsDirty();
@@ -3959,9 +4198,28 @@ function bindGlobal() {
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
     if (e.target.closest('#search-overlay') && !e.target.closest('.search-panel')) closeGlobalSearch();
     if (e.target.closest('#search-more-btn') && state.searchHasMore) runGlobalSearch(state.searchQuery, { reset: false });
+    const filterBtn = e.target.closest('[data-search-filter]');
+    if (filterBtn) {
+      state.searchFilter = filterBtn.dataset.searchFilter || 'all';
+      $$('.search-filter').forEach(btn => btn.classList.toggle('active', btn === filterBtn));
+      const query = $('#global-search-input')?.value.trim() || '';
+      resetSearchResults(query);
+      renderSearchResults();
+      if (query) runGlobalSearch(query, { reset: true });
+    }
   });
   document.addEventListener('input', e => {
     if (e.target.matches('#global-search-input')) scheduleGlobalSearch();
+  });
+  document.addEventListener('change', async e => {
+    if (!e.target.matches('#library-build-exit-after')) return;
+    try {
+      state.libraryBuildStatus = await setLibraryBuildExitAfterComplete(e.target.checked);
+      renderView();
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      alert('设置失败: ' + ((err && err.error) || err));
+    }
   });
   document.addEventListener('contextmenu', e => {
     if (!$('#lightbox').classList.contains('open')) return;
@@ -4626,34 +4884,142 @@ function renderShareListModal() {
 
 function renderLibraryLogoGuideModal() {
   return `<div class="modal-overlay" id="library-logo-guide-modal">
-  <div class="modal" style="width:460px">
-    <div class="modal-title">编辑资源库头像</div>
-    <p style="font-size:.88rem;color:var(--text2);margin-bottom:12px">保存后系统会按图像中心裁剪为正方形，并在侧边栏显示为圆形头像。</p>
-    <p style="font-size:.88rem;color:var(--text2);margin-bottom:12px">如果你想精确控制构图，建议先在外部工具中裁成正方形，再回来上传。</p>
+  <div class="modal library-logo-crop-modal">
+    <div class="modal-title">裁剪资源库头像</div>
+    <p class="modal-copy">拖动画面并调整缩放，保存后将按这个 1:1 构图作为资源库头像。</p>
+    <div class="library-logo-crop-stage" id="library-logo-crop-stage">
+      <img id="library-logo-crop-img" alt="资源库头像预览">
+      <div class="library-logo-crop-mask" aria-hidden="true"></div>
+    </div>
+    <label class="library-logo-crop-control">
+      <span>缩放</span>
+      <input id="library-logo-crop-zoom" type="range" min="1" max="3" step="0.01" value="1">
+    </label>
     <div class="modal-footer">
       <button class="btn" id="library-logo-guide-cancel">重新选择</button>
-      <button class="btn btn-primary" id="library-logo-guide-confirm">继续使用这张图</button>
+      <button class="btn btn-primary" id="library-logo-guide-confirm">使用裁剪结果</button>
     </div>
   </div>
 </div>`;
 }
 
-function openLibraryLogoGuideModal(onConfirm, onCancel) {
-  state.pendingLibraryLogoGuide = { onConfirm, onCancel };
+function openLibraryLogoGuideModal(file, onConfirm, onCancel) {
+  const objectURL = URL.createObjectURL(file);
+  state.pendingLibraryLogoGuide = { file, onConfirm, onCancel, objectURL };
   const modal = $('#library-logo-guide-modal');
+  const stage = $('#library-logo-crop-stage');
+  const img = $('#library-logo-crop-img');
+  const zoom = $('#library-logo-crop-zoom');
+  const crop = { x: 0, y: 0, zoom: 1, dragging: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+  state.pendingLibraryLogoCrop = crop;
+  img.src = objectURL;
+  zoom.value = '1';
+  const apply = () => {
+    img.style.transform = `translate(${crop.x}px, ${crop.y}px) scale(${crop.zoom})`;
+  };
+  zoom.oninput = () => {
+    crop.zoom = Number(zoom.value) || 1;
+    apply();
+  };
+  stage.onpointerdown = e => {
+    crop.dragging = true;
+    crop.sx = e.clientX;
+    crop.sy = e.clientY;
+    crop.ox = crop.x;
+    crop.oy = crop.y;
+    stage.setPointerCapture(e.pointerId);
+  };
+  stage.onpointermove = e => {
+    if (!crop.dragging) return;
+    crop.x = crop.ox + e.clientX - crop.sx;
+    crop.y = crop.oy + e.clientY - crop.sy;
+    apply();
+  };
+  stage.onpointerup = e => {
+    crop.dragging = false;
+    try { stage.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+  apply();
   modal.classList.add('open');
   $('#library-logo-guide-cancel').onclick = () => {
     modal.classList.remove('open');
     const pending = state.pendingLibraryLogoGuide;
     state.pendingLibraryLogoGuide = null;
+    state.pendingLibraryLogoCrop = null;
+    if (pending && pending.objectURL) URL.revokeObjectURL(pending.objectURL);
     if (pending && pending.onCancel) pending.onCancel();
   };
-  $('#library-logo-guide-confirm').onclick = () => {
-    modal.classList.remove('open');
+  $('#library-logo-guide-confirm').onclick = async () => {
     const pending = state.pendingLibraryLogoGuide;
-    state.pendingLibraryLogoGuide = null;
-    if (pending && pending.onConfirm) pending.onConfirm();
+    const activeCrop = state.pendingLibraryLogoCrop;
+    const confirmBtn = $('#library-logo-guide-confirm');
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = '正在裁剪…';
+    }
+    try {
+      const cropped = await cropLibraryLogoFile(pending.file, activeCrop);
+      modal.classList.remove('open');
+      state.pendingLibraryLogoGuide = null;
+      state.pendingLibraryLogoCrop = null;
+      if (pending && pending.onConfirm) pending.onConfirm(cropped);
+    } catch (err) {
+      showToast((err && err.message) || '头像裁剪失败，请重新选择');
+    } finally {
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = '使用裁剪结果';
+      }
+      if (pending && pending.objectURL) URL.revokeObjectURL(pending.objectURL);
+    }
   };
+}
+
+function cropLibraryLogoFile(file, crop) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        const edge = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = edge;
+        canvas.height = edge;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, edge, edge);
+        const stage = $('#library-logo-crop-stage');
+        const stageSize = stage ? stage.getBoundingClientRect().width : 280;
+        const baseScale = Math.max(stageSize / img.naturalWidth, stageSize / img.naturalHeight);
+        const scale = baseScale * ((crop && crop.zoom) || 1);
+        const drawnW = img.naturalWidth * scale;
+        const drawnH = img.naturalHeight * scale;
+        const offsetX = (stageSize - drawnW) / 2 + ((crop && crop.x) || 0);
+        const offsetY = (stageSize - drawnH) / 2 + ((crop && crop.y) || 0);
+        const sourceX = Math.max(0, -offsetX / scale);
+        const sourceY = Math.max(0, -offsetY / scale);
+        const sourceW = Math.min(img.naturalWidth - sourceX, stageSize / scale);
+        const sourceH = Math.min(img.naturalHeight - sourceY, stageSize / scale);
+        ctx.drawImage(img, sourceX, sourceY, sourceW, sourceH, 0, 0, edge, edge);
+        canvas.toBlob(blob => {
+          URL.revokeObjectURL(url);
+          if (!blob) {
+            reject(new Error('头像裁剪失败'));
+            return;
+          }
+          resolve(new File([blob], `${file.name.replace(/\.[^.]+$/, '') || 'library-logo'}-cropped.png`, { type: 'image/png' }));
+        }, 'image/png');
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('无法读取头像图像'));
+    };
+    img.src = url;
+  });
 }
 
 let _shareListTarget = null;
@@ -4708,7 +5074,6 @@ function renderShareList() {
 
 // ── 登出 ──────────────────────────────────────────────
 async function shutdownFromUI() {
-  if (!confirm('确定要退出 EchoGallery 吗？这会关闭当前服务进程。')) return;
   try {
     await shutdownApp();
     showToast('EchoGallery 正在退出');

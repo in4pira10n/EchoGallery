@@ -16,6 +16,8 @@ type Photo struct {
 	IsFavorite     bool       `json:"is_favorite"`
 	StorageRelPath string     `json:"-"`        // 应用内部实际存储的相对路径
 	SourceRelPath  string     `json:"-"`        // 启动扫描导入时源文件的相对路径，用于避免重复导入
+	SourceModUnix  int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
+	RandomSortKey  int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
 	TakenAt        time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
 	UploadedAt     time.Time  `json:"uploaded_at"`
 	UploadedBy     int64      `json:"uploaded_by"` // 关联 users.id
@@ -80,14 +82,34 @@ type ListPhotosParams struct {
 	Reverse      bool   // true 时按拍摄时间正序（旧到新）
 	OnlyTrashed  bool   // true 时查询回收站
 	OnlyFavorite bool   // true 时仅查询个人收藏
+	SkipTotal    bool   // true 时跳过 COUNT(*)，用于后续分页降低大库滚动成本
 }
 
 // SearchPhotosParams 查询媒体搜索结果参数。
 type SearchPhotosParams struct {
-	UserID int64
-	Query  string
-	Cursor string
-	Limit  int
+	UserID       int64
+	Query        string
+	Cursor       string
+	Limit        int
+	MediaKind    string
+	OnlyFavorite bool
+}
+
+// RandomPhotosParams 查询乱序相册媒体参数。
+type RandomPhotosParams struct {
+	UserID    int64
+	Seed      int64
+	Cursor    string
+	Limit     int
+	SkipTotal bool
+}
+
+// SourceMediaInfo 是启动扫描使用的轻量索引，避免为每个源文件做一次完整查询。
+type SourceMediaInfo struct {
+	ID            int64
+	SourceRelPath string
+	Size          int64
+	SourceModUnix int64
 }
 
 // ListAlbumPhotosParams 查询相册内图片参数

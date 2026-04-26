@@ -49,6 +49,7 @@ type stubRegistrar struct {
 	getTrash                func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTimeline             func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	searchMedia             func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
+	getRandomMedia          func(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
 	mediaPath               func(photo *storage.Photo) string
 	permanentlyDeletePhoto  func(id int64, userID int64) error
 	playWithSystemPlayer    func(id int64, userID int64) error
@@ -160,7 +161,17 @@ func (s stubRegistrar) GetTimeline(params storage.ListPhotosParams) (*storage.Ph
 }
 
 func (s stubRegistrar) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
+	if s.searchMedia == nil {
+		return &storage.PhotoPage{}, nil
+	}
 	return s.searchMedia(params)
+}
+
+func (s stubRegistrar) GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
+	if s.getRandomMedia == nil {
+		return &storage.PhotoPage{}, nil
+	}
+	return s.getRandomMedia(params)
 }
 
 func (s stubRegistrar) MediaPath(photo *storage.Photo) string {

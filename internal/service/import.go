@@ -25,8 +25,10 @@ type ImportSummary struct {
 }
 
 type importJob struct {
-	path         string
-	originalName string
+	path          string
+	originalName  string
+	sourceRelPath string
+	info          fs.FileInfo
 }
 
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
@@ -38,6 +40,12 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 		return summary, err
 	}
 	var jobs []importJob
+	sourceIndex, err := s.repo.ListSourceMediaIndex(uploadedBy)
+	if err != nil {
+		return summary, err
+	}
+	totalCandidates := 0
+	indexSkippedCandidates := 0
 
 	err = filepath.WalkDir(s.sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -65,7 +73,31 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 			summary.Skipped++
 			return nil
 		}
-		jobs = append(jobs, importJob{path: path, originalName: name})
+		sourceRelPath, err := filepath.Rel(s.sourcePath, path)
+		if err != nil {
+			return err
+		}
+		sourceRelPath = filepath.Clean(sourceRelPath)
+		totalCandidates++
+
+		var info fs.FileInfo
+		if existing, ok := sourceIndex[sourceRelPath]; ok {
+			if existing.SourceModUnix == 0 {
+				summary.Skipped++
+				indexSkippedCandidates++
+				return nil
+			}
+			info, err = d.Info()
+			if err != nil {
+				return err
+			}
+			if sourceMediaUnchanged(existing, info) {
+				summary.Skipped++
+				indexSkippedCandidates++
+				return nil
+			}
+		}
+		jobs = append(jobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
 		return nil
 	})
 	if err != nil {
@@ -74,7 +106,7 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 
 	if len(jobs) == 0 {
 		if progress != nil {
-			progress(0, 0)
+			progress(totalCandidates, totalCandidates)
 		}
 		return summary, nil
 	}
@@ -96,7 +128,7 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 		go func() {
 			defer wg.Done()
 			for job := range jobCh {
-				photo, imported, jobErr := s.importExistingPhotoFile(job.path, job.originalName, uploadedBy)
+				photo, imported, jobErr := s.importExistingPhotoFile(job, uploadedBy)
 				if jobErr != nil {
 					atomic.AddInt64(&skippedCount, 1)
 					fmt.Fprintf(os.Stderr, "警告: 跳过导入失败的文件 %s: %v\n", job.path, jobErr)
@@ -104,7 +136,7 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 						done := int(atomic.AddInt64(&processedCount, 1))
 						if done == len(jobs) || done%10 == 0 {
 							progressMu.Lock()
-							progress(done, len(jobs))
+							progress(indexSkippedCandidates+done, totalCandidates)
 							progressMu.Unlock()
 						}
 					}
@@ -129,7 +161,7 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 					done := int(atomic.AddInt64(&processedCount, 1))
 					if done == len(jobs) || done%10 == 0 {
 						progressMu.Lock()
-						progress(done, len(jobs))
+						progress(indexSkippedCandidates+done, totalCandidates)
 						progressMu.Unlock()
 					}
 				}
@@ -159,6 +191,14 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 	return summary, nil
 }
 
+func sourceMediaUnchanged(existing storage.SourceMediaInfo, info fs.FileInfo) bool {
+	// 旧数据库没有 source_mod_unix；只要路径已存在，仍按旧逻辑快速跳过，避免升级后首次启动退化成逐文件查询。
+	if existing.SourceModUnix == 0 {
+		return true
+	}
+	return existing.Size == info.Size() && existing.SourceModUnix == info.ModTime().UnixNano()
+}
+
 func importWorkerCount() int {
 	n := runtime.GOMAXPROCS(0)
 	if n < 2 {
@@ -170,46 +210,45 @@ func importWorkerCount() int {
 	return n
 }
 
-func (s *PhotoService) importExistingPhotoFile(path, originalName string, uploadedBy int64) (*storage.Photo, bool, error) {
-	sourceRelPath, err := filepath.Rel(s.sourcePath, path)
-	if err != nil {
-		return nil, false, err
-	}
-	sourceRelPath = filepath.Clean(sourceRelPath)
-
-	if existing, err := s.repo.GetPhotoBySourceRelPath(sourceRelPath, uploadedBy); err != nil {
+func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) (*storage.Photo, bool, error) {
+	if existing, err := s.repo.GetPhotoBySourceRelPath(job.sourceRelPath, uploadedBy); err != nil {
 		return nil, false, err
 	} else if existing != nil {
 		return existing, false, nil
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, false, err
+	info := job.info
+	if info == nil {
+		var err error
+		info, err = os.Stat(job.path)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
-	file, err := os.Open(path)
+	file, err := os.Open(job.path)
 	if err != nil {
 		return nil, false, err
 	}
-	mimeType := imgpkg.DetectMimeType(originalName)
+	mimeType := imgpkg.DetectMimeType(job.originalName)
 	if imgpkg.SupportedMimeTypes[mimeType] {
-		meta, err := imgpkg.ExtractMeta(file, originalName, info.ModTime())
+		meta, err := imgpkg.ExtractMeta(file, job.originalName, info.ModTime())
 		_ = file.Close()
 		if err != nil {
-			return nil, false, fmt.Errorf("解析图片失败 %s: %w", path, err)
+			return nil, false, fmt.Errorf("解析图片失败 %s: %w", job.path, err)
 		}
 
 		photoUUID := uuid.New().String()
 		photo := &storage.Photo{
 			UUID:          photoUUID,
-			OriginalName:  originalName,
+			OriginalName:  job.originalName,
 			MediaKind:     storage.MediaKindImage,
 			MimeType:      meta.MimeType,
 			Size:          info.Size(),
 			Width:         meta.Width,
 			Height:        meta.Height,
-			SourceRelPath: sourceRelPath,
+			SourceRelPath: job.sourceRelPath,
+			SourceModUnix: info.ModTime().UnixNano(),
 			TakenAt:       meta.TakenAt,
 			UploadedAt:    time.Now(),
 			UploadedBy:    uploadedBy,
@@ -223,21 +262,22 @@ func (s *PhotoService) importExistingPhotoFile(path, originalName string, upload
 	}
 	_ = file.Close()
 
-	videoMeta, err := media.ProbeVideo(path)
+	videoMeta, err := media.ProbeVideo(job.path)
 	if err != nil {
-		videoMeta = &media.VideoMeta{FormatName: strings.TrimPrefix(filepath.Ext(originalName), ".")}
+		videoMeta = &media.VideoMeta{FormatName: strings.TrimPrefix(filepath.Ext(job.originalName), ".")}
 	}
 	photoUUID := uuid.New().String()
 	photo := &storage.Photo{
 		UUID:          photoUUID,
-		OriginalName:  originalName,
+		OriginalName:  job.originalName,
 		MediaKind:     storage.MediaKindVideo,
-		MimeType:      media.DetectVideoMimeType(originalName),
+		MimeType:      media.DetectVideoMimeType(job.originalName),
 		Size:          info.Size(),
 		Width:         videoMeta.Width,
 		Height:        videoMeta.Height,
 		DurationMS:    videoMeta.DurationMS,
-		SourceRelPath: sourceRelPath,
+		SourceRelPath: job.sourceRelPath,
+		SourceModUnix: info.ModTime().UnixNano(),
 		TakenAt:       info.ModTime(),
 		UploadedAt:    time.Now(),
 		UploadedBy:    uploadedBy,

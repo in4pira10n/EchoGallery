@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"time"
 
@@ -16,6 +17,14 @@ type cursor struct {
 	TakenAt time.Time `json:"t"`
 	ID      int64     `json:"i"`
 }
+
+type randomCursor struct {
+	Key     int64 `json:"k"`
+	ID      int64 `json:"i"`
+	Wrapped bool  `json:"w"`
+}
+
+const randomSortKeyMax int64 = 2147483647
 
 // encodeCursor 将游标编码为字符串
 func encodeCursor(takenAt time.Time, id int64) string {
@@ -35,6 +44,42 @@ func decodeCursor(s string) (*cursor, error) {
 		return nil, fmt.Errorf("无效的游标: %w", err)
 	}
 	return &c, nil
+}
+
+func encodeRandomCursor(key, id int64, wrapped bool) string {
+	c := randomCursor{Key: key, ID: id, Wrapped: wrapped}
+	b, _ := json.Marshal(c)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+func decodeRandomCursor(s string) (*randomCursor, error) {
+	b, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("无效的乱序游标: %w", err)
+	}
+	var c randomCursor
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, fmt.Errorf("无效的乱序游标: %w", err)
+	}
+	return &c, nil
+}
+
+func normalizeRandomSeed(seed int64) int64 {
+	if seed < 0 {
+		seed = -seed
+	}
+	seed = seed % randomSortKeyMax
+	if seed == 0 {
+		return 1
+	}
+	return seed
+}
+
+func makeRandomSortKey(photo *storage.Photo) int64 {
+	input := fmt.Sprintf("%s:%s:%d:%d", photo.UUID, photo.OriginalName, photo.UploadedBy, photo.UploadedAt.UnixNano())
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(input))
+	return int64(h.Sum64()%uint64(randomSortKeyMax)) + 1
 }
 
 // scanPhoto 从数据库行扫描 Photo 对象
@@ -63,16 +108,47 @@ func scanPhoto(row interface {
 	return &p, nil
 }
 
+func scanPhotoWithExtraInt64(row interface {
+	Scan(...interface{}) error
+}, extra *int64) (*storage.Photo, error) {
+	var p storage.Photo
+	var deletedAt sql.NullTime
+	var deletedBy sql.NullInt64
+
+	err := row.Scan(
+		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
+		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &p.IsFavorite,
+		&p.TakenAt, &p.UploadedAt, &p.UploadedBy,
+		&deletedAt, &deletedBy, extra,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if deletedAt.Valid {
+		p.DeletedAt = &deletedAt.Time
+	}
+	if deletedBy.Valid {
+		p.DeletedBy = &deletedBy.Int64
+	}
+	if extra != nil {
+		p.RandomSortKey = *extra
+	}
+	return &p, nil
+}
+
 // SavePhoto 保存图片记录
 func (s *DB) SavePhoto(photo *storage.Photo) error {
 	if photo.MediaKind == "" {
 		photo.MediaKind = storage.MediaKindImage
 	}
+	if photo.RandomSortKey <= 0 {
+		photo.RandomSortKey = makeRandomSortKey(photo)
+	}
 	result, err := s.db.Exec(`
-		INSERT INTO photos (uuid, original_name, media_kind, mime_type, size, width, height, duration_ms, storage_rel_path, source_rel_path, is_favorite, taken_at, uploaded_at, uploaded_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO photos (uuid, original_name, media_kind, mime_type, size, width, height, duration_ms, storage_rel_path, source_rel_path, source_mod_unix, random_sort_key, is_favorite, taken_at, uploaded_at, uploaded_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		photo.UUID, photo.OriginalName, photo.MediaKind, photo.MimeType,
-		photo.Size, photo.Width, photo.Height, photo.DurationMS, photo.StorageRelPath, photo.SourceRelPath, photo.IsFavorite,
+		photo.Size, photo.Width, photo.Height, photo.DurationMS, photo.StorageRelPath, photo.SourceRelPath, photo.SourceModUnix, photo.RandomSortKey, photo.IsFavorite,
 		photo.TakenAt, photo.UploadedAt, photo.UploadedBy,
 	)
 	if err != nil {
@@ -161,6 +237,31 @@ func (s *DB) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*stora
 	return p, err
 }
 
+// ListSourceMediaIndex 批量加载源文件索引。只读取启动扫描需要的轻量字段，避免大库启动时逐文件查库。
+func (s *DB) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaInfo, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source_rel_path, size, source_mod_unix
+		FROM photos
+		WHERE uploaded_by = ? AND source_rel_path <> ''`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("加载源媒体索引失败: %w", err)
+	}
+	defer rows.Close()
+
+	index := make(map[string]storage.SourceMediaInfo)
+	for rows.Next() {
+		var item storage.SourceMediaInfo
+		if err := rows.Scan(&item.ID, &item.SourceRelPath, &item.Size, &item.SourceModUnix); err != nil {
+			return nil, err
+		}
+		index[item.SourceRelPath] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return index, nil
+}
+
 func escapeLikePattern(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return replacer.Replace(value)
@@ -174,11 +275,13 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	}
 
 	var total int
-	if err := s.db.QueryRow(`
-		SELECT COUNT(*)
-		FROM photos
-		WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
-		return nil, fmt.Errorf("统计图片失败: %w", err)
+	if !params.SkipTotal {
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM photos
+			WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
+			return nil, fmt.Errorf("统计图片失败: %w", err)
+		}
 	}
 
 	var rows *sql.Rows
@@ -267,6 +370,13 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 		media_kind LIKE ? ESCAPE '\'
 	)`
 	args := []interface{}{params.UserID, pattern, pattern, pattern, pattern}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		args = append(args, params.MediaKind)
+	}
+	if params.OnlyFavorite {
+		where += " AND is_favorite = 1"
+	}
 
 	var total int
 	countQuery := "SELECT COUNT(*) FROM photos WHERE " + where
@@ -304,6 +414,97 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 		return nil, err
 	}
 	page.Total = total
+	return page, nil
+}
+
+// ListRandomPhotos 查询乱序相册媒体。通过持久 random_sort_key + seed 旋转顺序，避免前端一次性加载全库再排序。
+func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	seed := normalizeRandomSeed(params.Seed)
+	state := randomCursor{Key: seed, Wrapped: false}
+	if params.Cursor != "" {
+		c, err := decodeRandomCursor(params.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		state = *c
+	}
+
+	var total int
+	if !params.SkipTotal {
+		if err := s.db.QueryRow(`
+			SELECT COUNT(*)
+			FROM photos
+			WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
+			return nil, fmt.Errorf("统计乱序相册失败: %w", err)
+		}
+	}
+
+	type randomPhoto struct {
+		photo   *storage.Photo
+		key     int64
+		wrapped bool
+	}
+	items := make([]randomPhoto, 0, limit+1)
+	appendPhase := func(wrapped bool, afterKey, afterID int64, maxKey int64, remaining int) error {
+		if remaining <= 0 {
+			return nil
+		}
+		rows, err := s.db.Query(`
+			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+			       storage_rel_path, source_rel_path, is_favorite,
+			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by, random_sort_key
+			FROM photos
+			WHERE uploaded_by = ? AND deleted_at IS NULL
+			  AND random_sort_key <= ?
+			  AND (random_sort_key > ? OR (random_sort_key = ? AND id > ?))
+			ORDER BY random_sort_key ASC, id ASC
+			LIMIT ?`, params.UserID, maxKey, afterKey, afterKey, afterID, remaining)
+		if err != nil {
+			return fmt.Errorf("查询乱序相册失败: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var key int64
+			p, err := scanPhotoWithExtraInt64(rows, &key)
+			if err != nil {
+				return err
+			}
+			items = append(items, randomPhoto{photo: p, key: key, wrapped: wrapped})
+		}
+		return rows.Err()
+	}
+
+	if state.Wrapped {
+		if err := appendPhase(true, state.Key, state.ID, seed-1, limit+1); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := appendPhase(false, state.Key, state.ID, randomSortKeyMax, limit+1); err != nil {
+			return nil, err
+		}
+		if len(items) <= limit {
+			if err := appendPhase(true, 0, 0, seed-1, limit+1-len(items)); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	page := &storage.PhotoPage{Total: total}
+	if len(items) > limit {
+		page.HasMore = true
+		items = items[:limit]
+		last := items[len(items)-1]
+		page.NextCursor = encodeRandomCursor(last.key, last.photo.ID, last.wrapped)
+	}
+	page.Photos = make([]*storage.Photo, 0, len(items))
+	for _, item := range items {
+		page.Photos = append(page.Photos, item.photo)
+	}
 	return page, nil
 }
 

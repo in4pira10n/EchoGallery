@@ -23,6 +23,9 @@ type Repository interface {
 	// GetPhotoBySourceRelPath 按导入源相对路径查询图片（包含已软删除，用于避免重复导入）
 	GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*Photo, error)
 
+	// ListSourceMediaIndex 批量加载导入源索引，用于大资源库启动扫描时避免逐文件查询。
+	ListSourceMediaIndex(userID int64) (map[string]SourceMediaInfo, error)
+
 	// ListPhotos 查询用户图片（时间线，游标分页，不包含已删除）
 	ListPhotos(params ListPhotosParams) (*PhotoPage, error)
 
@@ -34,6 +37,9 @@ type Repository interface {
 
 	// SearchPhotos 搜索用户媒体（游标分页，不包含已删除）
 	SearchPhotos(params SearchPhotosParams) (*PhotoPage, error)
+
+	// ListRandomPhotos 查询乱序相册媒体（游标分页，不包含已删除）
+	ListRandomPhotos(params RandomPhotosParams) (*PhotoPage, error)
 
 	// SoftDeletePhoto 软删除图片
 	SoftDeletePhoto(id int64, userID int64, deletedBy int64) error

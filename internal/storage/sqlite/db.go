@@ -66,7 +66,30 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("photos", "source_rel_path", `ALTER TABLE photos ADD COLUMN source_rel_path TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("photos", "source_mod_unix", `ALTER TABLE photos ADD COLUMN source_mod_unix INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("photos", "random_sort_key", `ALTER TABLE photos ADD COLUMN random_sort_key INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("photos", "is_favorite", `ALTER TABLE photos ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		UPDATE photos
+		SET random_sort_key = ((id * 1103515245 + 12345) % 2147483647) + 1
+		WHERE random_sort_key = 0`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_source_rel_path
+		ON photos(uploaded_by, source_rel_path)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_random_sort_key
+		ON photos(uploaded_by, random_sort_key, id)
+		WHERE deleted_at IS NULL`); err != nil {
 		return err
 	}
 	return nil
@@ -86,6 +109,8 @@ CREATE TABLE IF NOT EXISTS photos (
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     storage_rel_path TEXT NOT NULL DEFAULT '',
     source_rel_path  TEXT NOT NULL DEFAULT '',
+    source_mod_unix  INTEGER NOT NULL DEFAULT 0,
+    random_sort_key  INTEGER NOT NULL DEFAULT 0,
     is_favorite   INTEGER NOT NULL DEFAULT 0,
     taken_at      DATETIME NOT NULL,
     uploaded_at   DATETIME NOT NULL,
