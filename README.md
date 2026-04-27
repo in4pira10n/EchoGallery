@@ -115,6 +115,7 @@ http://127.0.0.1:8080
 - [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
 - [ ] `New Feature` 搜索和筛选结果支持打包下载全部
+- [ ] `Fix` 优化上传功能，包含：提示图像过大；BMP；上传路径等
 - [ ] `Future Plan` `AI` 人脸识别
 - [ ] `Future Plan` `AI` 相似照片识别
 - [ ] `Future Plan` "回忆" Tab
