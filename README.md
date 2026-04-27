@@ -112,8 +112,11 @@ http://127.0.0.1:8080
 ## TO-DOs
 
 - [x] `Doc` 示例项目和截图
+- [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
-- [ ] `Future Plan` AI 人脸识别
+- [ ] `New Feature` 搜索和筛选结果支持打包下载全部
+- [ ] `Future Plan` `AI` 人脸识别
+- [ ] `Future Plan` `AI` 相似照片识别
 - [ ] `Future Plan` "回忆" Tab
 - [x] `Future Plan` 全局搜索
 - [ ] `Future Plan` 自动检查和安装更新
