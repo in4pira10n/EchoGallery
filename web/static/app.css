@@ -56,13 +56,18 @@
 
 /* ===== 重置 ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 15px; }
+html {
+  font-size: 15px;
+  overscroll-behavior-y: none;
+}
 body {
   font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: var(--bg);
   color: var(--text);
   line-height: 1.5;
   min-height: 100vh;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -88,9 +93,11 @@ img { display: block; max-width: 100%; }
   display: flex;
   flex-direction: column;
   padding: 20px 0;
-  position: sticky;
+  position: fixed;
+  left: 0;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   overflow-y: auto;
   transition: margin-left .24s ease, box-shadow .2s ease, transform .25s ease;
   z-index: 20;
@@ -184,7 +191,17 @@ img { display: block; max-width: 100%; }
   background: var(--nav-border-color);
 }
 
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  margin-left: var(--nav-w);
+  transition: margin-left .24s ease;
+}
+#app.sidebar-auto-hide .main {
+  margin-left: 0;
+}
 .topbar {
   display: flex;
   align-items: center;
@@ -241,6 +258,58 @@ img { display: block; max-width: 100%; }
   font-size: .82rem;
 }
 .content { padding: 24px; flex: 1; }
+
+.context-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 210px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 16px 46px rgba(0,0,0,.18);
+}
+.context-menu-separator {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
+}
+.context-menu-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font-size: .88rem;
+  line-height: 1.25;
+}
+.context-menu-item:hover {
+  background: var(--accent-faint);
+}
+.context-menu-item.danger {
+  color: var(--danger);
+}
+.context-menu-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  align-self: center;
+}
+.context-menu-icon svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+  color: currentColor;
+}
 
 /* ===== 公共组件 ===== */
 .btn {
@@ -321,6 +390,9 @@ img { display: block; max-width: 100%; }
   overflow: hidden;
   cursor: pointer;
   position: relative;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+  transition: outline-color .14s ease, box-shadow .14s ease, transform .14s ease;
 }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .photo-thumb .media-badge {
@@ -376,8 +448,13 @@ img { display: block; max-width: 100%; }
 }
 .photo-thumb .favorite-toggle svg { width: 12px; height: 12px; }
 .photo-thumb.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
+.photo-thumb.keyboard-focused {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+  box-shadow: 0 0 0 4px var(--accent-faint), 0 12px 30px var(--accent-soft);
+}
 .photo-thumb-focus {
-  outline: 3px solid #f0c75e;
+  outline: 3px solid var(--accent);
   outline-offset: -3px;
   animation: thumb-focus-pulse 1.6s ease;
 }
@@ -577,7 +654,15 @@ body.selection-mode .date-select-all { display: inline-flex; }
 }
 .lightbox-action-group,
 .lightbox-control-pill,
-.lightbox-back-btn,
+.lightbox-back-btn {
+  border-radius: 999px;
+  border-radius: 999px;
+  background: rgba(18,18,18,.42);
+  border: 1px solid rgba(255,255,255,.10);
+  box-shadow: 0 10px 30px rgba(0,0,0,.18);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+  backdrop-filter: blur(18px) saturate(135%);
+}
 .lb-info-item {
   border-radius: 999px;
   background: rgba(18,18,18,.42);
@@ -1036,6 +1121,9 @@ body.lightbox-page-lock {
   font: inherit;
   font-size: 1rem;
 }
+.search-box input::-webkit-search-cancel-button {
+  display: none;
+}
 .search-close-btn {
   width: 34px;
   height: 34px;
@@ -1140,12 +1228,19 @@ body.lightbox-page-lock {
   color: var(--text2);
   font-size: .9rem;
 }
-.search-more-btn {
+.search-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+.search-more-btn,
+.search-download-btn {
   display: none;
-  margin: 0 12px 12px;
   justify-content: center;
 }
-.search-more-btn.visible { display: inline-flex; }
+.search-more-btn.visible,
+.search-download-btn.visible { display: inline-flex; }
+.search-download-btn { flex: 1; }
 
 /* ===== 资源库构建 ===== */
 .library-build-page {
@@ -1358,6 +1453,18 @@ body.lightbox-page-lock {
   gap: 6px;
   font-size: .88rem;
 }
+.settings-future-plan {
+  padding: 12px 14px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 12px;
+  background: var(--accent-faint);
+}
+.settings-future-plan strong {
+  color: var(--accent);
+}
+.settings-future-plan span {
+  color: var(--text2);
+}
 .settings-chip-row {
   display: flex;
   flex-wrap: wrap;
@@ -1443,7 +1550,7 @@ body.lightbox-page-lock {
 }
 .settings-library-row {
   display: grid;
-  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(190px, 230px) minmax(0, 1fr) minmax(118px, auto);
   gap: 14px;
   align-items: start;
   padding: 14px;
@@ -1523,6 +1630,17 @@ body.lightbox-page-lock {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.settings-library-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-self: stretch;
+}
+.settings-library-row-actions .btn {
+  min-height: 38px;
+  justify-content: center;
+  white-space: nowrap;
 }
 .settings-share-list {
   display: flex;
@@ -1628,6 +1746,10 @@ body.lightbox-page-lock {
 
 /* ===== 响应式 ===== */
 @media (max-width: 640px) {
+  .main,
+  #app.sidebar-auto-hide .main {
+    margin-left: 0;
+  }
   #app.sidebar-auto-hide .nav {
     margin-left: 0;
   }
@@ -1648,8 +1770,12 @@ body.lightbox-page-lock {
     flex-direction: column;
     align-items: stretch;
   }
-  .settings-library-remove {
+  .settings-library-row-actions,
+  .settings-library-remove,
+  .settings-library-switch {
     width: 100%;
+  }
+  .settings-library-row-actions .btn {
     justify-content: center;
   }
   .topbar {

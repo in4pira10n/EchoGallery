@@ -254,6 +254,16 @@ const icons = {
   play: '',
   pause: '',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>',
+  contextSelect: '',
+  contextView: '',
+  contextTimeline: '',
+  contextFavorite: '',
+  contextReveal: '',
+  contextDownload: '',
+  contextAlbum: '',
+  contextShare: '',
+  contextDelete: '',
+  contextRestore: '',
 };
 const svgIconFiles = {
   timeline: 'timeline.svg',
@@ -281,6 +291,16 @@ const svgIconFiles = {
   autoplay: 'autoplay.svg',
   play: 'play.svg',
   pause: 'pause.svg',
+  contextSelect: 'context-select.svg',
+  contextView: 'context-view.svg',
+  contextTimeline: 'context-timeline.svg',
+  contextFavorite: 'context-favorite.svg',
+  contextReveal: 'context-reveal.svg',
+  contextDownload: 'context-download.svg',
+  contextAlbum: 'context-album.svg',
+  contextShare: 'context-share.svg',
+  contextDelete: 'context-delete.svg',
+  contextRestore: 'context-restore.svg',
 };
 async function loadInlineSVGIcons() {
   await Promise.all(Object.entries(svgIconFiles).map(async ([key, file]) => {
@@ -899,7 +919,7 @@ function renderSearchOverlay() {
   <div class="search-panel" role="dialog" aria-modal="true" aria-label="全局搜索">
     <div class="search-box">
       <span class="search-box-icon">${icons.search}</span>
-      <input id="global-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索文件名、类型、UUID">
+      <input id="global-search-input" type="text" autocomplete="off" spellcheck="false" placeholder="搜索文件名、类型、UUID">
       <button class="btn-icon search-close-btn" id="search-close-btn" type="button" aria-label="关闭">${icons.close}</button>
     </div>
     <div class="search-filters" id="search-filters">
@@ -911,7 +931,10 @@ function renderSearchOverlay() {
     </div>
     <div class="search-status" id="search-status"></div>
     <div class="search-results" id="search-results"></div>
-    <button class="btn search-more-btn" id="search-more-btn" type="button">加载更多</button>
+    <div class="search-actions">
+      <button class="btn search-download-btn" id="search-download-all-btn" type="button">打包下载全部</button>
+      <button class="btn search-more-btn" id="search-more-btn" type="button">加载更多</button>
+    </div>
   </div>
 </div>`;
 }
@@ -1047,18 +1070,21 @@ function renderSearchResults() {
   const resultsEl = $('#search-results');
   const statusEl = $('#search-status');
   const moreBtn = $('#search-more-btn');
-  if (!resultsEl || !statusEl || !moreBtn) return;
+  const downloadBtn = $('#search-download-all-btn');
+  if (!resultsEl || !statusEl || !moreBtn || !downloadBtn) return;
   const query = $('#global-search-input')?.value.trim() || state.searchQuery;
   if (!query) {
     statusEl.textContent = '';
     resultsEl.innerHTML = `<div class="search-empty">输入关键词开始搜索</div>`;
     moreBtn.classList.remove('visible');
+    downloadBtn.classList.remove('visible');
     return;
   }
   if (state.searchLoading && !state.searchResults.length) {
     statusEl.textContent = '搜索中…';
     resultsEl.innerHTML = `<div class="search-empty"><div class="spinner"></div></div>`;
     moreBtn.classList.remove('visible');
+    downloadBtn.classList.remove('visible');
     return;
   }
   statusEl.textContent = state.searchTotal ? `找到 ${state.searchTotal} 条结果` : (state.searchResults.length ? `找到 ${state.searchResults.length} 条结果` : '');
@@ -1120,6 +1146,9 @@ function renderSearchResults() {
   moreBtn.classList.toggle('visible', state.searchHasMore);
   moreBtn.disabled = state.searchLoading;
   moreBtn.textContent = state.searchLoading ? '加载中…' : '加载更多';
+  const hasDownloadableMedia = state.searchFilter !== 'album' && (state.searchTotal > state.searchAlbumResults.length || state.searchResults.length);
+  downloadBtn.classList.toggle('visible', !!query && hasDownloadableMedia);
+  downloadBtn.disabled = state.searchLoading;
 }
 
 function viewShortcutMap() {
@@ -1613,6 +1642,7 @@ const state = {
   // b-2: 当前用户的分享链接，key=`${type}:${targetId}`
   shareMap: {},
   shareLinks: [],
+  shareLinksLoaded: false,
   // d-2: 上传队列状态
   uploadJobs: [],
   uploadRunning: false,
@@ -1628,6 +1658,7 @@ const state = {
   slideshowTimer: null,
   slideshowRandomQueue: [],
   pendingTimelinePhotoID: null,
+  focusedPhotoID: null,
   lightboxZoom: 100,
   lightboxZoomMode: 'height',
   lightboxBoostActive: false,
@@ -1679,6 +1710,7 @@ const state = {
   settingsDirty: false,
   settingsReady: false,
   settingsFocus: '',
+  settingsScrollRestorePending: true,
   lightboxPlaybackToken: 0,
   lightboxMediaLoading: false,
   autoplayMutedHintShown: false,
@@ -1730,6 +1762,11 @@ function restoreViewScroll(view = state.view, albumID = state.currentAlbumID) {
     if (view !== state.view) return;
     if (view === 'album-detail' && albumID !== state.currentAlbumID) return;
     window.scrollTo(0, top);
+    requestAnimationFrame(() => {
+      if (view !== state.view) return;
+      if (view === 'album-detail' && albumID !== state.currentAlbumID) return;
+      window.scrollTo(0, top);
+    });
   });
 }
 
@@ -1738,6 +1775,7 @@ async function loadShareMap() {
   try {
 		const links = await api.get('/api/media/shares');
     setShareLinks(links || []);
+    state.shareLinksLoaded = true;
   } catch(e) { /* 非关键，忽略 */ }
 }
 
@@ -1809,23 +1847,16 @@ function setLightboxMediaLoading(loading) {
 let _ctxMenu = null;
 function showContextMenu(x, y, items) {
   closeContextMenu();
-  const menu = el('div');
-  menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:2000;
-    background:var(--card);border:1px solid var(--border);border-radius:8px;
-    box-shadow:0 4px 16px rgba(0,0,0,.15);padding:4px 0;min-width:160px;`;
+  const menu = el('div', 'context-menu');
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
   items.forEach(item => {
     if (item === '-') {
-      const sep = el('div');
-      sep.style.cssText = 'height:1px;background:var(--border);margin:4px 0;';
+      const sep = el('div', 'context-menu-separator');
       menu.appendChild(sep); return;
     }
-    const btn = el('button');
-    btn.textContent = item.label;
-    if (item.danger) btn.style.color = 'var(--danger)';
-    btn.style.cssText += `display:block;width:100%;padding:8px 14px;background:none;border:none;
-      text-align:left;font-size:.88rem;cursor:pointer;color:${item.danger ? 'var(--danger)' : 'var(--text)'};`;
-    btn.addEventListener('mouseenter', () => btn.style.background = 'var(--bg2)');
-    btn.addEventListener('mouseleave', () => btn.style.background = 'none');
+    const btn = el('button', `context-menu-item${item.danger ? ' danger' : ''}`);
+    btn.innerHTML = `<span class="context-menu-icon">${item.icon || ''}</span><span>${escapeHTML(item.label)}</span>`;
     btn.addEventListener('click', () => { closeContextMenu(); item.action(); });
     menu.appendChild(btn);
   });
@@ -1963,6 +1994,9 @@ function openLibrarySettings() {
 function switchView(view) {
   saveViewScroll();
   disconnectLoadMoreObserver();
+  if (view === 'settings' && state.view !== 'settings') {
+    state.settingsScrollRestorePending = true;
+  }
   state.view = view;
   state.selected.clear();
   if (view !== 'album-detail') state.pendingAlbumPhotoID = null;
@@ -2412,18 +2446,24 @@ async function renderSettings() {
     $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>加载设置中…</div>`;
     await Promise.allSettled([ensureSettingsDataLoaded(), loadShareMap()]);
   }
-  if (state.settingsReady && !state.shareLinks.length) await loadShareMap();
+  if (state.settingsReady && !state.shareLinksLoaded) await loadShareMap();
 
   if (state.view !== 'settings') return;
 
   try {
     renderSettingsContent();
     bindSettingsTopSaveButton();
-    restoreViewScroll('settings');
+    if (state.settingsScrollRestorePending) {
+      restoreViewScroll('settings');
+      state.settingsScrollRestorePending = false;
+    }
   } catch (e) {
     console.error('render settings failed', e);
     $('#content').innerHTML = `<div class="card settings-panel"><h3>设置加载失败</h3><p>设置项已经回退到当前可用值，你可以刷新后重试。</p><p style="color:var(--danger)">${(e && e.message) || e}</p></div>`;
-    restoreViewScroll('settings');
+    if (state.settingsScrollRestorePending) {
+      restoreViewScroll('settings');
+      state.settingsScrollRestorePending = false;
+    }
   }
 }
 
@@ -2453,7 +2493,10 @@ function renderLibrarySettingsRows() {
         <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(library.name)}">
         <input class="input settings-library-path" type="text" placeholder="资源库路径" value="${escapeHTML(library.path)}">
       </div>
-      <button class="btn btn-danger btn-sm settings-library-remove" type="button">删除资源库</button>
+      <div class="settings-library-row-actions">
+        <button class="btn btn-sm settings-library-switch" type="button">切换资源库</button>
+        <button class="btn btn-danger btn-sm settings-library-remove" type="button">删除资源库</button>
+      </div>
     </div>
   `).join('');
 }
@@ -2547,7 +2590,10 @@ function createLibrarySettingsRow(library = {}, index = 0) {
       <input class="input settings-library-name" type="text" maxlength="32" placeholder="资源库名称" value="${escapeHTML(name)}">
       <input class="input settings-library-path" type="text" placeholder="资源库路径" value="${escapeHTML(path)}">
     </div>
-    <button class="btn btn-danger btn-sm settings-library-remove" type="button">删除资源库</button>`;
+    <div class="settings-library-row-actions">
+      <button class="btn btn-sm settings-library-switch" type="button">切换资源库</button>
+      <button class="btn btn-danger btn-sm settings-library-remove" type="button">删除资源库</button>
+    </div>`;
   return row;
 }
 
@@ -2852,6 +2898,17 @@ function renderSettingsContent() {
   </section>
 
   <section class="card settings-panel">
+    <h3>自动更新</h3>
+    <p>未来计划：自动检查 GitHub Release，发现更新版本时提示用户安装。</p>
+    <div class="settings-group">
+      <div class="settings-static settings-future-plan">
+        <strong>Future Plan</strong>
+        <span>计划支持自动检测最新 Release、展示版本差异，并在用户确认后安装更新。当前版本不会自动联网检查或修改本地程序。</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card settings-panel">
     <h3>分享链接</h3>
     <p>这里集中查看、复制和删除当前账号创建的全部分享链接。</p>
     <div class="settings-group">
@@ -2887,6 +2944,20 @@ function renderSettingsContent() {
   });
 
   function bindLibraryRow(row) {
+    $('.settings-library-switch', row)?.addEventListener('click', () => {
+      const path = $('.settings-library-path', row)?.value.trim() || '';
+      if (!path) {
+        showToast('请先填写资源库路径');
+        return;
+      }
+      const select = $('#settings-active-library');
+      syncActiveLibrarySelect();
+      if (select) select.value = path;
+      state.serverSettings.storage_path = path;
+      applyLibraryBranding();
+      setSettingsDirty();
+      showToast('已切换当前启用资源库，保存并重启后完全生效');
+    });
     $('.settings-library-remove', row).addEventListener('click', () => {
       row.remove();
       reindexLibrarySettingsRows();
@@ -3442,6 +3513,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
 
   // 图片主体点击
   div.addEventListener('click', () => {
+    setFocusedPhoto(photo.id, { scroll: false });
     if (opts.trashMode) {
       openLightbox(listRef, listRef.indexOf(photo));
       return;
@@ -3456,6 +3528,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   // PC 右键菜单
   div.addEventListener('contextmenu', e => {
     e.preventDefault();
+    setFocusedPhoto(photo.id, { scroll: false });
     if (opts.trashMode) showTrashContextMenu(e.clientX, e.clientY, photo);
     else showPhotoContextMenu(e.clientX, e.clientY, photo, div, listRef);
   });
@@ -3468,7 +3541,58 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   });
 
   if (state.selected.has(photo.id)) div.classList.add('selected');
+  if (state.focusedPhotoID === photo.id) div.classList.add('keyboard-focused');
   return div;
+}
+
+function visiblePhotoThumbs() {
+  return $$('.photo-thumb').filter(thumb => thumb.offsetParent !== null);
+}
+
+function setFocusedPhoto(photoID, { scroll = true } = {}) {
+  state.focusedPhotoID = Number(photoID) || null;
+  $$('.photo-thumb.keyboard-focused').forEach(thumb => thumb.classList.remove('keyboard-focused'));
+  const thumb = state.focusedPhotoID ? findPhotoThumb(state.focusedPhotoID) : null;
+  if (thumb) {
+    thumb.classList.add('keyboard-focused');
+    if (scroll) thumb.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+}
+
+function currentViewPhotos() {
+  switch (state.view) {
+    case 'timeline': return state.photos;
+    case 'favorites': return state.favoritePhotos;
+    case 'random-album': return state.randomAlbumPhotos;
+    case 'album-detail': return state.albumPhotos;
+    case 'trash': return state.trashPhotos;
+    default: return [];
+  }
+}
+
+function focusPhotoByGridStep(direction) {
+  const thumbs = visiblePhotoThumbs();
+  if (!thumbs.length) return false;
+  let index = thumbs.findIndex(thumb => Number(thumb.dataset.id) === Number(state.focusedPhotoID));
+  if (index < 0) index = 0;
+  let columns = 1;
+  const firstTop = thumbs[0].getBoundingClientRect().top;
+  for (const thumb of thumbs) {
+    if (Math.abs(thumb.getBoundingClientRect().top - firstTop) < 4) columns += thumb === thumbs[0] ? 0 : 1;
+  }
+  const step = direction === 'left' ? -1 : direction === 'right' ? 1 : direction === 'up' ? -columns : columns;
+  const nextIndex = Math.max(0, Math.min(thumbs.length - 1, index + step));
+  setFocusedPhoto(Number(thumbs[nextIndex].dataset.id));
+  return true;
+}
+
+function openFocusedPhoto() {
+  if (!state.focusedPhotoID) return false;
+  const photos = currentViewPhotos();
+  const index = photos.findIndex(photo => Number(photo.id) === Number(state.focusedPhotoID));
+  if (index < 0) return false;
+  openLightbox(photos, index);
+  return true;
 }
 
 function findPhotoThumb(id) {
@@ -3480,25 +3604,25 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteLabel = photo.is_favorite ? '取消收藏' : '加入个人收藏';
   const items = [
-    { label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl) },
-    { label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
-    { label: '在时间线中查看', action: () => openInTimeline(photo.id) },
-    { label: favoriteLabel, action: () => toggleFavorite(photo) },
-    { label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
-    { label: '下载', action: () => triggerDownload(`/api/media/${photo.id}/download`) },
+    { icon: icons.contextSelect, label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl) },
+    { icon: icons.contextView, label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
+    { icon: icons.contextTimeline, label: '在时间线中查看', action: () => openInTimeline(photo.id) },
+    { icon: icons.contextFavorite, label: favoriteLabel, action: () => toggleFavorite(photo) },
+    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
+    { icon: icons.contextDownload, label: '下载', action: () => triggerDownload(`/api/media/${photo.id}/download`) },
   ];
   if (containingAlbums.length) {
     items.push('-');
     containingAlbums.forEach(album => {
-      items.push({ label: `在相册中查看：${album.name}`, action: () => openInAlbum(album, photo.id) });
+      items.push({ icon: icons.contextAlbum, label: `在相册中查看：${album.name}`, action: () => openInAlbum(album, photo.id) });
     });
   }
   items.push(
     '-',
-    { label: '添加到相册…', action: () => openAlbumPickerModal([photo.id]) },
-    { label: isShared ? '管理分享…' : '分享…', action: () => isShared ? openShareListModal('photo', photo.id) : openShareModal('photo', photo.id) },
+    { icon: icons.contextAlbum, label: '添加到相册…', action: () => openAlbumPickerModal([photo.id]) },
+    { icon: icons.contextShare, label: isShared ? '管理分享…' : '分享…', action: () => isShared ? openShareListModal('photo', photo.id) : openShareModal('photo', photo.id) },
     '-',
-    { label: '删除', danger: true, action: () => deleteSinglePhoto(photo.id) },
+    { icon: icons.contextDelete, label: '删除', danger: true, action: () => deleteSinglePhoto(photo.id) },
   );
   return items;
 }
@@ -3517,10 +3641,10 @@ async function showPhotoContextMenu(x, y, photo, thumbEl, listRef) {
 // 回收站图片右键菜单 (b-4)
 function showTrashContextMenu(x, y, photo) {
   showContextMenu(x, y, [
-    { label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
+    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     '-',
-    { label: '恢复到时间线', action: () => restorePhoto(photo.id) },
-    { label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) },
+    { icon: icons.contextRestore, label: '恢复到时间线', action: () => restorePhoto(photo.id) },
+    { icon: icons.contextDelete, label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) },
   ]);
 }
 
@@ -3813,6 +3937,19 @@ async function openAlbumDetail(album) {
   $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
   renderAlbumDetail();
 }
+function adjacentAlbum(offset) {
+  const albums = state.albums || [];
+  const index = albums.findIndex(item => Number(item.id) === Number(state.currentAlbumID));
+  if (index < 0) return null;
+  return albums[index + offset] || null;
+}
+
+function openAdjacentAlbum(offset) {
+  const album = adjacentAlbum(offset);
+  if (!album) return;
+  openAlbumDetail(album);
+}
+
 async function renderAlbumDetail() {
   let album = state.currentAlbum;
   if (!album && state.currentAlbumID) {
@@ -3836,9 +3973,13 @@ async function renderAlbumDetail() {
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
   }) + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="back-albums-btn">返回相册</button><button class="btn btn-sm" id="download-album-btn">下载相册</button><button class="btn btn-danger btn-sm" id="delete-album-btn">删除相册</button>`;
+  const prevAlbum = adjacentAlbum(-1);
+  const nextAlbum = adjacentAlbum(1);
+  $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="prev-album-btn" ${prevAlbum ? '' : 'disabled'}>上一个相册</button><button class="btn btn-sm" id="next-album-btn" ${nextAlbum ? '' : 'disabled'}>下一个相册</button></div><button class="btn btn-sm" id="back-albums-btn">返回相册</button><button class="btn btn-sm" id="download-album-btn">下载相册</button><button class="btn btn-danger btn-sm" id="delete-album-btn">删除相册</button>`;
   bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
+  $('#prev-album-btn')?.addEventListener('click', () => openAdjacentAlbum(-1));
+  $('#next-album-btn')?.addEventListener('click', () => openAdjacentAlbum(1));
   $('#back-albums-btn').addEventListener('click', () => switchView('albums'));
   $('#download-album-btn').addEventListener('click', () => {
     withButtonBusy($('#download-album-btn'), '打包中…', async () => {
@@ -4149,6 +4290,7 @@ function bindGlobal() {
   window.addEventListener('keydown', e => {
     if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
+    if (handlePhotoGridKeyboard(e)) return;
     if (e.key === 'Escape') {
       if (state.searchOpen) {
         e.preventDefault();
@@ -4198,6 +4340,7 @@ function bindGlobal() {
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
     if (e.target.closest('#search-overlay') && !e.target.closest('.search-panel')) closeGlobalSearch();
     if (e.target.closest('#search-more-btn') && state.searchHasMore) runGlobalSearch(state.searchQuery, { reset: false });
+    if (e.target.closest('#search-download-all-btn')) downloadAllSearchResults();
     const filterBtn = e.target.closest('[data-search-filter]');
     if (filterBtn) {
       state.searchFilter = filterBtn.dataset.searchFilter || 'all';
@@ -4236,6 +4379,23 @@ function bindGlobal() {
     if (e.target.matches('#lb-slideshow-loop')) updateSlideshowSetting('loop', e.target.checked);
     if (e.target.matches('#lb-zoom')) setLightboxZoom(parseInt(e.target.value, 10));
   });
+}
+
+function handlePhotoGridKeyboard(e) {
+  if (state.searchOpen || state.blockingInteraction || document.querySelector('.modal-overlay.open')) return false;
+  if ($('#lightbox')?.classList.contains('open')) return false;
+  if (shouldIgnoreGlobalShortcut(e.target)) return false;
+  const key = e.key.toLowerCase();
+  const map = { w: 'up', a: 'left', s: 'down', d: 'right' };
+  if (map[key]) {
+    e.preventDefault();
+    return focusPhotoByGridStep(map[key]);
+  }
+  if ((e.key === 'Enter' || e.key === ' ') && state.focusedPhotoID) {
+    e.preventDefault();
+    return openFocusedPhoto();
+  }
+  return false;
 }
 async function openLightbox(photos, index) {
   const target = photos[Math.max(0, index)];
@@ -4531,6 +4691,54 @@ async function downloadAllFavorites() {
     });
   } catch (e) {
     alert('下载失败: ' + (e.error || e));
+  }
+}
+
+function buildSearchMediaParams(query, cursor = '') {
+  const params = new URLSearchParams({ q: query, limit: '240' });
+  if (state.searchFilter === 'photo') params.set('kind', 'image');
+  if (state.searchFilter === 'video') params.set('kind', 'video');
+  if (state.searchFilter === 'favorite') params.set('favorite', '1');
+  if (cursor) params.set('cursor', cursor);
+  return params;
+}
+
+async function collectAllSearchMediaIDs(query) {
+  const ids = [];
+  let cursor = '';
+  for (;;) {
+    const response = await fetch(`/api/media/search?${buildSearchMediaParams(query, cursor).toString()}`);
+    if (!response.ok) throw await response.json();
+    const page = await response.json();
+    (page.photos || []).forEach(photo => {
+      if (photo && photo.id) ids.push(photo.id);
+    });
+    if (!page.has_more || !page.next_cursor) break;
+    cursor = page.next_cursor;
+  }
+  return ids;
+}
+
+async function downloadAllSearchResults() {
+  const query = $('#global-search-input')?.value.trim() || state.searchQuery;
+  if (!query || state.searchFilter === 'album') {
+    showToast('当前筛选没有可打包下载的媒体结果');
+    return;
+  }
+  const btn = $('#search-download-all-btn');
+  try {
+    await withButtonBusy(btn, '整理中…', async () => {
+      const ids = await collectAllSearchMediaIDs(query);
+      if (!ids.length) {
+        showToast('没有可下载的媒体结果');
+        return;
+      }
+      await triggerPostDownload('/api/media/download', {
+        media_ids: ids,
+      }, `echogallery-search-${Date.now()}.zip`);
+    });
+  } catch (e) {
+    alert('下载失败: ' + ((e && e.error) || e));
   }
 }
 

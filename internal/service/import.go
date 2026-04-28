@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,9 +35,21 @@ type importJob struct {
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
 // 导入时只建立索引，不在启动阶段预生成缩略图；缩略图在访问时按需生成。
 func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
+	return s.ImportExistingPhotosContext(context.Background(), uploadedBy, progress)
+}
+
+// ImportExistingPhotosContext 扫描 storagePath 中现有的图片文件并导入数据库。
+// ctx 用于让启动扫描在 Ctrl+C 或网页退出时尽快停下，避免大资源库后台任务拖住进程。
+func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
 	summary := &ImportSummary{}
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
 	albumCache, err := s.loadAlbumCache(uploadedBy)
 	if err != nil {
+		return summary, err
+	}
+	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
 	var jobs []importJob
@@ -48,6 +61,9 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 	indexSkippedCandidates := 0
 
 	err = filepath.WalkDir(s.sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -128,6 +144,9 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 		go func() {
 			defer wg.Done()
 			for job := range jobCh {
+				if ctx.Err() != nil {
+					return
+				}
 				photo, imported, jobErr := s.importExistingPhotoFile(job, uploadedBy)
 				if jobErr != nil {
 					atomic.AddInt64(&skippedCount, 1)
@@ -141,6 +160,9 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 						}
 					}
 					continue
+				}
+				if ctx.Err() != nil {
+					return
 				}
 				cacheMu.Lock()
 				jobErr = s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache)
@@ -170,6 +192,10 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 	}
 	for _, job := range jobs {
 		select {
+		case <-ctx.Done():
+			close(jobCh)
+			wg.Wait()
+			return summary, ctx.Err()
 		case err := <-errCh:
 			close(jobCh)
 			wg.Wait()
@@ -180,6 +206,9 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 	close(jobCh)
 	wg.Wait()
 
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
 	select {
 	case err := <-errCh:
 		return summary, err

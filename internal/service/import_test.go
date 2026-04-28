@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -183,5 +185,19 @@ func TestImportExistingPhotos_SkipsBrokenSupportedFiles(t *testing.T) {
 	}
 	if page.Photos[0].OriginalName != "ok.jpg" {
 		t.Fatalf("期望保留有效文件，得到 %s", page.Photos[0].OriginalName)
+	}
+}
+
+func TestImportExistingPhotosContext_Canceled(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	summary, err := svc.ImportExistingPhotosContext(ctx, 1, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("期望返回 context.Canceled，得到 %v", err)
+	}
+	if summary == nil {
+		t.Fatal("取消时仍应返回可读取的 summary")
 	}
 }

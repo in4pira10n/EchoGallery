@@ -16,3 +16,5 @@ generate_qr_code.py
 repo_qr_circle.png
 release notes
 .gitignore
+web/static/.DS_Store
+web/.DS_Store

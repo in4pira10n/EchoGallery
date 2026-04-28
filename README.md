@@ -115,13 +115,12 @@ http://127.0.0.1:8080
 - [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
 - [ ] `Future Plan` 自动检查和安装更新（设置）：自动检测 GitHub Release，若有更新的版本号提示用户安装
-- [ ] `Enhancement` 高亮边框现常驻，可用 WASD 选择照片，并和主色呼应
-- [ ] `Enhancement` “相册” Tab 也要和其他 Tab 一样“记得”上次浏览位置
-- [ ] `Enhancement` 右键菜单左侧添加图标指示，暴露在 web static SVG 文件夹下
-- [ ] `New Feature` 在当前浏览相册顶部显示“上一个相册”“下一个相册”
+- [x] `Enhancement` 高亮边框现常驻，可用 WASD 选择照片，并和主色呼应
+- [x] `Enhancement` “相册” Tab 也要和其他 Tab 一样“记得”上次浏览位置
+- [x] `Enhancement` 右键菜单左侧添加图标指示，暴露在 web static SVG 文件夹下
+- [x] `New Feature` 在当前浏览相册顶部显示“上一个相册”“下一个相册”
 - [ ] `New Feature` 搜索和筛选结果支持打包下载全部
-- [ ] `Fix` div.lightbox-control-pill lightbox-zoom-panel 周围是否存在低透明度的“玻璃感知层”？不要让用户看到这些感知层（透明度 0%）
-- [ ] `Fix` 优化上传功能，包含：提示图像过大；BMP；上传路径等
+- [ ] `Fix` 优化上传功能，包含：图像过大（BMP），改为原格式上传；上传路径不能是本地缓存数据库，改为在目标资源库新建一个文件夹将上传的文件放入其中（如果用户没有进行上传操作则不新建，尽量不破坏原目录结构）等
 - [ ] `Future Plan` `AI` 人脸识别
 - [ ] `Future Plan` `AI` 相似照片识别
 - [ ] `Future Plan` "回忆" Tab

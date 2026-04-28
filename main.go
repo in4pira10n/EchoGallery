@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -144,6 +143,17 @@ func (s *libraryBuildState) finish(summary *service.ImportSummary, err error) {
 	}
 }
 
+func (s *libraryBuildState) cancel() {
+	now := time.Now().Format(time.RFC3339)
+	s.mu.Lock()
+	s.status.Status = "idle"
+	s.status.Message = "资源库构建已取消"
+	s.status.Error = ""
+	s.status.UpdatedAt = now
+	s.status.FinishedAt = now
+	s.mu.Unlock()
+}
+
 func main() {
 	if delay := strings.TrimSpace(os.Getenv(restartDelayEnv)); delay != "" {
 		if ms, err := strconv.Atoi(delay); err == nil && ms > 0 {
@@ -264,6 +274,12 @@ func main() {
 	photoService := service.NewPhotoService(repo, cfg.StoragePath, managedDataDir, trashDir)
 	photoService.SetThumbnailRoot(thumbDir)
 	photoService.SetThumbnailSize(cfg.ThumbnailSize)
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	rootCtx, cancelRoot := context.WithCancel(signalCtx)
+	defer cancelRoot()
+	shutdownCurrentProcess := makeShutdownCurrentProcess(cancelRoot)
+
 	buildState := newLibraryBuildState(shutdownCurrentProcess)
 	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
 	if err != nil {
@@ -286,15 +302,20 @@ func main() {
 		fmt.Printf("HTTP 服务已启动: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 {
-		go runLibraryBuild(photoService, buildState)
+		go runLibraryBuild(rootCtx, photoService, buildState)
 	}
-	if err := serveWithGracefulShutdown(listener, app); err != nil {
+	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func startSetupServer(state api.SetupState) {
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	rootCtx, cancelRoot := context.WithCancel(signalCtx)
+	defer cancelRoot()
+
 	port := state.Port
 	if port <= 0 {
 		port = 8080
@@ -314,15 +335,15 @@ func startSetupServer(state api.SetupState) {
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("局域网访问地址: http://%s%s\n", host, addr)
 	}
-	if err := serveWithGracefulShutdown(listener, app); err != nil {
+	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func runLibraryBuild(photoService *service.PhotoService, buildState *libraryBuildState) {
+func runLibraryBuild(ctx context.Context, photoService *service.PhotoService, buildState *libraryBuildState) {
 	buildState.start("正在发现资源库中的媒体文件")
-	summary, err := photoService.ImportExistingPhotos(1, func(done, total int) {
+	summary, err := photoService.ImportExistingPhotosContext(ctx, 1, func(done, total int) {
 		buildState.progress(done, total)
 		if total == 0 {
 			return
@@ -340,6 +361,11 @@ func runLibraryBuild(photoService *service.PhotoService, buildState *libraryBuil
 			fmt.Print("\n")
 		}
 	})
+	if errors.Is(err, context.Canceled) {
+		fmt.Println("\n资源库扫描已取消")
+		buildState.cancel()
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: 导入历史图片失败: %v\n", err)
 	}
@@ -349,7 +375,7 @@ func runLibraryBuild(photoService *service.PhotoService, buildState *libraryBuil
 	buildState.finish(summary, err)
 }
 
-func serveWithGracefulShutdown(listener net.Listener, handler http.Handler) error {
+func serveWithGracefulShutdown(ctx context.Context, listener net.Listener, handler http.Handler) error {
 	server := &http.Server{Handler: handler}
 	errCh := make(chan error, 1)
 	go func() {
@@ -360,9 +386,6 @@ func serveWithGracefulShutdown(listener net.Listener, handler http.Handler) erro
 		}
 		errCh <- nil
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	select {
 	case err := <-errCh:
@@ -425,30 +448,34 @@ func restartCurrentProcess() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, os.Args[1:]...)
-	cmd.Dir, _ = os.Getwd()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), restartDelayEnv+"=1200")
-	if err := cmd.Start(); err != nil {
-		return err
-	}
+	wd, _ := os.Getwd()
 	go func() {
 		time.Sleep(150 * time.Millisecond)
-		os.Exit(0)
+		if wd != "" {
+			_ = os.Chdir(wd)
+		}
+		env := append(os.Environ(), restartDelayEnv+"=1200")
+		args := append([]string{exe}, os.Args[1:]...)
+		if err := syscall.Exec(exe, args, env); err != nil {
+			fmt.Fprintf(os.Stderr, "错误: 重启 EchoGallery 失败: %v\n", err)
+			os.Exit(1)
+		}
 	}()
 	return nil
 }
 
-func shutdownCurrentProcess() error {
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		select {
-		case shutdownRequested <- struct{}{}:
-		default:
-		}
-	}()
-	return nil
+func makeShutdownCurrentProcess(cancel context.CancelFunc) func() error {
+	return func() error {
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			cancel()
+			select {
+			case shutdownRequested <- struct{}{}:
+			default:
+			}
+		}()
+		return nil
+	}
 }
 
 func preferredLANIP() string {
