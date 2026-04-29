@@ -12,6 +12,8 @@ var supportedVideoMimeTypes = map[string]string{
 	".webm": "video/webm",
 	".mkv":  "video/x-matroska",
 	".avi":  "video/x-msvideo",
+	".wmv":  "video/x-ms-wmv",
+	".wma":  "audio/x-ms-wma",
 	".ts":   "video/mp2t",
 	".mts":  "video/mp2t",
 	".m2ts": "video/mp2t",

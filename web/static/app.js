@@ -46,7 +46,7 @@ const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComp
   <text x="120" y="198" font-size="18" text-anchor="middle" fill="#d9e4dd" font-family="sans-serif">VIDEO</text>
 </svg>`)} `;
 const supportedImageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff'];
-const supportedVideoExtensions = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.ts', '.mts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2', '.ogv'];
+const supportedVideoExtensions = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.wma', '.ts', '.mts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2', '.ogv'];
 
 function formatDate(iso) {
   const d = new Date(iso);
@@ -237,6 +237,7 @@ const icons = {
   sun: '',
   moon: '',
   close: '',
+  back: '',
   prev: '',
   next: '',
   share: '',
@@ -277,6 +278,7 @@ const svgIconFiles = {
   sun: 'sun.svg',
   moon: 'moon.svg',
   close: 'close.svg',
+  back: 'back.svg',
   prev: 'prev.svg',
   next: 'next.svg',
   check: 'check.svg',
@@ -568,6 +570,14 @@ function resetLightboxFocusPoint() {
 }
 function resetLightboxTemporaryZoom() {
   syncLightboxTemporaryZoom(false);
+}
+function focusLightboxKeyboardSurface() {
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) return;
+  lightbox.focus({ preventScroll: true });
+}
+function refocusLightboxAfterVideoControl() {
+  window.setTimeout(focusLightboxKeyboardSurface, 0);
 }
 function lightboxEffectiveZoomState() {
   if (state.lightboxBoostActive) {
@@ -962,6 +972,7 @@ function openGlobalSearch(prefill = '') {
 function closeGlobalSearch() {
   state.searchOpen = false;
   if (state.searchAbortController) state.searchAbortController.abort();
+  if (state.searchDownloadAbortController) state.searchDownloadAbortController.abort();
   if (state.searchTimer) clearTimeout(state.searchTimer);
   state.searchAbortController = null;
   state.searchTimer = null;
@@ -1148,7 +1159,9 @@ function renderSearchResults() {
   moreBtn.textContent = state.searchLoading ? '加载中…' : '加载更多';
   const hasDownloadableMedia = state.searchFilter !== 'album' && (state.searchTotal > state.searchAlbumResults.length || state.searchResults.length);
   downloadBtn.classList.toggle('visible', !!query && hasDownloadableMedia);
-  downloadBtn.disabled = state.searchLoading;
+  downloadBtn.disabled = state.searchLoading && !state.searchDownloadLoading;
+  downloadBtn.textContent = state.searchDownloadLoading ? '取消下载' : '打包下载全部';
+  downloadBtn.classList.toggle('btn-danger', state.searchDownloadLoading);
 }
 
 function viewShortcutMap() {
@@ -1176,6 +1189,21 @@ function handleViewNumberShortcut(e) {
   closeLightbox();
   closeDrawer();
   switchView(view);
+  return true;
+}
+function handleAlbumSwitchShortcut(e) {
+  if (state.searchOpen || state.blockingInteraction || document.querySelector('.modal-overlay.open')) return false;
+  if ($('#lightbox')?.classList.contains('open')) return false;
+  if (state.view !== 'album-detail') return false;
+  if (shouldIgnoreGlobalShortcut(e.target)) return false;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
+  const key = e.key.toLowerCase();
+  if (key !== 'q' && key !== 'e') return false;
+  const offset = key === 'q' ? -1 : 1;
+  if (!adjacentAlbum(offset)) return false;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  openAdjacentAlbum(offset);
   return true;
 }
 function handleSearchShortcut(e) {
@@ -1561,10 +1589,21 @@ function handleLightboxKeydown(e) {
     toggleCurrentLightboxFavorite();
     return true;
   }
-  if (e.key === 'a' || e.key === 'A') { lbNav(-1); return true; }
-  if (e.key === 'd' || e.key === 'D') { lbNav(1); return true; }
+  if (e.key === 'a' || e.key === 'A') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    lbNav(-1);
+    return true;
+  }
+  if (e.key === 'd' || e.key === 'D') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    lbNav(1);
+    return true;
+  }
   if (e.key === ' ') {
     e.preventDefault();
+    e.stopImmediatePropagation();
     toggleSlideshow();
     return true;
   }
@@ -1731,6 +1770,9 @@ const state = {
   searchTotal: 0,
   searchTimer: null,
   searchAbortController: null,
+  searchDownloadAbortController: null,
+  searchDownloadLoading: false,
+  autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
   blockingInteraction: false,
@@ -2898,13 +2940,20 @@ function renderSettingsContent() {
   </section>
 
   <section class="card settings-panel">
-    <h3>自动更新</h3>
-    <p>未来计划：自动检查 GitHub Release，发现更新版本时提示用户安装。</p>
+    <h3>更新</h3>
+    <p>软件更新会用于获取新功能、性能优化与问题修复。EchoGallery 会尽量在更新前保留控制权，不在未确认的情况下修改本地程序。</p>
     <div class="settings-group">
-      <div class="settings-static settings-future-plan">
-        <strong>Future Plan</strong>
-        <span>计划支持自动检测最新 Release、展示版本差异，并在用户确认后安装更新。当前版本不会自动联网检查或修改本地程序。</span>
+      <div class="settings-static settings-update-note">
+        <strong>软件更新</strong>
+        <span>检查更新会对比 GitHub Release 中的最新版本；开启自动更新后，EchoGallery 可在发现新版本时提示安装。</span>
       </div>
+      <div class="settings-actions">
+        <button class="btn" id="settings-check-update-btn" type="button">检查更新</button>
+      </div>
+      <label class="settings-checkbox">
+        <input id="settings-auto-update" type="checkbox" ${state.autoUpdateEnabled ? 'checked' : ''}>
+        <span>自动更新</span>
+      </label>
     </div>
   </section>
 
@@ -2943,20 +2992,41 @@ function renderSettingsContent() {
     setSettingsDirty();
   });
 
+  async function switchLibraryAndRestart(row, button) {
+    const path = $('.settings-library-path', row)?.value.trim() || '';
+    if (!path) {
+      showToast('请先填写资源库路径');
+      return;
+    }
+    const select = $('#settings-active-library');
+    syncActiveLibrarySelect();
+    if (select) select.value = path;
+    state.serverSettings.storage_path = path;
+    applyLibraryBranding();
+    setSettingsDirty();
+    collectSettingsFormState();
+    await withButtonBusy(button, '切换中…', async () => {
+      await persistSettingsWithLibraryAssets();
+      const resp = await restartApp();
+      setSettingsDirty(false);
+      showToast((resp && resp.message) || '资源库已切换，服务正在重启', 2600);
+      setTimeout(() => location.reload(), 1800);
+    });
+  }
+
   function bindLibraryRow(row) {
-    $('.settings-library-switch', row)?.addEventListener('click', () => {
+    $('.settings-library-switch', row)?.addEventListener('click', async e => {
+      const button = e.currentTarget;
       const path = $('.settings-library-path', row)?.value.trim() || '';
       if (!path) {
         showToast('请先填写资源库路径');
         return;
       }
-      const select = $('#settings-active-library');
-      syncActiveLibrarySelect();
-      if (select) select.value = path;
-      state.serverSettings.storage_path = path;
-      applyLibraryBranding();
-      setSettingsDirty();
-      showToast('已切换当前启用资源库，保存并重启后完全生效');
+      try {
+        await switchLibraryAndRestart(row, button);
+      } catch (err) {
+        alert('切换资源库失败: ' + ((err && err.error) || err.message || err));
+      }
     });
     $('.settings-library-remove', row).addEventListener('click', () => {
       row.remove();
@@ -3085,6 +3155,18 @@ function renderSettingsContent() {
     }
   });
   $('#settings-exp-restore-last-view').addEventListener('change', e => { setExperimentalSetting('restoreLastView', e.target.checked); setSettingsDirty(); });
+  $('#settings-check-update-btn')?.addEventListener('click', async () => {
+    const btn = $('#settings-check-update-btn');
+    await withButtonBusy(btn, '检查中…', async () => {
+      await new Promise(resolve => setTimeout(resolve, 450));
+      showToast('当前构建未提供版本元数据，暂无法判断是否有新版本');
+    });
+  });
+  $('#settings-auto-update')?.addEventListener('change', e => {
+    state.autoUpdateEnabled = !!e.target.checked;
+    localStorage.setItem('echogallery_auto_update', state.autoUpdateEnabled ? '1' : '0');
+    showToast(state.autoUpdateEnabled ? '已开启自动更新提示' : '已关闭自动更新');
+  });
   refreshShareManagementUI();
   applyLibraryBranding();
   if (state.settingsFocus === 'libraries') {
@@ -4221,10 +4303,10 @@ function maybeLoadMoreImmediately(id, loadFn, canLoad) {
 
 // ── 灯箱 ──────────────────────────────────────────────
 function renderLightbox() {
-  return `<div class="lightbox" id="lightbox">
+  return `<div class="lightbox" id="lightbox" tabindex="-1">
   <div class="lightbox-header">
     <div class="lightbox-header-main">
-      <button class="btn-icon lightbox-back-btn" id="lb-close">${icons.prev}<span>返回</span></button>
+      <button class="btn-icon lightbox-back-btn" id="lb-close">${icons.back}<span>返回</span></button>
       <span class="lb-title" id="lb-title"></span>
     </div>
     <div class="lightbox-header-controls">
@@ -4290,6 +4372,7 @@ function bindGlobal() {
   window.addEventListener('keydown', e => {
     if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
+    if (handleAlbumSwitchShortcut(e)) return;
     if (handlePhotoGridKeyboard(e)) return;
     if (e.key === 'Escape') {
       if (state.searchOpen) {
@@ -4309,12 +4392,12 @@ function bindGlobal() {
       closeContextMenu();
     }
     if (!$('#lightbox').classList.contains('open')) return;
-    if (e.ctrlKey || e.metaKey || e.key === 'Control' || e.key === 'Meta') syncLightboxTemporaryZoom(true);
-    handleLightboxKeydown(e);
+    if (e.altKey || e.key === 'Alt') syncLightboxTemporaryZoom(true);
+    if (handleLightboxKeydown(e)) return;
   }, true);
   window.addEventListener('keyup', e => {
     if (!$('#lightbox').classList.contains('open')) return;
-    if (!e.ctrlKey && !e.metaKey && (e.key === 'Control' || e.key === 'Meta')) syncLightboxTemporaryZoom(false);
+    if (!e.altKey && e.key === 'Alt') syncLightboxTemporaryZoom(false);
   }, true);
   window.addEventListener('blur', () => resetLightboxTemporaryZoom());
   document.addEventListener('fullscreenchange', () => {
@@ -4351,6 +4434,10 @@ function bindGlobal() {
       if (query) runGlobalSearch(query, { reset: true });
     }
   });
+  document.addEventListener('pointerup', e => {
+    if (!$('#lightbox').classList.contains('open')) return;
+    if (e.target.closest('#lb-video')) refocusLightboxAfterVideoControl();
+  }, true);
   document.addEventListener('input', e => {
     if (e.target.matches('#global-search-input')) scheduleGlobalSearch();
   });
@@ -4419,6 +4506,7 @@ async function openLightbox(photos, index) {
   applyLightboxZoom();
   lockPageScrollForLightbox();
   $('#lightbox').classList.add('open');
+  focusLightboxKeyboardSurface();
   lbRender();
 }
 function closeLightbox() {
@@ -4505,6 +4593,7 @@ function lbRender() {
     };
     video.onloadedmetadata = applyLightboxZoom;
     video.onerror = () => setLightboxMediaLoading(false);
+    video.onfocus = refocusLightboxAfterVideoControl;
     video.src = mediaFileURL(p);
     video.poster = mediaThumbURL(p);
     video.load();
@@ -4521,6 +4610,7 @@ function lbRender() {
     video.onloadeddata = null;
     video.onloadedmetadata = null;
     video.onerror = null;
+    video.onfocus = null;
     video.removeAttribute('src');
     video.load();
     img.classList.remove('hidden');
@@ -4614,11 +4704,12 @@ async function withButtonBusy(button, busyText, fn) {
 	}
 }
 
-async function triggerPostDownload(url, payload, fallbackName) {
+async function triggerPostDownload(url, payload, fallbackName, options = {}) {
 	const res = await fetch(url, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(payload),
+		signal: options.signal,
 	});
 	if (!res.ok) {
 		throw await res.json();
@@ -4703,11 +4794,12 @@ function buildSearchMediaParams(query, cursor = '') {
   return params;
 }
 
-async function collectAllSearchMediaIDs(query) {
+async function collectAllSearchMediaIDs(query, signal) {
   const ids = [];
   let cursor = '';
   for (;;) {
-    const response = await fetch(`/api/media/search?${buildSearchMediaParams(query, cursor).toString()}`);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const response = await fetch(`/api/media/search?${buildSearchMediaParams(query, cursor).toString()}`, { signal });
     if (!response.ok) throw await response.json();
     const page = await response.json();
     (page.photos || []).forEach(photo => {
@@ -4720,25 +4812,43 @@ async function collectAllSearchMediaIDs(query) {
 }
 
 async function downloadAllSearchResults() {
+  if (state.searchDownloadAbortController) {
+    state.searchDownloadAbortController.abort();
+    return;
+  }
   const query = $('#global-search-input')?.value.trim() || state.searchQuery;
   if (!query || state.searchFilter === 'album') {
     showToast('当前筛选没有可打包下载的媒体结果');
     return;
   }
   const btn = $('#search-download-all-btn');
+  const controller = new AbortController();
+  state.searchDownloadAbortController = controller;
+  state.searchDownloadLoading = true;
+  renderSearchResults();
   try {
-    await withButtonBusy(btn, '整理中…', async () => {
-      const ids = await collectAllSearchMediaIDs(query);
-      if (!ids.length) {
-        showToast('没有可下载的媒体结果');
-        return;
-      }
-      await triggerPostDownload('/api/media/download', {
-        media_ids: ids,
-      }, `echogallery-search-${Date.now()}.zip`);
-    });
+    if (btn) btn.textContent = '取消下载';
+    const ids = await collectAllSearchMediaIDs(query, controller.signal);
+    if (!ids.length) {
+      showToast('没有可下载的媒体结果');
+      return;
+    }
+    if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    await triggerPostDownload('/api/media/download', {
+      media_ids: ids,
+    }, `echogallery-search-${Date.now()}.zip`, { signal: controller.signal });
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      showToast('已取消打包下载');
+      return;
+    }
     alert('下载失败: ' + ((e && e.error) || e));
+  } finally {
+    if (state.searchDownloadAbortController === controller) {
+      state.searchDownloadAbortController = null;
+      state.searchDownloadLoading = false;
+      renderSearchResults();
+    }
   }
 }
 
@@ -4750,8 +4860,8 @@ function renderUploadModal() {
     <div class="upload-zone" id="drop-zone">
       ${icons.upload}
       <div style="margin-top:8px">拖拽图片或视频到这里，或点击选择文件</div>
-      <div style="font-size:.8rem;margin-top:4px">支持 JPG、PNG、GIF、WebP、BMP、TIFF、MP4、MOV、M4V、WebM、MKV、AVI、MPEG、TS、3GP、OGV</div>
-      <input type="file" id="file-input" accept="image/*,.bmp,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi,.ts,.mts,.m2ts,.mpg,.mpeg,.3gp,.3g2,.ogv,video/*" multiple aria-hidden="true">
+      <div style="font-size:.8rem;margin-top:4px">支持 JPG、PNG、GIF、WebP、BMP、TIFF、MP4、MOV、M4V、WebM、MKV、AVI、WMV、WMA、MPEG、TS、3GP、OGV</div>
+      <input type="file" id="file-input" accept="image/*,.bmp,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi,.wmv,.wma,.ts,.mts,.m2ts,.mpg,.mpeg,.3gp,.3g2,.ogv,video/*,audio/x-ms-wma" multiple aria-hidden="true">
     </div>
     <div class="upload-queue" id="upload-queue"></div>
     <div class="modal-footer">

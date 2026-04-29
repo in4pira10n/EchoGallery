@@ -10,6 +10,8 @@ func TestDetectVideoMimeType(t *testing.T) {
 		{"demo.mp4", "video/mp4"},
 		{"clip.MKV", "video/x-matroska"},
 		{"capture.avi", "video/x-msvideo"},
+		{"legacy.wmv", "video/x-ms-wmv"},
+		{"voice.wma", "audio/x-ms-wma"},
 		{"stream.ts", "video/mp2t"},
 		{"movie.mpeg", "video/mpeg"},
 		{"phone.3gp", "video/3gpp"},

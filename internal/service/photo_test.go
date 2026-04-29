@@ -56,6 +56,12 @@ func TestUpload_Success(t *testing.T) {
 	if result.Photo.Width != 800 || result.Photo.Height != 600 {
 		t.Errorf("尺寸不匹配: %dx%d", result.Photo.Width, result.Photo.Height)
 	}
+	if result.Photo.SourceRelPath == "" {
+		t.Fatal("上传图片应记录资源库内源文件路径")
+	}
+	if result.Photo.StorageRelPath != "" {
+		t.Fatalf("上传图片不应写入应用托管目录，得到 %s", result.Photo.StorageRelPath)
+	}
 }
 
 func TestUpload_FileWrittenToDisk(t *testing.T) {
@@ -77,6 +83,9 @@ func TestUpload_FileWrittenToDisk(t *testing.T) {
 	path := svc.PhotoPath(result.Photo)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Errorf("图片文件应该存在于 %s", path)
+	}
+	if !strings.Contains(path, "EchoGallery Uploads") {
+		t.Fatalf("图片应写入资源库上传目录，得到 %s", path)
 	}
 	_ = dir
 }
@@ -262,7 +271,7 @@ func TestPermanentlyDeletePhoto_MovesManagedFilesToTrashDir(t *testing.T) {
 		t.Fatalf("原缩略图文件应已移走，stat err=%v", err)
 	}
 
-	mediaRel, _ := filepath.Rel(dataDir, mediaPath)
+	mediaRel, _ := filepath.Rel(sourceDir, mediaPath)
 	thumbRel, _ := filepath.Rel(dataDir, thumbPath)
 	if _, err := os.Stat(filepath.Join(trashDir, mediaRel)); err != nil {
 		t.Fatalf("媒体文件应移动到回收站目录: %v", err)

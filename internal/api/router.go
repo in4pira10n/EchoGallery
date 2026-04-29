@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +25,6 @@ import (
 )
 
 const authCookieName = "echogallery_token"
-const tempMediaDirName = ".media-upload-tmp"
 
 type videoRegistrar interface {
 	AddPhoto(albumID int64, photoID int64, userID int64) error
@@ -1057,7 +1055,7 @@ func handleDownloadAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.
 		}
 		c.Header("Content-Type", "application/zip")
 		c.Header("Content-Disposition", contentDispositionAttachment(sanitizeZipName(albumName)))
-		if err := writeZipResponse(c.Writer, entries); err != nil {
+		if err := writeZipResponse(c.Request.Context(), c.Writer, entries); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "打包下载失败"})
 			return
 		}
@@ -1143,7 +1141,7 @@ func handleDownloadMediaBatch(cfg *config.Config, registrar videoRegistrar) gin.
 		zipName := time.Now().Format("echogallery-selection-20060102-150405.zip")
 		c.Header("Content-Type", "application/zip")
 		c.Header("Content-Disposition", contentDispositionAttachment(zipName))
-		if err := writeZipResponse(c.Writer, entries); err != nil {
+		if err := writeZipResponse(c.Request.Context(), c.Writer, entries); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "打包下载失败"})
 			return
 		}
@@ -1367,7 +1365,7 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 		}
 		videoMimeType := media.DetectVideoMimeType(file.Filename)
 		if isVideoUpload && videoMimeType == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持常见视频格式上传（mp4/m4v/mov/webm/mkv/avi/mpeg/ts/3gp/ogv）"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持常见媒体格式上传（mp4/m4v/mov/webm/mkv/avi/wmv/wma/mpeg/ts/3gp/ogv）"})
 			return
 		}
 
@@ -1378,34 +1376,25 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 		}
 		defer src.Close()
 
-		header := make([]byte, 512)
-		n, err := io.ReadFull(src, header)
-		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "读取上传文件失败"})
-			return
-		}
-
-		payload := append([]byte(nil), header[:n]...)
-		rest, err := io.ReadAll(src)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "读取上传文件失败"})
-			return
-		}
-		payload = append(payload, rest...)
-
 		userID, err := currentUserID(cfg, currentUsername(c))
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
 
+		fileModTime := parseClientLastModified(c.PostForm("client_last_modified_ms"))
 		if !isVideoUpload {
+			readSeeker, ok := src.(io.ReadSeeker)
+			if !ok {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "上传文件不支持 seek"})
+				return
+			}
 			result, err := registrar.Upload(service.UploadInput{
-				Reader:       bytes.NewReader(payload),
+				Reader:       readSeeker,
 				OriginalName: file.Filename,
 				Size:         file.Size,
 				UploadedBy:   userID,
-				FileModTime:  time.Now(),
+				FileModTime:  fileModTime,
 			})
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1415,29 +1404,15 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 			return
 		}
 
-		managedDataDir, err := cfg.ManagedDataDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "计算应用数据目录失败"})
-			return
-		}
-		tempPath, err := saveUploadedMedia(managedDataDir, file.Filename, bytes.NewReader(payload))
-		if err != nil {
+		uuid := uuid.NewString()
+		sourceRelPath := service.UploadedMediaRelPath(uuid, file.Filename, time.Now())
+		finalPath := filepath.Join(cfg.StoragePath, sourceRelPath)
+		if err := saveUploadedMedia(finalPath, src); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-
-		uuid := strings.TrimSuffix(filepath.Base(tempPath), filepath.Ext(tempPath))
-		storageRelPath := service.ManagedMediaRelPath(uuid, file.Filename)
-		finalPath := filepath.Join(managedDataDir, storageRelPath)
-		if err := os.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
-			_ = os.Remove(tempPath)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "创建媒体目录失败"})
-			return
-		}
-		if err := os.Rename(tempPath, finalPath); err != nil {
-			_ = os.Remove(tempPath)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "移动媒体文件失败"})
-			return
+		if !fileModTime.IsZero() {
+			_ = os.Chtimes(finalPath, fileModTime, fileModTime)
 		}
 
 		meta := &media.VideoMeta{FormatName: strings.TrimPrefix(strings.ToLower(filepath.Ext(file.Filename)), ".")}
@@ -1449,14 +1424,15 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 		}
 
 		photo, err := registrar.RegisterUploadedVideo(service.RegisterUploadedVideoInput{
-			UUID:           uuid,
-			OriginalName:   file.Filename,
-			MimeType:       videoMimeType,
-			Size:           file.Size,
-			UploadedBy:     userID,
-			TakenAt:        time.Now(),
-			StorageRelPath: storageRelPath,
-			Meta:           meta,
+			UUID:          uuid,
+			OriginalName:  file.Filename,
+			MimeType:      videoMimeType,
+			Size:          file.Size,
+			UploadedBy:    userID,
+			TakenAt:       fileModTime,
+			SourceRelPath: sourceRelPath,
+			SourceModUnix: fileModTime.UnixNano(),
+			Meta:          meta,
 		})
 		if err != nil {
 			_ = os.Remove(finalPath)
@@ -1485,26 +1461,30 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 	}
 }
 
-func saveUploadedMedia(storagePath, originalName string, src io.Reader) (string, error) {
-	baseDir := filepath.Join(storagePath, tempMediaDirName)
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		return "", fmt.Errorf("创建临时媒体目录失败: %w", err)
+func saveUploadedMedia(destPath string, src io.Reader) error {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return fmt.Errorf("创建上传目录失败: %w", err)
 	}
-
-	fileID := uuid.NewString()
-	tempPath := filepath.Join(baseDir, fileID+filepath.Ext(originalName))
-	dst, err := os.Create(tempPath)
+	dst, err := os.Create(destPath)
 	if err != nil {
-		return "", fmt.Errorf("创建临时媒体文件失败: %w", err)
+		return fmt.Errorf("创建上传媒体文件失败: %w", err)
 	}
 	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
-		_ = os.Remove(tempPath)
-		return "", fmt.Errorf("保存临时媒体文件失败: %w", err)
+		_ = os.Remove(destPath)
+		return fmt.Errorf("保存上传媒体文件失败: %w", err)
 	}
 
-	return tempPath, nil
+	return nil
+}
+
+func parseClientLastModified(value string) time.Time {
+	ms, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || ms <= 0 {
+		return time.Now()
+	}
+	return time.UnixMilli(ms)
 }
 
 func authMiddleware(cfg *config.Config) gin.HandlerFunc {

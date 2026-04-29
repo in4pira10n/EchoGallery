@@ -21,12 +21,13 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `check.svg`: Selection checkmark on media thumbnails.
 - `plus.svg`: Create/add actions.
 - `close.svg`: Close buttons.
+- `back.svg`: Return/back action that exits the lightbox or returns to the previous UI context.
 - `logout.svg`: Log out action.
 - `shutdown.svg`: Exit/close the EchoGallery app process.
 
 ## Lightbox And Playback
 
-- `prev.svg`: Previous/back navigation in lightbox and album navigation.
+- `prev.svg`: Previous media navigation in lightbox and previous album navigation.
 - `next.svg`: Next navigation in lightbox and album navigation.
 - `play.svg`: Play button.
 - `pause.svg`: Pause button.

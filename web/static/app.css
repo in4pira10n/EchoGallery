@@ -591,8 +591,12 @@ body.selection-mode .date-select-all { display: inline-flex; }
 }
 
 /* ===== 灯箱 ===== */
-.lightbox { position: fixed; inset: 0; background: #000; z-index: 1000; display: none; flex-direction: column; }
+.lightbox { position: fixed; inset: 0; background: #000; z-index: 1000; display: none; flex-direction: column; outline: none; }
 .lightbox.open { display: flex; }
+.lightbox:focus,
+.lightbox:focus-visible {
+  outline: none;
+}
 .lightbox-header {
   display: flex;
   align-items: center;
@@ -914,6 +918,11 @@ body.lightbox-page-lock {
   text-align: center; color: var(--text2);
   transition: border-color .2s, background .2s;
   cursor: pointer;
+}
+.upload-zone > svg {
+  width: 40px;
+  height: 40px;
+  display: inline-block;
 }
 .upload-zone input[type="file"] {
   position: absolute;
@@ -1453,16 +1462,16 @@ body.lightbox-page-lock {
   gap: 6px;
   font-size: .88rem;
 }
-.settings-future-plan {
+.settings-update-note {
   padding: 12px 14px;
   border: 1px solid var(--accent-soft);
   border-radius: 12px;
   background: var(--accent-faint);
 }
-.settings-future-plan strong {
+.settings-update-note strong {
   color: var(--accent);
 }
-.settings-future-plan span {
+.settings-update-note span {
   color: var(--text2);
 }
 .settings-chip-row {

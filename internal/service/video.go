@@ -18,6 +18,8 @@ type RegisterUploadedVideoInput struct {
 	UploadedBy     int64
 	TakenAt        time.Time
 	StorageRelPath string
+	SourceRelPath  string
+	SourceModUnix  int64
 	Meta           *media.VideoMeta
 }
 
@@ -52,6 +54,8 @@ func (s *PhotoService) RegisterUploadedVideo(input RegisterUploadedVideoInput) (
 		Height:         input.Meta.Height,
 		DurationMS:     input.Meta.DurationMS,
 		StorageRelPath: input.StorageRelPath,
+		SourceRelPath:  input.SourceRelPath,
+		SourceModUnix:  input.SourceModUnix,
 		TakenAt:        input.TakenAt,
 		UploadedAt:     time.Now(),
 		UploadedBy:     input.UploadedBy,

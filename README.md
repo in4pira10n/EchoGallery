@@ -114,21 +114,20 @@ http://127.0.0.1:8080
 - [x] `Doc` 示例项目和截图
 - [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
-- [ ] `Future Plan` 自动检查和安装更新（设置）：自动检测 GitHub Release，若有更新的版本号提示用户安装
+- [x] `Future Plan` 自动检查和安装更新（设置）：自动检测 GitHub Release，若有更新的版本号提示用户安装
 - [x] `Enhancement` 高亮边框现常驻，可用 WASD 选择照片，并和主色呼应
 - [x] `Enhancement` “相册” Tab 也要和其他 Tab 一样“记得”上次浏览位置
 - [x] `Enhancement` 右键菜单左侧添加图标指示，暴露在 web static SVG 文件夹下
 - [x] `New Feature` 在当前浏览相册顶部显示“上一个相册”“下一个相册”
-- [ ] `New Feature` 搜索和筛选结果支持打包下载全部
-- [ ] `Fix` 优化上传功能，包含：图像过大（BMP），改为原格式上传；上传路径不能是本地缓存数据库，改为在目标资源库新建一个文件夹将上传的文件放入其中（如果用户没有进行上传操作则不新建，尽量不破坏原目录结构）等
+- [x] `New Feature` 搜索和筛选结果支持打包下载全部
+- [ ] `Fix` 优化上传功能，包含：SVG 尺寸不正常；图像过大（BMP），改为原格式上传；上传路径不能是本地缓存数据库，改为在目标资源库新建一个文件夹将上传的文件放入其中（如果用户没有进行上传操作则不新建，尽量不破坏原目录结构）等
 - [ ] `Fix` 相册 Tab： `Q` `E` 切换上 / 下一个相册
-- [ ] `Fix` `UI` 返回按钮 SVG 包含 rect
-- [ ] `Fix` WMV 支持
+- [ ] `Fix` WMV、WMA 支持
+- [ ] `New Feature` "回忆"（现在是历史记录功能） Tab
+- [ ] `Future Plan` 多用户 / 访客用户支持
 - [ ] `Future Plan` `AI` 人脸识别
 - [ ] `Future Plan` `AI` 相似照片识别
-- [ ] `Future Plan` "回忆" Tab
 - [x] `Future Plan` 全局搜索
-- [ ] `Future Plan` 多用户 / 访客用户支持
 - [x] `Enhancement` 去掉灯箱顶部、底部栏的黑色遮罩，将圆角矩形元素使用半透明 + 背景模糊处理，加强照片大图浏览沉浸感
 - [x] `New Feature` 按住 `Ctrl`（Windows）或 `Command`（Mac）会将缩放等级暂时调满并聚焦鼠标当前区域
 - [x] `Fix` 隐藏侧栏后不需要留出一小部分侧栏

@@ -69,6 +69,7 @@ type UploadInput struct {
 	Size         int64
 	UploadedBy   int64
 	FileModTime  time.Time // 文件修改时间，作为 EXIF 缺失时的后备
+	RelPath      string    // 上传文件在资源库中的相对路径；为空时自动生成
 }
 
 // UploadResult 上传结果
@@ -91,32 +92,39 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 
 	// 2. 生成 UUID 文件名
 	photoUUID := uuid.New().String()
-	storageRelPath := ManagedMediaRelPath(photoUUID, input.OriginalName)
+	sourceRelPath := input.RelPath
+	if strings.TrimSpace(sourceRelPath) == "" {
+		sourceRelPath = UploadedMediaRelPath(photoUUID, input.OriginalName, time.Now())
+	}
 
 	// 3. 重置读取位置，写入磁盘
 	if _, err := input.Reader.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("seek 失败: %w", err)
 	}
 
-	destPath := filepath.Join(s.dataPath, storageRelPath)
+	destPath := filepath.Join(s.sourcePath, sourceRelPath)
 	if err := writeFile(destPath, input.Reader); err != nil {
 		return nil, fmt.Errorf("保存图片文件失败: %w", err)
+	}
+	if !fallbackTime.IsZero() {
+		_ = os.Chtimes(destPath, fallbackTime, fallbackTime)
 	}
 
 	// 4. 写数据库
 	photo := &storage.Photo{
-		UUID:           photoUUID,
-		OriginalName:   input.OriginalName,
-		MediaKind:      storage.MediaKindImage,
-		MimeType:       meta.MimeType,
-		Size:           input.Size,
-		Width:          meta.Width,
-		Height:         meta.Height,
-		DurationMS:     0,
-		StorageRelPath: storageRelPath,
-		TakenAt:        meta.TakenAt,
-		UploadedAt:     time.Now(),
-		UploadedBy:     input.UploadedBy,
+		UUID:          photoUUID,
+		OriginalName:  input.OriginalName,
+		MediaKind:     storage.MediaKindImage,
+		MimeType:      meta.MimeType,
+		Size:          input.Size,
+		Width:         meta.Width,
+		Height:        meta.Height,
+		DurationMS:    0,
+		SourceRelPath: sourceRelPath,
+		SourceModUnix: fallbackTime.UnixNano(),
+		TakenAt:       meta.TakenAt,
+		UploadedAt:    time.Now(),
+		UploadedBy:    input.UploadedBy,
 	}
 
 	if err := s.repo.SavePhoto(photo); err != nil {
@@ -186,6 +194,14 @@ func (s *PhotoService) ThumbnailCandidates(photo *storage.Photo) []string {
 // ManagedMediaRelPath 返回应用内部托管媒体文件的相对路径。
 func ManagedMediaRelPath(photoUUID, originalName string) string {
 	return filepath.Join(".library", photoUUID+filepath.Ext(originalName))
+}
+
+// UploadedMediaRelPath 返回用户上传媒体在资源库中的相对路径。
+func UploadedMediaRelPath(photoUUID, originalName string, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return filepath.Join("EchoGallery Uploads", now.Format("2006-01-02"), photoUUID+filepath.Ext(originalName))
 }
 
 // writeFile 将 reader 内容写入目标路径，目标目录若不存在则自动创建

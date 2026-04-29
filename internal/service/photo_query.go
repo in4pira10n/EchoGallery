@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"echogallery/internal/storage"
@@ -364,10 +365,7 @@ func (s *PhotoService) moveManagedFileToTrash(path string) {
 		return
 	}
 
-	rel, err := filepath.Rel(s.dataPath, path)
-	if err != nil {
-		rel = filepath.Base(path)
-	}
+	rel := s.trashRelPath(path)
 	baseDir := s.trashPath
 	if baseDir == "" {
 		baseDir = filepath.Join(s.dataPath, "Trash")
@@ -379,6 +377,19 @@ func (s *PhotoService) moveManagedFileToTrash(path string) {
 	if err := os.Rename(path, uniqueTrashPath(dest)); err != nil {
 		return
 	}
+}
+
+func (s *PhotoService) trashRelPath(path string) string {
+	for _, root := range []string{s.sourcePath, s.dataPath, s.thumbnailPath} {
+		if root == "" {
+			continue
+		}
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." && !filepath.IsAbs(rel) {
+			return rel
+		}
+	}
+	return filepath.Base(path)
 }
 
 func uniqueTrashPath(dest string) string {

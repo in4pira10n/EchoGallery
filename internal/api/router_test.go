@@ -2404,15 +2404,8 @@ func TestUploadPlaceholder_SavesFinalFileAndRecordAfterValidation(t *testing.T) 
 	if resp.Photo.ID != 99 || resp.Photo.MediaKind != storage.MediaKindVideo {
 		t.Fatalf("返回的媒体记录不正确: %+v", resp.Photo)
 	}
-	managedDir, err := cfg.ManagedDataDir()
-	if err != nil {
-		t.Fatalf("计算应用数据目录失败: %v", err)
-	}
-	if filepath.Dir(filepath.Dir(resp.Path)) != managedDir {
-		t.Fatalf("最终文件目录不正确: %s", resp.Path)
-	}
-	if filepath.Base(filepath.Dir(resp.Path)) != ".library" {
-		t.Fatalf("最终文件应放在 .library 目录下，得到 %s", resp.Path)
+	if !strings.HasPrefix(resp.Path, filepath.Join(cfg.StoragePath, "EchoGallery Uploads")) {
+		t.Fatalf("最终文件应放在目标资源库上传目录下，得到 %s", resp.Path)
 	}
 	if filepath.Base(resp.Path) != resp.Photo.UUID+".mp4" {
 		t.Fatalf("最终文件名应与 UUID 对应，得到 %s", filepath.Base(resp.Path))
@@ -2442,18 +2435,16 @@ func TestUploadPlaceholder_CleansFileWhenRegisterFails(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("期望 500，得到 %d", w.Code)
 	}
-	managedDir, err := cfg.ManagedDataDir()
-	if err != nil {
-		t.Fatalf("计算应用数据目录失败: %v", err)
-	}
-	entries, err := os.ReadDir(managedDir)
-	if err != nil {
-		t.Fatalf("读取存储目录失败: %v", err)
-	}
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".mp4") {
-			t.Fatalf("注册失败后不应残留视频文件: %s", entry.Name())
+	if err := filepath.WalkDir(cfg.StoragePath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".mp4") {
+			t.Fatalf("注册失败后不应残留视频文件: %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("检查资源库目录失败: %v", err)
 	}
 }
 
