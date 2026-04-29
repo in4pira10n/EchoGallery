@@ -112,6 +112,9 @@ http://127.0.0.1:8080
 ## TO-DOs
 
 - [x] `Doc` 示例项目和截图
+- [ ] `Future Plan` 多用户 / 访客用户支持
+- [ ] `Future Plan` `AI` 人脸识别
+- [ ] `Future Plan` `AI` 相似照片识别
 - [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
 - [ ] `Icon` App Icon
@@ -121,19 +124,24 @@ http://127.0.0.1:8080
 - [ ] `Fix` `UI` 网页 favicon 添加圆角
 - [ ] `Fix` `UI` “收藏”和“取消收藏”应使用不同的 SVG
 - [ ] `Fix` `UI` 视频的音量控制给出视觉反馈（底部音量条）
+- [ ] `Enhancement` `UI` 时间线 Tab 上方添加一个“三个横线” Tab（仅点击切换）：将 Tab 宽度缩为仅显示 SVG，此时资源库仅显示头像
+- [ ] `Enhancement` `UI` 灯箱顶栏右上角“下载”“收藏”“分享”“播放”；左上角“返回”；“适应高度”：重构为仅显示 SVG
+- [ ] `Enhancement` `UI` 灯箱底部栏字段名（如类型、MIME 等标题文字）重构为仅显示 SVG
+- [ ] `Enhancement` `UI` 同时检查其他顶栏多余文字（如“上一个相册”、“下一个相册”等）重构为仅显示 SVG；注意所有的 SVG 暴露在 web static SVG 里
+- [ ] `Enhancement` `UI` 灯箱顶栏右上角“分享”后添加一个省略号按钮（SVG），用于不方便点击右键的设备使用右键菜单：其功能为弹出一个右键菜单（弹出来源于灯箱右上方）
+- [ ] `Fix` “适应高度”改为“适应”：高度和宽度哪一个更小就适应哪一个值（否则在手机的显示会很奇怪）
+- [ ] `Fix` `UI` 缩放为大图之后左右的 prev、next 也会跟着移动；应该固定位置
+- [ ] `Bug` 错误: 重启 EchoGallery 失败: not supported by windows
+- [ ] `Fix` 优化上传功能，包含：SVG 尺寸不正常；图像过大（BMP），改为原格式上传；上传路径不能是本地缓存数据库，改为在目标资源库新建一个文件夹将上传的文件放入其中（如果用户没有进行上传操作则不新建，尽量不破坏原目录结构）等
+- [ ] `Fix` 相册 Tab： `Q` `E` 切换上 / 下一个相册
+- [ ] `Fix` WMV、WMA 支持
+- [ ] `New Feature` "回忆"（现在是历史记录功能） Tab
 - [x] `Future Plan` 自动检查和安装更新（设置）：自动检测 GitHub Release，若有更新的版本号提示用户安装
 - [x] `Enhancement` 高亮边框现常驻，可用 WASD 选择照片，并和主色呼应
 - [x] `Enhancement` “相册” Tab 也要和其他 Tab 一样“记得”上次浏览位置
 - [x] `Enhancement` 右键菜单左侧添加图标指示，暴露在 web static SVG 文件夹下
 - [x] `New Feature` 在当前浏览相册顶部显示“上一个相册”“下一个相册”
 - [x] `New Feature` 搜索和筛选结果支持打包下载全部
-- [ ] `Fix` 优化上传功能，包含：SVG 尺寸不正常；图像过大（BMP），改为原格式上传；上传路径不能是本地缓存数据库，改为在目标资源库新建一个文件夹将上传的文件放入其中（如果用户没有进行上传操作则不新建，尽量不破坏原目录结构）等
-- [ ] `Fix` 相册 Tab： `Q` `E` 切换上 / 下一个相册
-- [ ] `Fix` WMV、WMA 支持
-- [ ] `New Feature` "回忆"（现在是历史记录功能） Tab
-- [ ] `Future Plan` 多用户 / 访客用户支持
-- [ ] `Future Plan` `AI` 人脸识别
-- [ ] `Future Plan` `AI` 相似照片识别
 - [x] `Future Plan` 全局搜索
 - [x] `Enhancement` 去掉灯箱顶部、底部栏的黑色遮罩，将圆角矩形元素使用半透明 + 背景模糊处理，加强照片大图浏览沉浸感
 - [x] `New Feature` 按住 `Ctrl`（Windows）或 `Command`（Mac）会将缩放等级暂时调满并聚焦鼠标当前区域
