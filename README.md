@@ -114,6 +114,13 @@ http://127.0.0.1:8080
 - [x] `Doc` 示例项目和截图
 - [ ] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
+- [ ] `Icon` App Icon
+- [ ] `Bug` Toggle “个人收藏”后视频会自动重头播放
+- [ ] `Bug` “在时间线查找”取消按钮不生效
+- [ ] `Bug` WMA 视频仍不支持播放
+- [ ] `Fix` `UI` 网页 favicon 添加圆角
+- [ ] `Fix` `UI` “收藏”和“取消收藏”应使用不同的 SVG
+- [ ] `Fix` `UI` 视频的音量控制给出视觉反馈（底部音量条）
 - [x] `Future Plan` 自动检查和安装更新（设置）：自动检测 GitHub Release，若有更新的版本号提示用户安装
 - [x] `Enhancement` 高亮边框现常驻，可用 WASD 选择照片，并和主色呼应
 - [x] `Enhancement` “相册” Tab 也要和其他 Tab 一样“记得”上次浏览位置
