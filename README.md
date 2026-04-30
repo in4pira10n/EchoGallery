@@ -2,7 +2,7 @@
 
 A lightweight local photo gallery app.
 
-<img width="1440" height="900" alt="截屏2026-04-23 下午9 40 45 (2)" src="https://github.com/user-attachments/assets/3df413ae-91f5-4087-a7d2-9a9032a65e7d" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/6ee74833-9e66-4337-8dd0-ea5743212e87" />
 
 ## Intro
 
@@ -116,14 +116,14 @@ http://127.0.0.1:8080
 - [ ] `Future Plan` 多用户 / 访客用户支持
 - [ ] `Future Plan` `AI` 人脸识别
 - [ ] `Future Plan` `AI` 相似照片识别
-- [ ] `Doc` 更新介绍图像
+- [x] `Doc` 更新介绍图像
 - [ ] `Doc` 视频演示
 - [ ] `Icon` App Icon
 - [ ] `Bug` Toggle “个人收藏”后视频会自动重头播放
 - [ ] `Bug` “在时间线查找”取消按钮不生效
-- [ ] `Bug` WMA 视频仍不支持播放
+- [ ] `Bug` WMV 视频仍不支持播放
 - [ ] `Fix` `UI` 网页 favicon 添加圆角
-- [ ] `Fix` `UI` “收藏”和“取消收藏”应使用不同的 SVG
+- [x] `Fix` `UI` “收藏”和“取消收藏”应使用不同的 SVG
 - [x] `UI` Big UI Redesign
    - [x] `Fix` `UI` 上传卡片的 modal-title SVG 与文字应该在同一行并居中
    - [x] `Fix` `UI` 视频的音量控制给出视觉反馈（底部音量条）
