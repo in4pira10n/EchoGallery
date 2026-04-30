@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -456,6 +458,18 @@ func restartCurrentProcess() error {
 		}
 		env := append(os.Environ(), restartDelayEnv+"=1200")
 		args := append([]string{exe}, os.Args[1:]...)
+		if runtime.GOOS == "windows" {
+			cmd := exec.Command(exe, os.Args[1:]...)
+			cmd.Dir = wd
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Env = env
+			if err := cmd.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "错误: 重启 EchoGallery 失败: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 		if err := syscall.Exec(exe, args, env); err != nil {
 			fmt.Fprintf(os.Stderr, "错误: 重启 EchoGallery 失败: %v\n", err)
 			os.Exit(1)

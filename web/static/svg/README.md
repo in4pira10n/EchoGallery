@@ -6,6 +6,7 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 
 - `timeline.svg`: Timeline tab icon.
 - `favorite.svg`: Favorites tab icon and favorite-related primary UI.
+- `memories.svg`: Memories tab icon.
 - `album.svg`: Albums tab icon and album placeholders.
 - `shuffle.svg`: Random Album tab icon and reshuffle actions.
 - `trash.svg`: Trash tab icon and delete-related UI.
@@ -15,14 +16,18 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 ## Core Actions
 
 - `upload.svg`: Upload actions and upload modal.
+- `download.svg`: Download actions in icon-only top bars and lightbox controls.
 - `share.svg`: Share actions in lightbox and dialogs.
 - `share-small.svg`: Small share badge shown on shared thumbnails.
 - `favorite-small.svg`: Small favorite toggle shown on thumbnails.
+- `favorite-filled.svg`: Filled favorite state for media already added to Favorites.
 - `check.svg`: Selection checkmark on media thumbnails.
 - `plus.svg`: Create/add actions.
 - `close.svg`: Close buttons.
 - `back.svg`: Return/back action that exits the lightbox or returns to the previous UI context.
-- `logout.svg`: Log out action.
+- `more.svg`: More actions button, especially for touch-friendly access to context menus.
+- `logout-1.svg`: Log out action in the sidebar.
+- `logout.svg`: Power-style logout/exit glyph kept for compatibility with older UI references.
 - `shutdown.svg`: Exit/close the EchoGallery app process.
 
 ## Lightbox And Playback
@@ -32,12 +37,23 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `play.svg`: Play button.
 - `pause.svg`: Pause button.
 - `autoplay.svg`: Autoplay/slideshow-related controls.
+- `fit.svg`: Fit media to the current viewport in the lightbox.
+- `info-type.svg`: Lightbox metadata icon for media type.
+- `info-mime.svg`: Lightbox metadata icon for MIME/format.
+- `info-date.svg`: Lightbox metadata icon for capture/import time.
+- `info-size.svg`: Lightbox metadata icon for file size.
+- `info-ratio.svg`: Lightbox metadata icon for dimensions and aspect ratio.
+- `info-dimensions.svg`: Lightbox metadata icon for pixel dimensions.
+- `info-file-size.svg`: Lightbox metadata icon for file size.
+- `media-image.svg`: Lightbox metadata icon for image media.
+- `media-video.svg`: Lightbox metadata icon for video media.
 
 ## Theme And Layout
 
 - `sun.svg`: Switch to light theme.
 - `moon.svg`: Switch to dark theme.
 - `pin.svg`: Sidebar pin/auto-hide control.
+- `menu.svg`: Sidebar compact/expanded layout toggle.
 - `photo.svg`: Generic media placeholder.
 - `workshop.svg`: Workshop/customization entry points.
 
