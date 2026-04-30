@@ -1,8 +1,8 @@
 # EchoGallery
 
-A lightweight local photo gallery app.
+Reshape the way you manage your photo gallery.
 
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/6ee74833-9e66-4337-8dd0-ea5743212e87" />
+<img width="1920" height="1080" alt="IMG_6248" src="https://github.com/user-attachments/assets/f865ef9c-3909-4247-96b5-f9b609065b27" />
 
 ## Intro
 
