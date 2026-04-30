@@ -123,6 +123,11 @@ http://127.0.0.1:8080
 - [ ] `Bug` “在时间线查找”取消按钮不生效
 - [ ] `Bug` WMV 视频仍不支持播放
 - [ ] `Fix` `UI` 网页 favicon 添加圆角
+- [ ] `Fix` `UI` 灯箱的大图不再需要边距，直接紧靠窗口边缘
+- [ ] `New Feature` 顶部栏：添加并支持筛选（以图标形式展示）：图片 / 视频
+- [ ] `New Feature` 视频播放：书签
+- [ ] `New Feature` 视频播放前先缓入一秒钟封面
+- [ ] `Fix` `Windows` 视频播放不再默认暂停
 - [x] `Fix` `UI` “收藏”和“取消收藏”应使用不同的 SVG
 - [x] `UI` Big UI Redesign
    - [x] `Fix` `UI` 上传卡片的 modal-title SVG 与文字应该在同一行并居中
