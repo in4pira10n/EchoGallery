@@ -66,6 +66,9 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("photos", "source_rel_path", `ALTER TABLE photos ADD COLUMN source_rel_path TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("photos", "exif_json", `ALTER TABLE photos ADD COLUMN exif_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("photos", "source_mod_unix", `ALTER TABLE photos ADD COLUMN source_mod_unix INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
@@ -109,6 +112,7 @@ CREATE TABLE IF NOT EXISTS photos (
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     storage_rel_path TEXT NOT NULL DEFAULT '',
     source_rel_path  TEXT NOT NULL DEFAULT '',
+    exif_json        TEXT NOT NULL DEFAULT '',
     source_mod_unix  INTEGER NOT NULL DEFAULT 0,
     random_sort_key  INTEGER NOT NULL DEFAULT 0,
     is_favorite   INTEGER NOT NULL DEFAULT 0,

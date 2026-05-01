@@ -198,6 +198,41 @@ func TestGetTimeline(t *testing.T) {
 	}
 }
 
+func TestMissingSourceFileHiddenFromLibrary(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	data := createJPEGBytes(100, 100)
+
+	result, err := svc.Upload(UploadInput{
+		Reader:       bytes.NewReader(data),
+		OriginalName: "missing.jpg",
+		Size:         int64(len(data)),
+		UploadedBy:   1,
+		FileModTime:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("上传失败: %v", err)
+	}
+	if err := os.Remove(svc.PhotoPath(result.Photo)); err != nil {
+		t.Fatalf("删除源文件失败: %v", err)
+	}
+
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 0 {
+		t.Fatalf("缺失源文件不应展示在时间线，得到 %d 条", len(page.Photos))
+	}
+
+	photo, err := svc.GetPhoto(result.Photo.ID, 1)
+	if err != nil {
+		t.Fatalf("获取单张媒体失败: %v", err)
+	}
+	if photo != nil {
+		t.Fatalf("缺失源文件不应返回单张媒体详情")
+	}
+}
+
 func TestDeleteAndRestorePhoto(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	data := createJPEGBytes(100, 100)

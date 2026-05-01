@@ -37,6 +37,7 @@ type settingsResponse struct {
 	ExperimentalAutoplayVideo     bool              `json:"experimental_autoplay_video"`
 	ExperimentalPrefetchNeighbors bool              `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
 	PlayerKeymap                  string            `json:"player_keymap"`
 }
 
@@ -60,6 +61,7 @@ type settingsUpdateRequest struct {
 	ExperimentalAutoplayVideo     bool             `json:"experimental_autoplay_video"`
 	ExperimentalPrefetchNeighbors bool             `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
 	PlayerKeymap                  string           `json:"player_keymap"`
 }
 
@@ -107,6 +109,7 @@ func buildSettingsResponse(cfg *config.Config) settingsResponse {
 		ExperimentalAutoplayVideo:     cfg.Preferences.ExperimentalAutoplayVideo,
 		ExperimentalPrefetchNeighbors: cfg.Preferences.ExperimentalPrefetchNeighbors,
 		ExperimentalRestoreLastView:   cfg.Preferences.ExperimentalRestoreLastView,
+		ContinueLastVideoPosition:     cfg.Preferences.ContinueLastVideoPosition,
 		PlayerKeymap:                  cfg.Preferences.PlayerKeymap,
 	}
 }
@@ -165,6 +168,7 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 		next.Preferences.ExperimentalAutoplayVideo = req.ExperimentalAutoplayVideo
 		next.Preferences.ExperimentalPrefetchNeighbors = req.ExperimentalPrefetchNeighbors
 		next.Preferences.ExperimentalRestoreLastView = req.ExperimentalRestoreLastView
+		next.Preferences.ContinueLastVideoPosition = req.ContinueLastVideoPosition
 		next.Preferences.PlayerKeymap = req.PlayerKeymap
 		if err := next.Save(); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -365,6 +369,32 @@ func handleRefreshVideoThumbnails(cfg *config.Config, registrar interface {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "视频缩略图刷新完成",
 			"data":    result,
+		})
+	}
+}
+
+func handleBackfillPhotoEXIF(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		backfiller, ok := registrar.(interface {
+			BackfillPhotoEXIF(userID int64) (*service.EXIFBackfillResult, error)
+		})
+		if !ok || backfiller == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持 EXIF 回填"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := backfiller.BackfillPhotoEXIF(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message": "EXIF 回填完成",
+			"result":  result,
 		})
 	}
 }

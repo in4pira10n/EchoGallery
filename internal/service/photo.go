@@ -120,6 +120,7 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 		Width:         meta.Width,
 		Height:        meta.Height,
 		DurationMS:    0,
+		EXIF:          copyPhotoEXIF(meta.EXIF),
 		SourceRelPath: sourceRelPath,
 		SourceModUnix: fallbackTime.UnixNano(),
 		TakenAt:       meta.TakenAt,
@@ -141,6 +142,27 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 	}
 
 	return &UploadResult{Photo: photo}, nil
+}
+
+func copyPhotoEXIF(src *imgpkg.EXIFData) *storage.PhotoEXIF {
+	if src == nil {
+		return nil
+	}
+	return &storage.PhotoEXIF{
+		Make:         src.Make,
+		Model:        src.Model,
+		Orientation:  src.Orientation,
+		TakenAt:      src.TakenAt,
+		Width:        src.Width,
+		Height:       src.Height,
+		FNumber:      src.FNumber,
+		ExposureTime: src.ExposureTime,
+		ISOSpeed:     src.ISOSpeed,
+		FocalLength:  src.FocalLength,
+		Latitude:     src.Latitude,
+		Longitude:    src.Longitude,
+		HasGPS:       src.HasGPS,
+	}
 }
 
 // generateThumbnail 生成缩略图（在后台 goroutine 中调用）

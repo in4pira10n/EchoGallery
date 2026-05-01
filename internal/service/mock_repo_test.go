@@ -196,6 +196,15 @@ func (m *mockRepo) SetPhotoFavorite(id int64, userID int64, favorite bool) error
 	return nil
 }
 
+func (m *mockRepo) UpdatePhotoEXIF(id int64, userID int64, exif *storage.PhotoEXIF) error {
+	p, ok := m.photos[id]
+	if !ok || p.UploadedBy != userID || p.DeletedAt != nil {
+		return fmt.Errorf("图片不存在")
+	}
+	p.EXIF = exif
+	return nil
+}
+
 func (m *mockRepo) CreateAlbum(album *storage.Album) error {
 	album.ID = m.genID()
 	m.albums[album.ID] = album

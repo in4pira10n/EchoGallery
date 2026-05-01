@@ -56,6 +56,9 @@ type Repository interface {
 	// SetPhotoFavorite 设置收藏状态
 	SetPhotoFavorite(id int64, userID int64, favorite bool) error
 
+	// UpdatePhotoEXIF 更新图片 EXIF 数据。
+	UpdatePhotoEXIF(id int64, userID int64, exif *PhotoEXIF) error
+
 	// --- 相册 ---
 
 	// CreateAlbum 创建相册，成功后填充 album.ID

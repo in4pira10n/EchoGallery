@@ -20,32 +20,56 @@ var (
 
 // GetTimeline 获取时间线图片（游标分页）
 func (s *PhotoService) GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.ListPhotos(params)
+	page, err := s.repo.ListPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // GetTrash 获取回收站图片（游标分页）
 func (s *PhotoService) GetTrash(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.ListTrashedPhotos(params)
+	page, err := s.repo.ListTrashedPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // GetFavorites 获取个人收藏（游标分页）
 func (s *PhotoService) GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.ListFavoritePhotos(params)
+	page, err := s.repo.ListFavoritePhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // SearchMedia 搜索用户媒体（游标分页）。
 func (s *PhotoService) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.SearchPhotos(params)
+	page, err := s.repo.SearchPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // GetRandomMedia 获取乱序相册媒体（游标分页）。
 func (s *PhotoService) GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.ListRandomPhotos(params)
+	page, err := s.repo.ListRandomPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // GetAlbumMedia 获取相册内媒体（游标分页）。
 func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error) {
-	return s.repo.ListAlbumPhotos(params)
+	page, err := s.repo.ListAlbumPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
 }
 
 // GetAlbum 获取单个相册。
@@ -163,6 +187,7 @@ func (s *PhotoService) GetAlbumDownloadEntries(albumID int64, userID int64) (str
 	if err != nil {
 		return "", nil, err
 	}
+	page = s.filterExistingMediaPage(page)
 
 	entries := make([]DownloadEntry, 0, len(page.Photos))
 	usedNames := map[string]int{}
@@ -194,7 +219,14 @@ func (s *PhotoService) RemovePhoto(albumID int64, photoID int64, userID int64) e
 
 // GetPhoto 获取单张图片
 func (s *PhotoService) GetPhoto(id int64, userID int64) (*storage.Photo, error) {
-	return s.repo.GetPhotoByID(id, userID)
+	photo, err := s.repo.GetPhotoByID(id, userID)
+	if err != nil || photo == nil {
+		return photo, err
+	}
+	if !s.mediaFileExists(photo) {
+		return nil, nil
+	}
+	return photo, nil
 }
 
 // GetPhotoByUUID ��过 UUID 获取单张图片（不含软删除）
@@ -354,6 +386,67 @@ func (s *PhotoService) resolveFinderPath(photo *storage.Photo) string {
 		}
 	}
 	return s.MediaPath(photo)
+}
+
+func (s *PhotoService) mediaFileExists(photo *storage.Photo) bool {
+	if photo == nil {
+		return false
+	}
+	for _, path := range s.mediaFileCandidates(photo) {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *PhotoService) mediaFileCandidates(photo *storage.Photo) []string {
+	if photo == nil {
+		return nil
+	}
+	candidates := make([]string, 0, 3)
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		for _, existing := range candidates {
+			if existing == clean {
+				return
+			}
+		}
+		candidates = append(candidates, clean)
+	}
+	if photo.SourceRelPath != "" {
+		add(filepath.Join(s.sourcePath, photo.SourceRelPath))
+	}
+	if photo.StorageRelPath != "" {
+		add(filepath.Join(s.dataPath, photo.StorageRelPath))
+	}
+	if photo.UUID != "" && photo.OriginalName != "" {
+		add(filepath.Join(s.dataPath, photo.UUID+filepath.Ext(photo.OriginalName)))
+	}
+	return candidates
+}
+
+func (s *PhotoService) filterExistingMediaPage(page *storage.PhotoPage) *storage.PhotoPage {
+	if page == nil || len(page.Photos) == 0 {
+		return page
+	}
+	filtered := page.Photos[:0]
+	removed := 0
+	for _, photo := range page.Photos {
+		if s.mediaFileExists(photo) {
+			filtered = append(filtered, photo)
+			continue
+		}
+		removed++
+	}
+	page.Photos = filtered
+	if removed > 0 && page.Total >= removed {
+		page.Total -= removed
+	}
+	return page
 }
 
 func (s *PhotoService) moveManagedFileToTrash(path string) {

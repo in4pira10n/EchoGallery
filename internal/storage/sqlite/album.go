@@ -193,35 +193,45 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	if limit <= 0 {
 		limit = 30
 	}
+	where := "ap.album_id = ? AND p.uploaded_by = ? AND p.deleted_at IS NULL"
+	args := []interface{}{params.AlbumID, params.UserID}
+	if params.MediaKind != "" {
+		where += " AND p.media_kind = ?"
+		args = append(args, params.MediaKind)
+	}
 
 	var rows *sql.Rows
 	var err error
 
 	if params.Cursor == "" {
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, limit+1)
 		rows, err = s.db.Query(`
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
-			       p.storage_rel_path, p.source_rel_path, p.is_favorite,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
 			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
 			FROM photos p
 			JOIN album_photos ap ON ap.photo_id = p.id
-			WHERE ap.album_id = ? AND p.uploaded_by = ? AND p.deleted_at IS NULL
+			WHERE `+where+`
 			ORDER BY p.taken_at DESC, p.id DESC
-			LIMIT ?`, params.AlbumID, params.UserID, limit+1)
+			LIMIT ?`, queryArgs...)
 	} else {
 		c, err2 := decodeCursor(params.Cursor)
 		if err2 != nil {
 			return nil, err2
 		}
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
-			       p.storage_rel_path, p.source_rel_path, p.is_favorite,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
 			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
 			FROM photos p
 			JOIN album_photos ap ON ap.photo_id = p.id
-			WHERE ap.album_id = ? AND p.uploaded_by = ? AND p.deleted_at IS NULL
+			WHERE `+where+`
 			  AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))
 			ORDER BY p.taken_at DESC, p.id DESC
-			LIMIT ?`, params.AlbumID, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+			LIMIT ?`, queryArgs...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询相册图片失败: %w", err)

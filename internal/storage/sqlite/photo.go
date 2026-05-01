@@ -89,10 +89,11 @@ func scanPhoto(row interface {
 	var p storage.Photo
 	var deletedAt sql.NullTime
 	var deletedBy sql.NullInt64
+	var exifJSON string
 
 	err := row.Scan(
 		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
-		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &p.IsFavorite,
+		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &exifJSON, &p.IsFavorite,
 		&p.TakenAt, &p.UploadedAt, &p.UploadedBy,
 		&deletedAt, &deletedBy,
 	)
@@ -105,6 +106,7 @@ func scanPhoto(row interface {
 	if deletedBy.Valid {
 		p.DeletedBy = &deletedBy.Int64
 	}
+	applyPhotoEXIFJSON(&p, exifJSON)
 	return &p, nil
 }
 
@@ -114,10 +116,11 @@ func scanPhotoWithExtraInt64(row interface {
 	var p storage.Photo
 	var deletedAt sql.NullTime
 	var deletedBy sql.NullInt64
+	var exifJSON string
 
 	err := row.Scan(
 		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
-		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &p.IsFavorite,
+		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &exifJSON, &p.IsFavorite,
 		&p.TakenAt, &p.UploadedAt, &p.UploadedBy,
 		&deletedAt, &deletedBy, extra,
 	)
@@ -133,7 +136,47 @@ func scanPhotoWithExtraInt64(row interface {
 	if extra != nil {
 		p.RandomSortKey = *extra
 	}
+	applyPhotoEXIFJSON(&p, exifJSON)
 	return &p, nil
+}
+
+func applyPhotoEXIFJSON(photo *storage.Photo, raw string) {
+	if photo == nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var exif storage.PhotoEXIF
+	if err := json.Unmarshal([]byte(raw), &exif); err == nil {
+		photo.EXIF = &exif
+	}
+}
+
+func encodePhotoEXIFJSON(photo *storage.Photo) string {
+	if photo == nil || photo.EXIF == nil {
+		return ""
+	}
+	data, err := json.Marshal(photo.EXIF)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// UpdatePhotoEXIF 更新图片的 EXIF JSON。
+func (s *DB) UpdatePhotoEXIF(id int64, userID int64, exif *storage.PhotoEXIF) error {
+	result, err := s.db.Exec(`
+		UPDATE photos
+		SET exif_json = ?
+		WHERE id = ? AND uploaded_by = ?`,
+		encodePhotoEXIFJSON(&storage.Photo{EXIF: exif}), id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新 EXIF 失败: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("图片不存在")
+	}
+	return nil
 }
 
 // SavePhoto 保存图片记录
@@ -145,10 +188,10 @@ func (s *DB) SavePhoto(photo *storage.Photo) error {
 		photo.RandomSortKey = makeRandomSortKey(photo)
 	}
 	result, err := s.db.Exec(`
-		INSERT INTO photos (uuid, original_name, media_kind, mime_type, size, width, height, duration_ms, storage_rel_path, source_rel_path, source_mod_unix, random_sort_key, is_favorite, taken_at, uploaded_at, uploaded_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO photos (uuid, original_name, media_kind, mime_type, size, width, height, duration_ms, storage_rel_path, source_rel_path, exif_json, source_mod_unix, random_sort_key, is_favorite, taken_at, uploaded_at, uploaded_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		photo.UUID, photo.OriginalName, photo.MediaKind, photo.MimeType,
-		photo.Size, photo.Width, photo.Height, photo.DurationMS, photo.StorageRelPath, photo.SourceRelPath, photo.SourceModUnix, photo.RandomSortKey, photo.IsFavorite,
+		photo.Size, photo.Width, photo.Height, photo.DurationMS, photo.StorageRelPath, photo.SourceRelPath, encodePhotoEXIFJSON(photo), photo.SourceModUnix, photo.RandomSortKey, photo.IsFavorite,
 		photo.TakenAt, photo.UploadedAt, photo.UploadedBy,
 	)
 	if err != nil {
@@ -166,7 +209,7 @@ func (s *DB) SavePhoto(photo *storage.Photo) error {
 func (s *DB) GetPhotoByID(id int64, userID int64) (*storage.Photo, error) {
 	row := s.db.QueryRow(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE id = ? AND uploaded_by = ? AND deleted_at IS NULL`, id, userID)
@@ -181,7 +224,7 @@ func (s *DB) GetPhotoByID(id int64, userID int64) (*storage.Photo, error) {
 func (s *DB) GetPhotoByIDAny(id int64, userID int64) (*storage.Photo, error) {
 	row := s.db.QueryRow(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE id = ? AND uploaded_by = ?`, id, userID)
@@ -196,7 +239,7 @@ func (s *DB) GetPhotoByIDAny(id int64, userID int64) (*storage.Photo, error) {
 func (s *DB) GetPhotoByUUID(uuid string, userID int64) (*storage.Photo, error) {
 	row := s.db.QueryRow(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE uuid = ? AND uploaded_by = ? AND deleted_at IS NULL`, uuid, userID)
@@ -211,7 +254,7 @@ func (s *DB) GetPhotoByUUID(uuid string, userID int64) (*storage.Photo, error) {
 func (s *DB) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Photo, error) {
 	row := s.db.QueryRow(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE uuid = ? AND uploaded_by = ?`, uuid, userID)
@@ -226,7 +269,7 @@ func (s *DB) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Photo, error
 func (s *DB) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*storage.Photo, error) {
 	row := s.db.QueryRow(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE source_rel_path = ? AND uploaded_by = ?`, sourceRelPath, userID)
@@ -273,13 +316,16 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	if limit <= 0 {
 		limit = 30
 	}
+	where := "uploaded_by = ? AND deleted_at IS NULL"
+	args := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		args = append(args, params.MediaKind)
+	}
 
 	var total int
 	if !params.SkipTotal {
-		if err := s.db.QueryRow(`
-			SELECT COUNT(*)
-			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("统计图片失败: %w", err)
 		}
 	}
@@ -289,52 +335,60 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 
 	if params.Reverse {
 		if params.Cursor == "" {
+			queryArgs := append([]interface{}{}, args...)
+			queryArgs = append(queryArgs, limit+1)
 			rows, err = s.db.Query(`
 				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-				       storage_rel_path, source_rel_path, is_favorite,
+				       storage_rel_path, source_rel_path, exif_json, is_favorite,
 				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 				FROM photos
-				WHERE uploaded_by = ? AND deleted_at IS NULL
+				WHERE `+where+`
 				ORDER BY taken_at ASC, id ASC
-				LIMIT ?`, params.UserID, limit+1)
+				LIMIT ?`, queryArgs...)
 		} else {
 			c, err2 := decodeCursor(params.Cursor)
 			if err2 != nil {
 				return nil, err2
 			}
+			queryArgs := append([]interface{}{}, args...)
+			queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
 			rows, err = s.db.Query(`
 				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-				       storage_rel_path, source_rel_path, is_favorite,
+				       storage_rel_path, source_rel_path, exif_json, is_favorite,
 				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 				FROM photos
-				WHERE uploaded_by = ? AND deleted_at IS NULL
+				WHERE `+where+`
 				  AND (taken_at > ? OR (taken_at = ? AND id > ?))
 				ORDER BY taken_at ASC, id ASC
-				LIMIT ?`, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+				LIMIT ?`, queryArgs...)
 		}
 	} else if params.Cursor == "" {
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL
+			WHERE `+where+`
 			ORDER BY taken_at DESC, id DESC
-			LIMIT ?`, params.UserID, limit+1)
+			LIMIT ?`, queryArgs...)
 	} else {
 		c, err2 := decodeCursor(params.Cursor)
 		if err2 != nil {
 			return nil, err2
 		}
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL
+			WHERE `+where+`
 			  AND (taken_at < ? OR (taken_at = ? AND id < ?))
 			ORDER BY taken_at DESC, id DESC
-			LIMIT ?`, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+			LIMIT ?`, queryArgs...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询图片失败: %w", err)
@@ -396,7 +450,7 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 
 	rows, err := s.db.Query(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos
 		WHERE `+where+`
@@ -435,10 +489,13 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 
 	var total int
 	if !params.SkipTotal {
-		if err := s.db.QueryRow(`
-			SELECT COUNT(*)
-			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL`, params.UserID).Scan(&total); err != nil {
+		where := "uploaded_by = ? AND deleted_at IS NULL"
+		args := []interface{}{params.UserID}
+		if params.MediaKind != "" {
+			where += " AND media_kind = ?"
+			args = append(args, params.MediaKind)
+		}
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("统计乱序相册失败: %w", err)
 		}
 	}
@@ -453,16 +510,23 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 		if remaining <= 0 {
 			return nil
 		}
+		where := `uploaded_by = ? AND deleted_at IS NULL
+			  AND random_sort_key <= ?
+			  AND (random_sort_key > ? OR (random_sort_key = ? AND id > ?))`
+		args := []interface{}{params.UserID, maxKey, afterKey, afterKey, afterID}
+		if params.MediaKind != "" {
+			where += " AND media_kind = ?"
+			args = append(args, params.MediaKind)
+		}
+		args = append(args, remaining)
 		rows, err := s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by, random_sort_key
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL
-			  AND random_sort_key <= ?
-			  AND (random_sort_key > ? OR (random_sort_key = ? AND id > ?))
+			WHERE `+where+`
 			ORDER BY random_sort_key ASC, id ASC
-			LIMIT ?`, params.UserID, maxKey, afterKey, afterKey, afterID, remaining)
+			LIMIT ?`, args...)
 		if err != nil {
 			return fmt.Errorf("查询乱序相册失败: %w", err)
 		}
@@ -514,33 +578,43 @@ func (s *DB) ListTrashedPhotos(params storage.ListPhotosParams) (*storage.PhotoP
 	if limit <= 0 {
 		limit = 30
 	}
+	where := "uploaded_by = ? AND deleted_at IS NOT NULL"
+	args := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		args = append(args, params.MediaKind)
+	}
 
 	var rows *sql.Rows
 	var err error
 
 	if params.Cursor == "" {
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NOT NULL
+			WHERE `+where+`
 			ORDER BY deleted_at DESC, id DESC
-			LIMIT ?`, params.UserID, limit+1)
+			LIMIT ?`, queryArgs...)
 	} else {
 		c, err2 := decodeCursor(params.Cursor)
 		if err2 != nil {
 			return nil, err2
 		}
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NOT NULL
+			WHERE `+where+`
 			  AND (deleted_at < ? OR (deleted_at = ? AND id < ?))
 			ORDER BY deleted_at DESC, id DESC
-			LIMIT ?`, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+			LIMIT ?`, queryArgs...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询回收站失败: %w", err)
@@ -561,12 +635,15 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 	if limit <= 0 {
 		limit = 30
 	}
+	where := "uploaded_by = ? AND deleted_at IS NULL AND is_favorite = 1"
+	args := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		args = append(args, params.MediaKind)
+	}
 
 	var total int
-	if err := s.db.QueryRow(`
-		SELECT COUNT(*)
-		FROM photos
-		WHERE uploaded_by = ? AND deleted_at IS NULL AND is_favorite = 1`, params.UserID).Scan(&total); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("统计个人收藏失败: %w", err)
 	}
 
@@ -574,28 +651,32 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 	var err error
 
 	if params.Cursor == "" {
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL AND is_favorite = 1
+			WHERE `+where+`
 			ORDER BY taken_at DESC, id DESC
-			LIMIT ?`, params.UserID, limit+1)
+			LIMIT ?`, queryArgs...)
 	} else {
 		c, err2 := decodeCursor(params.Cursor)
 		if err2 != nil {
 			return nil, err2
 		}
+		queryArgs := append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-			       storage_rel_path, source_rel_path, is_favorite,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 			FROM photos
-			WHERE uploaded_by = ? AND deleted_at IS NULL AND is_favorite = 1
+			WHERE `+where+`
 			  AND (taken_at < ? OR (taken_at = ? AND id < ?))
 			ORDER BY taken_at DESC, id DESC
-			LIMIT ?`, params.UserID, c.TakenAt, c.TakenAt, c.ID, limit+1)
+			LIMIT ?`, queryArgs...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查询个人收藏失败: %w", err)
@@ -680,7 +761,7 @@ func (s *DB) HardDeletePhoto(id int64, userID int64) error {
 func (s *DB) HardDeleteTrashedPhotos(userID int64) ([]*storage.Photo, error) {
 	rows, err := s.db.Query(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
-		       storage_rel_path, source_rel_path, is_favorite,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
 		FROM photos WHERE uploaded_by = ? AND deleted_at IS NOT NULL`, userID)
 	if err != nil {

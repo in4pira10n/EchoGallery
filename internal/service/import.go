@@ -276,6 +276,7 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 			Size:          info.Size(),
 			Width:         meta.Width,
 			Height:        meta.Height,
+			EXIF:          copyPhotoEXIF(meta.EXIF),
 			SourceRelPath: job.sourceRelPath,
 			SourceModUnix: info.ModTime().UnixNano(),
 			TakenAt:       meta.TakenAt,

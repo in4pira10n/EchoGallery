@@ -37,6 +37,7 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `play.svg`: Play button.
 - `pause.svg`: Pause button.
 - `autoplay.svg`: Autoplay/slideshow-related controls.
+- `slideshow-loop.svg`: Lightbox slideshow loop toggle.
 - `fit.svg`: Fit media to the current viewport in the lightbox.
 - `info-type.svg`: Lightbox metadata icon for media type.
 - `info-mime.svg`: Lightbox metadata icon for MIME/format.
@@ -45,8 +46,18 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `info-ratio.svg`: Lightbox metadata icon for dimensions and aspect ratio.
 - `info-dimensions.svg`: Lightbox metadata icon for pixel dimensions.
 - `info-file-size.svg`: Lightbox metadata icon for file size.
+- `exif-camera.svg`: EXIF camera brand/model metadata.
+- `exif-aperture.svg`: EXIF aperture metadata.
+- `exif-shutter.svg`: EXIF exposure time metadata.
+- `exif-iso.svg`: EXIF ISO metadata.
+- `exif-focal.svg`: EXIF focal length metadata.
+- `exif-gps.svg`: EXIF GPS metadata.
+- `exif-orientation.svg`: EXIF orientation metadata.
+- `media-all.svg`: Topbar media filter icon for showing all media types.
 - `media-image.svg`: Lightbox metadata icon for image media.
 - `media-video.svg`: Lightbox metadata icon for video media.
+- `timeline-order.svg`: Topbar Timeline sort-order toggle.
+- `video-bookmark.svg`: Lightbox video playback bookmark action.
 
 ## Theme And Layout
 

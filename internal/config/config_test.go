@@ -61,6 +61,9 @@ func TestLoadFromPath_Success(t *testing.T) {
 	if !cfg.Preferences.SlideshowLoop {
 		t.Errorf("期望旧配置默认开启 slideshow_loop")
 	}
+	if cfg.Preferences.SlideshowMode != "random" {
+		t.Errorf("期望旧配置默认使用随机幻灯片，得到 %s", cfg.Preferences.SlideshowMode)
+	}
 	if !cfg.Preferences.ExperimentalPrefetchNeighbors {
 		t.Errorf("期望旧配置默认开启 experimental_prefetch_neighbors")
 	}

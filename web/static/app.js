@@ -47,7 +47,12 @@ const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComp
 </svg>`)} `;
 const supportedImageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff'];
 const supportedVideoExtensions = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.wma', '.ts', '.mts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2', '.ogv'];
+const browserUnsupportedVideoExtensions = ['.wmv', '.wma'];
 const memoriesStorageKey = 'echogallery_memories_v1';
+const mediaKindFilterStorageKey = 'echogallery_media_kind_filter_v1';
+const timelineOrderStorageKey = 'echogallery_timeline_order_v1';
+const videoBookmarksStorageKey = 'echogallery_video_bookmarks_v2';
+const legacyVideoBookmarksStorageKey = 'echogallery_video_bookmarks_v1';
 
 function formatDate(iso) {
   const d = new Date(iso);
@@ -261,6 +266,8 @@ const icons = {
   more: '',
   download: '',
   fit: '',
+  slideshowLoop: '',
+  timelineOrder: '',
   infoType: '',
   infoMime: '',
   infoDate: '',
@@ -268,8 +275,17 @@ const icons = {
   infoRatio: '',
   infoDimensions: '',
   infoFileSize: '',
+  exifCamera: '',
+  exifAperture: '',
+  exifShutter: '',
+  exifISO: '',
+  exifFocal: '',
+  exifGPS: '',
+  exifOrientation: '',
+  mediaAll: '',
   mediaImage: '',
   mediaVideo: '',
+  bookmark: '',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>',
   contextSelect: '',
   contextView: '',
@@ -315,6 +331,8 @@ const svgIconFiles = {
   more: 'more.svg',
   download: 'download.svg',
   fit: 'fit.svg',
+  slideshowLoop: 'slideshow-loop.svg',
+  timelineOrder: 'timeline-order.svg',
   infoType: 'info-type.svg',
   infoMime: 'info-mime.svg',
   infoDate: 'info-date.svg',
@@ -322,8 +340,17 @@ const svgIconFiles = {
   infoRatio: 'info-ratio.svg',
   infoDimensions: 'info-dimensions.svg',
   infoFileSize: 'info-file-size.svg',
+  exifCamera: 'exif-camera.svg',
+  exifAperture: 'exif-aperture.svg',
+  exifShutter: 'exif-shutter.svg',
+  exifISO: 'exif-iso.svg',
+  exifFocal: 'exif-focal.svg',
+  exifGPS: 'exif-gps.svg',
+  exifOrientation: 'exif-orientation.svg',
+  mediaAll: 'media-all.svg',
   mediaImage: 'media-image.svg',
   mediaVideo: 'media-video.svg',
+  bookmark: 'video-bookmark.svg',
   contextSelect: 'context-select.svg',
   contextView: 'context-view.svg',
   contextTimeline: 'context-timeline.svg',
@@ -407,6 +434,304 @@ function updateThemeBtn() {
   if (iconEl) iconEl.innerHTML = document.documentElement.dataset.theme === 'dark' ? icons.sun : icons.moon;
 }
 
+function normalizeMediaKindFilter(value) {
+  return value === 'image' || value === 'video' ? value : 'all';
+}
+function normalizeTimelineOrder(value) {
+  return value === 'asc' ? 'asc' : 'desc';
+}
+function currentMediaKindParam() {
+  return state && state.mediaKindFilter !== 'all' ? state.mediaKindFilter : '';
+}
+function appendMediaKindParam(params) {
+  const kind = currentMediaKindParam();
+  if (kind) params.set('kind', kind);
+  return params;
+}
+function mediaKindMatchesFilter(photo) {
+  const kind = currentMediaKindParam();
+  return !kind || (photo && photo.media_kind === kind);
+}
+function renderMediaKindFilterControl() {
+  const active = normalizeMediaKindFilter(state.mediaKindFilter);
+  const items = [
+    { key: 'all', icon: icons.mediaAll || icons.photo, label: '显示全部媒体' },
+    { key: 'image', icon: icons.mediaImage || icons.photo, label: '只显示图片' },
+    { key: 'video', icon: icons.mediaVideo || icons.play, label: '只显示视频' },
+  ];
+  return `<div class="topbar-media-filter" role="group" aria-label="媒体类型筛选">
+    ${items.map(item => `<button class="media-filter-btn ${active === item.key ? 'active' : ''}" type="button" data-media-kind-filter="${item.key}" title="${item.label}" aria-label="${item.label}" aria-pressed="${active === item.key ? 'true' : 'false'}">${item.icon}</button>`).join('')}
+  </div>`;
+}
+function bindMediaKindFilterControl() {
+  $$('[data-media-kind-filter]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = normalizeMediaKindFilter(btn.dataset.mediaKindFilter);
+      if (next === state.mediaKindFilter) return;
+      state.mediaKindFilter = next;
+      localStorage.setItem(mediaKindFilterStorageKey, next);
+      clearSelection();
+      resetMediaFilteredViewState();
+      state.viewScrollPositions[viewScrollKeyFor()] = 0;
+      renderView();
+    });
+  });
+}
+function resetMediaFilteredViewState() {
+  state.photos = [];
+  state.timelineCursor = '';
+  state.timelineHasMore = true;
+  state.timelineTotal = 0;
+  state.randomAlbumPhotos = [];
+  state.randomAlbumCursor = '';
+  state.randomAlbumHasMore = true;
+  state.randomAlbumLoaded = false;
+  state.randomAlbumTotal = 0;
+  state.favoritePhotos = [];
+  state.favoriteCursor = '';
+  state.favoriteHasMore = true;
+  state.favoriteTotal = 0;
+  state.albumPhotos = [];
+  state.albumCursor = '';
+  state.albumHasMore = true;
+  state.trashPhotos = [];
+  state.trashCursor = '';
+  state.trashHasMore = true;
+}
+function videoBookmarkKey(photo) {
+  if (!photo) return '';
+  return String(photo.uuid || photo.id || '');
+}
+function normalizeVideoBookmarkState(raw) {
+  const next = { bookmarks: [], resumeTime: 0 };
+  if (typeof raw === 'number') {
+    next.resumeTime = Math.max(0, Math.floor(Number(raw) || 0));
+    return next;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return next;
+  const resume = Number(raw.resumeTime ?? raw.resume_time ?? raw.lastTime ?? raw.last_time ?? raw.position ?? 0);
+  if (Number.isFinite(resume) && resume >= 0) next.resumeTime = Math.floor(resume);
+  const list = Array.isArray(raw.bookmarks)
+    ? raw.bookmarks
+    : Array.isArray(raw.items)
+      ? raw.items
+      : Array.isArray(raw.slots)
+        ? raw.slots
+        : [];
+  list.forEach(item => {
+    if (!item || typeof item !== 'object') return;
+    const slot = Math.max(1, Math.min(10, Number(item.slot ?? item.index ?? 0) || 0));
+    const time = Number(item.time ?? item.seconds ?? item.position ?? 0);
+    if (!slot || !Number.isFinite(time) || time < 0) return;
+    const name = String(item.name ?? item.label ?? '').trim();
+    const found = next.bookmarks.findIndex(entry => entry.slot === slot);
+    const bookmark = { slot, time: Math.floor(time), name };
+    if (found >= 0) next.bookmarks[found] = bookmark;
+    else next.bookmarks.push(bookmark);
+  });
+  next.bookmarks.sort((a, b) => a.slot - b.slot);
+  return next;
+}
+function loadVideoBookmarks() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(videoBookmarksStorageKey) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, normalizeVideoBookmarkState(value)]));
+    }
+  } catch (_) {
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(legacyVideoBookmarksStorageKey) || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, normalizeVideoBookmarkState(value)]));
+    }
+  } catch (_) {}
+  return {};
+}
+function persistVideoBookmarks() {
+  try {
+    localStorage.setItem(videoBookmarksStorageKey, JSON.stringify(state.videoBookmarks || {}));
+  } catch (_) {
+    // 书签是体验增强，不应因为本地存储不可用影响播放。
+  }
+}
+function getVideoBookmarkState(photo, { create = false } = {}) {
+  const key = videoBookmarkKey(photo);
+  if (!key) return null;
+  let entry = state.videoBookmarks[key];
+  if (!entry && create) {
+    entry = { bookmarks: [], resumeTime: 0 };
+    state.videoBookmarks[key] = entry;
+  }
+  if (entry && !Array.isArray(entry.bookmarks)) {
+    state.videoBookmarks[key] = normalizeVideoBookmarkState(entry);
+    entry = state.videoBookmarks[key];
+  }
+  return entry || null;
+}
+function getVideoBookmarkList(photo) {
+  const entry = getVideoBookmarkState(photo);
+  return entry ? entry.bookmarks : [];
+}
+function getVideoBookmarkCount(photo) {
+  return isVideoMedia(photo) ? getVideoBookmarkList(photo).length : 0;
+}
+function getVideoBookmarkCountByKey(key) {
+  const entry = state.videoBookmarks[String(key || '')];
+  return entry && Array.isArray(entry.bookmarks) ? entry.bookmarks.length : 0;
+}
+function getVideoBookmarkSlot(photo, slot) {
+  const entry = getVideoBookmarkState(photo);
+  const targetSlot = Math.max(1, Math.min(10, Number(slot) || 0));
+  if (!entry || !targetSlot) return null;
+  return entry.bookmarks.find(item => item.slot === targetSlot) || null;
+}
+function hasNearbyVideoBookmark(entry, slot, seconds, threshold = 1) {
+  if (!entry || !Array.isArray(entry.bookmarks)) return false;
+  const targetSlot = Math.max(1, Math.min(10, Number(slot) || 0));
+  const targetTime = Math.max(0, Number(seconds) || 0);
+  return entry.bookmarks.some(item => item.slot !== targetSlot && Math.abs((Number(item.time) || 0) - targetTime) <= threshold);
+}
+function setVideoBookmarkSlot(photo, slot, seconds, name = '') {
+  const entry = getVideoBookmarkState(photo, { create: true });
+  const targetSlot = Math.max(1, Math.min(10, Number(slot) || 0));
+  const value = Math.max(0, Number(seconds) || 0);
+  if (!entry || !targetSlot) return false;
+  const index = entry.bookmarks.findIndex(item => item.slot === targetSlot);
+  if (index < 0 && hasNearbyVideoBookmark(entry, targetSlot, value, 1)) return false;
+  const bookmark = { slot: targetSlot, time: Math.floor(value), name: String(name || '').trim() };
+  if (index >= 0) entry.bookmarks[index] = bookmark;
+  else if (entry.bookmarks.length < 10) entry.bookmarks.push(bookmark);
+  else return false;
+  entry.bookmarks.sort((a, b) => a.slot - b.slot);
+  persistVideoBookmarks();
+  updateVideoBookmarkButton(photo);
+  updateVideoBookmarkProgress(photo);
+  updateVideoBookmarkThumbIndicators(photo);
+  return true;
+}
+function deleteVideoBookmarkSlot(photo, slot) {
+  const entry = getVideoBookmarkState(photo);
+  const targetSlot = Math.max(1, Math.min(10, Number(slot) || 0));
+  if (!entry || !targetSlot) return false;
+  const before = entry.bookmarks.length;
+  entry.bookmarks = entry.bookmarks.filter(item => item.slot !== targetSlot);
+  if (entry.bookmarks.length === before) return false;
+  persistVideoBookmarks();
+  updateVideoBookmarkButton(photo);
+  updateVideoBookmarkProgress(photo);
+  updateVideoBookmarkThumbIndicators(photo);
+  return true;
+}
+function getVideoResumeTime(photo) {
+  const entry = getVideoBookmarkState(photo);
+  const value = entry ? Number(entry.resumeTime) : 0;
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+function setVideoResumeTime(photo, seconds) {
+  const entry = getVideoBookmarkState(photo, { create: true });
+  const value = Math.max(0, Number(seconds) || 0);
+  if (!entry) return false;
+  entry.resumeTime = Math.floor(value);
+  persistVideoBookmarks();
+  return true;
+}
+function updateVideoBookmarkButton(photo = state.lightboxPhotos[state.lightboxIndex]) {
+  const btn = $('#lb-video-bookmark');
+  if (!btn) return;
+  const isVideo = isVideoMedia(photo);
+  btn.classList.toggle('hidden', !isVideo);
+  if (!isVideo) return;
+  const count = getVideoBookmarkList(photo).length;
+  btn.classList.toggle('active', count > 0);
+  btn.title = count > 0 ? `视频书签 ${count}/10，点击管理` : '视频书签，点击管理';
+  btn.setAttribute('aria-label', btn.title);
+}
+function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
+  const track = $('#lb-video-progress');
+  const fill = $('#lb-video-progress-fill');
+  const markers = $('#lb-video-progress-markers');
+  if (!track || !fill || !markers) return;
+  const isVideo = isVideoMedia(photo) && video && !video.classList.contains('hidden');
+  track.classList.toggle('hidden', !isVideo);
+  if (!isVideo) {
+    fill.style.width = '0%';
+    markers.innerHTML = '';
+    return;
+  }
+  if (!Number.isFinite(video.duration) || video.duration <= 0) {
+    fill.style.width = '0%';
+    markers.innerHTML = '';
+    return;
+  }
+  const current = Math.max(0, Number(video.currentTime) || 0);
+  fill.style.width = `${Math.max(0, Math.min(100, current / video.duration * 100))}%`;
+  const bookmarks = getVideoBookmarkList(photo);
+  markers.innerHTML = bookmarks.map(bookmark => {
+    const left = Math.max(0, Math.min(100, bookmark.time / video.duration * 100));
+    const label = bookmark.name ? `${bookmark.name} · ${formatDuration(bookmark.time * 1000)}` : `书签 ${bookmark.slot} · ${formatDuration(bookmark.time * 1000)}`;
+    return `<button type="button" class="lightbox-video-progress-marker" data-video-bookmark-slot="${bookmark.slot}" style="left:${left}%" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}"></button>`;
+  }).join('');
+}
+function saveCurrentVideoResumePosition({ quiet = false } = {}) {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!state.continueLastVideoPosition || !isVideoMedia(photo) || !video || video.classList.contains('hidden')) return false;
+  if (!setVideoResumeTime(photo, video.currentTime || 0)) return false;
+  if (!quiet) showToast(`已记住上次播放位置 ${formatDuration(video.currentTime * 1000)}`);
+  return true;
+}
+function handleVideoResumeTimeUpdate(video) {
+  if (!state.continueLastVideoPosition || !video || video.classList.contains('hidden')) return;
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!isVideoMedia(photo) || !Number.isFinite(video.duration) || video.duration <= 0) return;
+  const current = Number(video.currentTime) || 0;
+  if (current < 0 || current > video.duration - 1) return;
+  const now = Date.now();
+  if (state.videoBookmarkSaveTimer && now - state.videoBookmarkSaveTimer < 2500) return;
+  state.videoBookmarkSaveTimer = now;
+  setVideoResumeTime(photo, current);
+}
+function restoreVideoResumePosition(video, photo) {
+  if (!video || !isVideoMedia(photo)) return;
+  if (!state.continueLastVideoPosition) return;
+  const saved = getVideoResumeTime(photo);
+  if (saved > 0 && Number.isFinite(video.duration) && saved < video.duration - 2) {
+    video.currentTime = saved;
+    showToast(`已从上次播放位置继续：${formatDuration(saved * 1000)}`);
+  }
+  updateVideoBookmarkButton(photo);
+  updateVideoBookmarkProgress(video, photo);
+}
+function getVideoBookmarkSlotFromEvent(e) {
+  if (!e || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return null;
+  if (e.location === 3) return null;
+  if (e.code === 'Digit0' || e.key === '0') return 10;
+  if (/^Digit[1-9]$/.test(e.code || '')) return Number(e.code.slice(5));
+  if (/^[1-9]$/.test(e.key || '')) return Number(e.key);
+  return null;
+}
+function handleVideoBookmarkShortcut(e) {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return false;
+  const slot = getVideoBookmarkSlotFromEvent(e);
+  if (!slot) return false;
+  const bookmark = getVideoBookmarkSlot(photo, slot);
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (bookmark) {
+    video.currentTime = bookmark.time;
+    showToast(`已跳转到书签 ${slot}${bookmark.name ? `：${bookmark.name}` : ''}`);
+    updateVideoBookmarkProgress(video, photo);
+  } else if (setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
+    showToast(`已添加书签 ${slot}`);
+  } else {
+    showToast('附近 1 秒内已有书签，未新增');
+  }
+  return true;
+}
+
 function initGridScale() {
   state.gridSize = 180;
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
@@ -475,7 +800,7 @@ function toggleSidebarCompact() {
 }
 
 function initSlideshowSettings() {
-  state.slideshowMode = 'sequential';
+  state.slideshowMode = 'random';
   state.slideshowLoop = true;
   state.slideshowInterval = 5000;
 }
@@ -489,7 +814,6 @@ function stopSlideshow() {
 }
 function updateSlideshowControls() {
   const btn = $('#lb-slideshow-toggle');
-  const mode = $('#lb-slideshow-mode');
   const interval = $('#lb-slideshow-interval');
   const intervalValue = $('#lb-slideshow-interval-value');
   const loop = $('#lb-slideshow-loop');
@@ -499,10 +823,15 @@ function updateSlideshowControls() {
     btn.setAttribute('aria-label', btn.title);
     btn.classList.toggle('active', state.slideshowPlaying);
   }
-  if (mode) mode.value = state.slideshowMode;
   if (interval) interval.value = String(state.slideshowInterval / 1000);
   if (intervalValue) intervalValue.textContent = `${state.slideshowInterval / 1000} 秒`;
-  if (loop) loop.checked = state.slideshowLoop;
+  if (loop) {
+    loop.innerHTML = icons.slideshowLoop;
+    loop.title = state.slideshowLoop ? '关闭循环' : '开启循环';
+    loop.setAttribute('aria-label', loop.title);
+    loop.setAttribute('aria-pressed', state.slideshowLoop ? 'true' : 'false');
+    loop.classList.toggle('active', state.slideshowLoop);
+  }
   const lightbox = $('#lightbox');
   if (lightbox) lightbox.classList.toggle('slideshow-active', state.slideshowPlaying);
 }
@@ -836,6 +1165,67 @@ function createTextFavicon(text) {
   const glyph = (text || 'PA').trim().slice(0, 2) || 'PA';
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#2d6a5f"/><text x="32" y="41" font-size="28" text-anchor="middle" fill="#fff" font-family="Arial, sans-serif">${glyph}</text></svg>`)}`;
 }
+function createRoundedImageFavicon(url, accent = '#2d6a5f') {
+  const safeURL = escapeHTML(url);
+  const safeAccent = normalizeHexColor(accent) || '#2d6a5f';
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><clipPath id="eg-favicon-round"><rect x="0" y="0" width="64" height="64" rx="16"/></clipPath></defs><rect width="64" height="64" rx="16" fill="${safeAccent}"/><image href="${safeURL}" x="0" y="0" width="64" height="64" preserveAspectRatio="xMidYMid slice" clip-path="url(#eg-favicon-round)"/></svg>`)}`;
+}
+function traceRoundedRect(ctx, x, y, width, height, radius) {
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, width, height, radius);
+    return;
+  }
+  const r = Math.min(radius, width / 2, height / 2);
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
+}
+function applyRoundedImageFavicon(favicon, url, accent, fallbackText) {
+  if (!favicon || !url) return;
+  const fallback = createRoundedImageFavicon(url, accent);
+  favicon.dataset.logoUrl = url;
+  favicon.href = fallback;
+  if (typeof Image === 'undefined' || typeof document.createElement !== 'function') return;
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => {
+    if (favicon.dataset.logoUrl !== url) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (!img.naturalWidth || !img.naturalHeight) {
+      favicon.href = fallback;
+      return;
+    }
+    ctx.fillStyle = normalizeHexColor(accent) || '#2d6a5f';
+    ctx.beginPath();
+    traceRoundedRect(ctx, 0, 0, 64, 64, 16);
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    traceRoundedRect(ctx, 0, 0, 64, 64, 16);
+    ctx.clip();
+    const scale = Math.max(64 / img.naturalWidth, 64 / img.naturalHeight);
+    const width = img.naturalWidth * scale;
+    const height = img.naturalHeight * scale;
+    ctx.drawImage(img, (64 - width) / 2, (64 - height) / 2, width, height);
+    ctx.restore();
+    try {
+      favicon.href = canvas.toDataURL('image/png');
+    } catch (_) {
+      favicon.href = fallback || createTextFavicon(fallbackText);
+    }
+  };
+  img.onerror = () => {
+    if (favicon.dataset.logoUrl === url) favicon.href = createTextFavicon(fallbackText);
+  };
+  img.src = url;
+}
 function resolveActiveLibrary(libraries, currentPath) {
   const normalizedPath = String(currentPath || '').trim();
   return libraries.find(item => item.path === normalizedPath) || libraries[0] || null;
@@ -920,7 +1310,12 @@ function applyLibraryBranding() {
     document.head.appendChild(favicon);
   }
   const logoURL = current ? resolveLibraryLogoURL(current) : '';
-  favicon.href = logoURL || createTextFavicon(current && current.name ? current.name : 'PA');
+  const fallbackText = current && current.name ? current.name : 'PA';
+  if (logoURL) applyRoundedImageFavicon(favicon, logoURL, accent, fallbackText);
+  else {
+    favicon.dataset.logoUrl = '';
+    favicon.href = createTextFavicon(fallbackText);
+  }
   const navLogo = document.querySelector('.nav-logo');
   if (navLogo) {
     navLogo.innerHTML = renderNavLogo();
@@ -930,6 +1325,9 @@ function applyLibraryBranding() {
 }
 async function refreshVideoThumbnails() {
   return api.post('/api/settings/video-thumbnails/refresh', {});
+}
+async function backfillPhotoEXIF() {
+  return api.post('/api/settings/exif/backfill', {});
 }
 function renderNavLogo() {
   const current = currentLibraryBrand();
@@ -975,14 +1373,23 @@ function renderSearchFilterButton(value, label) {
   return `<button class="search-filter${state.searchFilter === value ? ' active' : ''}" type="button" data-search-filter="${value}">${label}</button>`;
 }
 
-function openGlobalSearch(prefill = '') {
+function syncSearchInputs(value = '') {
+  const text = String(value);
+  const topbarInput = $('#topbar-search-input');
+  const overlayInput = $('#global-search-input');
+  if (topbarInput && topbarInput.value !== text) topbarInput.value = text;
+  if (overlayInput && overlayInput.value !== text) overlayInput.value = text;
+}
+
+function openGlobalSearch(prefill) {
   const overlay = $('#search-overlay');
   const input = $('#global-search-input');
   if (!overlay || !input) return;
   state.searchOpen = true;
   overlay.classList.add('open');
   overlay.setAttribute('aria-hidden', 'false');
-  if (prefill) input.value = prefill;
+  if (prefill === undefined) syncSearchInputs(input.value || $('#topbar-search-input')?.value || state.searchQuery || '');
+  else syncSearchInputs(prefill);
   setTimeout(() => {
     input.focus();
     input.select();
@@ -1000,6 +1407,7 @@ function closeGlobalSearch() {
   state.searchTimer = null;
   $('#search-overlay')?.classList.remove('open');
   $('#search-overlay')?.setAttribute('aria-hidden', 'true');
+  syncSearchInputs(state.searchQuery || '');
 }
 
 function resetSearchResults(query = '') {
@@ -1017,6 +1425,7 @@ function scheduleGlobalSearch() {
   const input = $('#global-search-input');
   if (!input) return;
   const query = input.value.trim();
+  syncSearchInputs(query);
   if (state.searchTimer) clearTimeout(state.searchTimer);
   if (!query) {
     if (state.searchAbortController) state.searchAbortController.abort();
@@ -1337,13 +1746,14 @@ async function loadServerSettings() {
       grid_gap: 8,
       thumb_radius: 8,
       sidebar_auto_hide: false,
-      slideshow_mode: 'sequential',
+      slideshow_mode: 'random',
       slideshow_loop: true,
       slideshow_interval: 5000,
       lightbox_zoom: 100,
       experimental_autoplay_video: false,
       experimental_prefetch_neighbors: true,
       experimental_restore_last_view: false,
+      continue_last_video_position: true,
       player_keymap: '',
     };
     applyServerSettings(state.serverSettings);
@@ -1385,7 +1795,7 @@ function applyServerSettings(data = {}) {
   state.gridSize = Math.min(260, Math.max(72, Number(data.grid_size) || 180));
   state.gridGap = Math.min(24, Math.max(0, Number(data.grid_gap) || 8));
   state.thumbRadius = Math.min(24, Math.max(0, Number(data.thumb_radius) || 8));
-  state.slideshowMode = data.slideshow_mode === 'random' ? 'random' : 'sequential';
+  state.slideshowMode = data.slideshow_mode === 'sequential' ? 'sequential' : 'random';
   state.slideshowLoop = data.slideshow_loop !== false;
   state.slideshowInterval = Math.min(30000, Math.max(1000, Number(data.slideshow_interval) || 5000));
   state.lightboxZoom = Math.min(300, Math.max(50, Number(data.lightbox_zoom) || 100));
@@ -1393,6 +1803,7 @@ function applyServerSettings(data = {}) {
   state.experimentalAutoplayVideo = !!data.experimental_autoplay_video;
   state.experimentalPrefetchNeighbors = data.experimental_prefetch_neighbors !== false;
   state.experimentalRestoreLastView = !!data.experimental_restore_last_view;
+  state.continueLastVideoPosition = data.continue_last_video_position !== false;
   updatePlayerKeymapSource(data.player_keymap || '');
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
   applyDisplaySettings();
@@ -1426,6 +1837,7 @@ function buildSettingsPayload() {
     experimental_autoplay_video: !!state.experimentalAutoplayVideo,
     experimental_prefetch_neighbors: !!state.experimentalPrefetchNeighbors,
     experimental_restore_last_view: !!state.experimentalRestoreLastView,
+    continue_last_video_position: !!state.continueLastVideoPosition,
     player_keymap: state.playerKeymapSource || '',
   };
 }
@@ -1534,7 +1946,7 @@ async function autoplayLightboxVideo(video) {
   if (!video) return false;
   const token = ++state.lightboxPlaybackToken;
   const originalMuted = video.muted;
-  const preferMutedFirst = isWindowsClient();
+  const preferMutedFirst = false;
   const setMutedState = muted => {
     video.muted = muted;
     if (muted) video.setAttribute('muted', '');
@@ -1601,12 +2013,14 @@ function keyEventToken(e) {
   return keyTokenWithModifiers(base, modifiers);
 }
 function handleLightboxKeydown(e) {
+  if (shouldIgnoreGlobalShortcut(e.target)) return false;
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === '0') {
     e.preventDefault();
     e.stopImmediatePropagation();
     setLightboxFit();
     return true;
   }
+  if (handleVideoBookmarkShortcut(e)) return true;
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -1647,13 +2061,15 @@ function handleLightboxKeydown(e) {
 }
 function renderGridScaleControl() {
   return `<label class="grid-scale" title="调整每页显示密度">
-    <span>缩放</span>
+    <span class="grid-scale-step" aria-hidden="true">-</span>
     <input type="range" id="grid-scale" min="72" max="260" step="8" value="${state.gridSize}">
+    <span class="grid-scale-step" aria-hidden="true">+</span>
   </label>`;
 }
 function renderTimelineOrderControl() {
   const ascending = state.timelineOrder === 'asc';
-  return `<button class="btn btn-sm" id="timeline-order-btn" type="button">时间线: ${ascending ? '正序' : '倒序'}</button>`;
+  const label = ascending ? '时间线正序' : '时间线倒序';
+  return `<button class="timeline-order-btn ${ascending ? 'asc' : 'desc'}" id="timeline-order-btn" type="button" title="${label}" aria-label="${label}" aria-pressed="${ascending ? 'true' : 'false'}">${icons.timelineOrder}</button>`;
 }
 function renderAlbumViewModeControl() {
   return `<div class="album-view-toggle" role="group" aria-label="相册显示方式">
@@ -1692,7 +2108,7 @@ const state = {
   randomAlbumLoaded: false,
   randomAlbumTotal: 0,
   randomAlbumAbortController: null,
-  timelineOrder: 'desc',
+  timelineOrder: normalizeTimelineOrder(localStorage.getItem(timelineOrderStorageKey)),
   timelineCursor: '',
   timelineHasMore: true,
   timelineLoading: false,
@@ -1725,12 +2141,14 @@ const state = {
   currentAlbumID: null,
   sidebarCompact: false,
   slideshowPlaying: false,
-  slideshowMode: 'sequential',
+  slideshowMode: 'random',
   slideshowLoop: true,
   slideshowInterval: 3000,
   slideshowTimer: null,
   slideshowRandomQueue: [],
   pendingTimelinePhotoID: null,
+  timelineJumpToken: 0,
+  timelineJumpCancelRequested: false,
   focusedPhotoID: null,
   lightboxZoom: 100,
   lightboxZoomMode: 'fit',
@@ -1761,13 +2179,14 @@ const state = {
     grid_gap: 8,
     thumb_radius: 8,
     sidebar_auto_hide: false,
-    slideshow_mode: 'sequential',
+    slideshow_mode: 'random',
     slideshow_loop: true,
     slideshow_interval: 5000,
     lightbox_zoom: 100,
     experimental_autoplay_video: false,
     experimental_prefetch_neighbors: true,
     experimental_restore_last_view: false,
+    continue_last_video_position: true,
     player_keymap: '',
   },
   playerKeymap: {},
@@ -1775,6 +2194,7 @@ const state = {
   experimentalAutoplayVideo: false,
   experimentalPrefetchNeighbors: true,
   experimentalRestoreLastView: false,
+  continueLastVideoPosition: true,
   favoritePhotos: [],
   favoriteCursor: '',
   favoriteHasMore: true,
@@ -1810,6 +2230,9 @@ const state = {
   searchAbortController: null,
   searchDownloadAbortController: null,
   searchDownloadLoading: false,
+  mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
+  videoBookmarks: loadVideoBookmarks(),
+  videoBookmarkSaveTimer: null,
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
@@ -1985,7 +2408,10 @@ function renderApp() {
       </button>
       <span class="topbar-title" id="topbar-title"></span>
       <div class="topbar-meta" id="topbar-meta"></div>
-      <button class="btn-icon global-search-btn" id="global-search-btn" type="button" aria-label="搜索" title="搜索">${icons.search}</button>
+      <label class="global-search-btn" id="global-search-btn" aria-label="搜索" title="搜索">
+        <span class="global-search-icon">${icons.search}</span>
+        <input id="topbar-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索资源库">
+      </label>
       <div id="topbar-actions"></div>
     </div>
     <div class="content" id="content"></div>
@@ -2209,6 +2635,7 @@ async function fetchAllRandomAlbumPhotos() {
     if (cancelled) throw new DOMException('Aborted', 'AbortError');
     const params = new URLSearchParams({ limit: '240' });
     params.set('seed', String(state.randomAlbumSeed));
+    appendMediaKindParam(params);
     if (cursor) params.set('cursor', cursor);
     controller = new AbortController();
     const response = await fetch(`/api/media/random?${params.toString()}`, { signal: controller.signal });
@@ -2232,6 +2659,7 @@ async function fetchAllRandomAlbumPhotos() {
 
 async function fetchRandomAlbumPage(cursor, limit, signal) {
   const params = new URLSearchParams({ limit: String(limit), seed: String(state.randomAlbumSeed) });
+  appendMediaKindParam(params);
   if (cursor) params.set('cursor', cursor);
   const response = await fetch(`/api/media/random?${params.toString()}`, { signal });
   if (!response.ok) throw await response.json();
@@ -2437,8 +2865,9 @@ async function loadMoreRandomAlbum() {
 
 async function renderRandomAlbum() {
   $('#topbar-title').textContent = '乱序相册';
-  $('#topbar-meta').innerHTML = `<div class="topbar-hint">按随机顺序分页浏览，不再一次性整理整个资源库。</div>` + renderGridScaleControl();
+  $('#topbar-meta').innerHTML = renderMediaKindFilterControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="random-load-all-btn" type="button">加载全部</button><button class="btn btn-sm" id="reshuffle-btn">${icons.shuffle} 重新打乱</button></div>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   $('#random-load-all-btn').addEventListener('click', openRandomAlbumLoadAllModal);
   $('#reshuffle-btn').addEventListener('click', async () => {
@@ -2513,7 +2942,7 @@ function updateRandomAlbumLoadMoreUI() {
 
 async function renderSettings() {
   $('#topbar-title').textContent = '设置';
-  $('#topbar-meta').innerHTML = '<div class="topbar-hint">集中管理服务端配置、本地显示偏好、播放器与实验性功能。</div>';
+  $('#topbar-meta').innerHTML = '';
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="settings-save-restart-top-btn">保存并重启</button><button class="btn btn-primary btn-sm" id="settings-save-top-btn" ${state.settingsDirty ? '' : 'disabled'}>保存设置</button></div>`;
   if (!state.settingsReady) {
     $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>加载设置中…</div>`;
@@ -2841,6 +3270,28 @@ function refreshPhotoShareIndicators(type, targetId) {
   });
 }
 
+function updateVideoBookmarkThumbIndicators(photoOrId = null) {
+  const targetId = photoOrId && typeof photoOrId === 'object' ? photoOrId.id : photoOrId;
+  const thumbSelector = targetId
+    ? `.photo-thumb[data-id="${targetId}"]`
+    : '.photo-thumb[data-kind="video"]';
+  document.querySelectorAll(thumbSelector).forEach(thumb => {
+    const count = getVideoBookmarkCountByKey(thumb.dataset.id);
+    const existing = thumb.querySelector('.video-bookmark-badge');
+    if (count > 0 && !existing) {
+      thumb.insertAdjacentHTML('beforeend', `<span class="video-bookmark-badge" title="视频书签 ${count}/10" aria-label="视频书签 ${count}/10">${icons.bookmark}</span>`);
+    } else if (count > 0 && existing) {
+      existing.title = `视频书签 ${count}/10`;
+      existing.setAttribute('aria-label', `视频书签 ${count}/10`);
+    } else if (existing) {
+      existing.remove();
+    }
+  });
+}
+function refreshVideoBookmarkThumbIndicators() {
+  updateVideoBookmarkThumbIndicators();
+}
+
 function renderSettingsContent() {
   const users = (state.serverSettings.users || []).map(name => `<span class="settings-chip">${name}</span>`).join('');
   $('#content').innerHTML = `
@@ -2926,10 +3377,13 @@ function renderSettingsContent() {
         <input id="settings-slideshow-loop" type="checkbox" ${state.slideshowLoop ? 'checked' : ''}>
         <span>幻灯片循环播放</span>
       </label>
-      <label class="settings-checkbox">
-        <input id="settings-slideshow-random" type="checkbox" ${state.slideshowMode === 'random' ? 'checked' : ''}>
-        <span>幻灯片默认随机模式</span>
-      </label>
+      <div class="settings-control">
+        <label for="settings-slideshow-mode"><span>默认幻灯片顺序</span><span>${state.slideshowMode === 'random' ? '随机' : '顺序'}</span></label>
+        <select class="input" id="settings-slideshow-mode">
+          <option value="random" ${state.slideshowMode === 'random' ? 'selected' : ''}>随机播放</option>
+          <option value="sequential" ${state.slideshowMode === 'sequential' ? 'selected' : ''}>顺序播放</option>
+        </select>
+      </div>
       <div class="settings-control">
         <label for="settings-player-keymap"><span>IINA 快捷键映射</span><span>支持 .conf 风格</span></label>
         <textarea class="input settings-textarea" id="settings-player-keymap" rows="12" ${state.serverSettings.use_system_player ? 'disabled' : ''}></textarea>
@@ -2942,11 +3396,16 @@ function renderSettingsContent() {
         <span>视频打开后自动播放</span>
       </label>
       <label class="settings-checkbox">
+        <input id="settings-continue-last-video-position" type="checkbox" ${state.continueLastVideoPosition ? 'checked' : ''}>
+        <span>继续上次播放位置</span>
+      </label>
+      <label class="settings-checkbox">
         <input id="settings-prefetch-neighbors" type="checkbox" ${state.experimentalPrefetchNeighbors ? 'checked' : ''}>
         <span>预加载前后相邻媒体</span>
       </label>
       <div class="settings-actions">
         <button class="btn" id="settings-refresh-video-thumbs-btn">刷新视频缩略图</button>
+        <button class="btn" id="settings-backfill-exif-btn" type="button">补录旧照片 EXIF</button>
       </div>
     </div>
   </section>
@@ -3154,7 +3613,7 @@ function renderSettingsContent() {
     setSettingsDirty();
   });
   $('#settings-slideshow-loop').addEventListener('change', e => { updateSlideshowSetting('loop', e.target.checked); setSettingsDirty(); });
-  $('#settings-slideshow-random').addEventListener('change', e => { updateSlideshowSetting('mode', e.target.checked ? 'random' : 'sequential'); setSettingsDirty(); });
+  $('#settings-slideshow-mode').addEventListener('change', e => { updateSlideshowSetting('mode', e.target.value); setSettingsDirty(); });
   $('#settings-player-keymap').addEventListener('input', () => setSettingsDirty());
   $('#settings-reset-keymap-btn').addEventListener('click', async () => {
     try {
@@ -3166,6 +3625,7 @@ function renderSettingsContent() {
     }
   });
   $('#settings-autoplay-video').addEventListener('change', e => { setExperimentalSetting('autoplayVideo', e.target.checked); setSettingsDirty(); });
+  $('#settings-continue-last-video-position').addEventListener('change', e => { state.continueLastVideoPosition = !!e.target.checked; setSettingsDirty(); });
   $('#settings-prefetch-neighbors').addEventListener('change', e => { setExperimentalSetting('prefetchNeighbors', e.target.checked); setSettingsDirty(); });
   $('#settings-refresh-video-thumbs-btn').addEventListener('click', async () => {
     const btn = $('#settings-refresh-video-thumbs-btn');
@@ -3178,6 +3638,20 @@ function renderSettingsContent() {
       }
     } catch (e) {
       alert('刷新失败: ' + ((e && e.error) || e));
+    }
+  });
+  $('#settings-backfill-exif-btn').addEventListener('click', async () => {
+    const btn = $('#settings-backfill-exif-btn');
+    try {
+      const resp = await withButtonBusy(btn, '补录中…', () => backfillPhotoEXIF());
+      const data = resp.result || {};
+      showToast(`EXIF 补录完成：扫描 ${data.scanned || 0} 张，写入 ${data.updated || 0} 张，跳过 ${data.skipped || 0} 张，失败 ${data.failed || 0} 张`, 4200);
+      if (data.errors && data.errors.length) {
+        alert(`以下文件补录失败：\n${data.errors.join('\n')}`);
+      }
+      if (state.view === 'settings') renderSettingsContent();
+    } catch (e) {
+      alert('EXIF 补录失败: ' + ((e && e.error) || e));
     }
   });
   $('#settings-exp-restore-last-view').addEventListener('change', e => { setExperimentalSetting('restoreLastView', e.target.checked); setSettingsDirty(); });
@@ -3244,12 +3718,14 @@ async function renderTimeline() {
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '张已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
-  }) + `<span class="topbar-hint" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderGridScaleControl();
+  }) + `<span class="timeline-jump-status" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderMediaKindFilterControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm" id="timeline-load-all-btn" type="button">加载全部</button><button class="btn btn-primary btn-sm" id="upload-btn">${icons.upload} 上传</button></div>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
   $('#timeline-order-btn').addEventListener('click', () => {
     state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
+    localStorage.setItem(timelineOrderStorageKey, state.timelineOrder);
     state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
     switchView('timeline');
   });
@@ -3351,6 +3827,7 @@ async function fetchTimelinePage(cursor, limit, signal) {
     limit: String(limit),
     order: state.timelineOrder === 'asc' ? 'asc' : 'desc',
   });
+  appendMediaKindParam(params);
   if (cursor) params.set('cursor', cursor);
   const response = await fetch(`/api/media?${params.toString()}`, { signal });
   if (!response.ok) throw await response.json();
@@ -3433,8 +3910,9 @@ async function renderFavorites() {
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.favorite} 取消收藏</button>`,
-  }) + `<span class="topbar-hint" id="favorite-total-hint">共 ${state.favoriteTotal || 0} 条</span>${renderGridScaleControl()}`;
+  }) + renderMediaKindFilterControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="download-all-favorites-btn">下载全部收藏</button>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'unfavorite-sel-btn', extraAction: unfavoriteSelected });
 
@@ -3462,6 +3940,7 @@ async function loadMoreTimeline() {
       limit: state.pendingTimelinePhotoID ? '180' : '30',
       order: state.timelineOrder === 'asc' ? 'asc' : 'desc',
     });
+    appendMediaKindParam(params);
     if (state.timelineCursor) params.set('cursor', state.timelineCursor);
     const url = `/api/media?${params.toString()}`;
     const page = await api.get(url);
@@ -3532,7 +4011,11 @@ async function loadMoreFavorites() {
   if (state.favoriteLoading || !state.favoriteHasMore) return;
   state.favoriteLoading = true;
   try {
-    const url = '/api/media/favorites' + (state.favoriteCursor ? `?cursor=${encodeURIComponent(state.favoriteCursor)}` : '');
+    const params = new URLSearchParams();
+    appendMediaKindParam(params);
+    if (state.favoriteCursor) params.set('cursor', state.favoriteCursor);
+    const query = params.toString();
+    const url = '/api/media/favorites' + (query ? `?${query}` : '');
     const page = await api.get(url);
     state.favoriteTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.favoritePhotos.length + (page.photos || []).length;
     updateFavoriteTotalHint();
@@ -3572,8 +4055,9 @@ function rememberPhoto(photo) {
 
 async function renderMemories() {
   $('#topbar-title').textContent = '回忆';
-  $('#topbar-meta').innerHTML = `<span class="topbar-hint">这里记录最近浏览过的照片和视频，作为轻量的历史回顾。</span>${renderGridScaleControl()}`;
+  $('#topbar-meta').innerHTML = renderMediaKindFilterControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-sm" id="clear-memories-btn">清空回忆</button>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   $('#clear-memories-btn')?.addEventListener('click', () => {
     localStorage.removeItem(memoriesStorageKey);
@@ -3610,7 +4094,8 @@ async function renderMemories() {
 function renderMemoryGroups() {
   const container = $('#memory-groups');
   if (!container) return;
-  if (!state.memoryPhotos.length) {
+  const photos = state.memoryPhotos.filter(mediaKindMatchesFilter);
+  if (!photos.length) {
     container.innerHTML = `<div class="empty">${icons.photo}<p>还没有回忆，浏览一些照片或视频后会出现在这里</p></div>`;
     return;
   }
@@ -3618,12 +4103,26 @@ function renderMemoryGroups() {
   const group = el('div', 'date-group');
   group.innerHTML = `<div class="date-label"><span class="date-text">最近浏览</span></div><div class="photo-grid"></div>`;
   const grid = group.querySelector('.photo-grid');
-  state.memoryPhotos.forEach(photo => grid.appendChild(makePhotoThumb(photo, state.memoryPhotos)));
+  photos.forEach(photo => grid.appendChild(makePhotoThumb(photo, photos)));
   container.appendChild(group);
 }
 
 function isVideoMedia(photo) {
   return photo && photo.media_kind === 'video';
+}
+
+function mediaExtension(photo) {
+  const name = String((photo && photo.original_name) || '').toLowerCase();
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot) : '';
+}
+
+function requiresSystemPlayer(photo) {
+  if (!isVideoMedia(photo)) return false;
+  const ext = mediaExtension(photo);
+  if (browserUnsupportedVideoExtensions.includes(ext)) return true;
+  const mime = String((photo && photo.mime_type) || '').toLowerCase();
+  return mime.includes('x-ms-wmv') || mime.includes('x-ms-wma');
 }
 
 function mediaThumbURL(photo) {
@@ -3646,9 +4145,94 @@ function aspectRatioLabel(width, height) {
   const w = Number(width) || 0;
   const h = Number(height) || 0;
   if (!w || !h) return '—';
+  const ratio = w / h;
+  const commonRatios = [
+    [1, 1],
+    [4, 3],
+    [3, 4],
+    [3, 2],
+    [2, 3],
+    [16, 9],
+    [9, 16],
+    [16, 10],
+    [10, 16],
+    [5, 4],
+    [4, 5],
+    [18, 9],
+    [21, 9],
+  ];
+  let best = null;
+  let bestDiff = Infinity;
+  commonRatios.forEach(([rw, rh]) => {
+    const candidate = rw / rh;
+    const diff = Math.abs(Math.log(ratio / candidate));
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = [rw, rh];
+    }
+  });
+  const threshold = 0.06;
+  if (best && bestDiff <= threshold) return `${best[0]}:${best[1]}`;
   const gcd = (a, b) => (b ? gcd(b, a % b) : a);
   const divisor = gcd(w, h) || 1;
   return `${Math.round(w / divisor)}:${Math.round(h / divisor)}`;
+}
+function compactExifValue(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1').trim();
+}
+function parseExifFraction(value) {
+  const text = compactExifValue(value);
+  if (!text) return null;
+  const parts = text.split('/');
+  if (parts.length === 1) {
+    const n = Number(parts[0]);
+    return Number.isFinite(n) ? n : null;
+  }
+  const numerator = Number(parts[0]);
+  const denominator = Number(parts[1]);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) return null;
+  return numerator / denominator;
+}
+function formatExifAperture(value) {
+  const n = parseExifFraction(value);
+  if (n == null) return compactExifValue(value);
+  return n % 1 === 0 ? n.toFixed(0) : n.toFixed(1).replace(/0$/, '');
+}
+function formatExifFocalLength(value) {
+  const n = parseExifFraction(value);
+  if (n == null) return `${compactExifValue(value)}mm`;
+  return `${n % 1 === 0 ? n.toFixed(0) : n.toFixed(1).replace(/0$/, '')}mm`;
+}
+function formatExifOrientation(value) {
+  const orientation = Number(compactExifValue(value));
+  switch (orientation) {
+    case 1: return '横向';
+    case 2: return '横向（镜像）';
+    case 3: return '倒置';
+    case 4: return '竖向（镜像）';
+    case 5: return '横向（旋转）';
+    case 6: return '竖向';
+    case 7: return '横向（反向旋转）';
+    case 8: return '横向（旋转）';
+    default: return `方向 ${compactExifValue(value) || '—'}`;
+  }
+}
+function buildExifInfoItems(photo) {
+  const exif = photo && photo.exif;
+  if (!exif || typeof exif !== 'object') return [];
+  const items = [];
+  const camera = [compactExifValue(exif.make), compactExifValue(exif.model)].filter(Boolean).join(' ');
+  if (camera) items.push([icons.exifCamera, '相机', camera]);
+  if (compactExifValue(exif.f_number)) items.push([icons.exifAperture, '光圈', formatExifAperture(exif.f_number)]);
+  if (compactExifValue(exif.exposure_time)) items.push([icons.exifShutter, '快门', compactExifValue(exif.exposure_time)]);
+  if (Number(exif.iso_speed) > 0) items.push([icons.exifISO, 'ISO', String(Number(exif.iso_speed))]);
+  if (compactExifValue(exif.focal_length)) items.push([icons.exifFocal, '焦距', formatExifFocalLength(exif.focal_length)]);
+  if (Number(exif.orientation) > 0) items.push([icons.exifOrientation, '方向', formatExifOrientation(exif.orientation)]);
+  if (exif.has_gps && Number.isFinite(Number(exif.latitude)) && Number.isFinite(Number(exif.longitude))) {
+    items.push([icons.exifGPS, 'GPS', `${Number(exif.latitude).toFixed(5)}, ${Number(exif.longitude).toFixed(5)}`]);
+  }
+  return items;
 }
 
 // ── 缩略图 ────────────────────────────────────────────
@@ -3666,9 +4250,13 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const mediaBadge = isVideoMedia(photo)
     ? `<span class="media-badge">视频${photo.duration_ms ? ` · ${formatDuration(photo.duration_ms)}` : ''}</span>`
     : '';
+  const bookmarkCount = getVideoBookmarkCount(photo);
+  const videoBookmarkBadge = bookmarkCount > 0
+    ? `<span class="video-bookmark-badge" title="视频书签 ${bookmarkCount}/10" aria-label="视频书签 ${bookmarkCount}/10">${icons.bookmark}</span>`
+    : '';
   const thumbFallback = isVideoMedia(photo) ? ` onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'"` : '';
 
-  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${shareBadge}${mediaBadge}`;
+  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${videoBookmarkBadge}${shareBadge}${mediaBadge}`;
   const imageEl = div.querySelector('img');
   if (imageEl && !isVideoMedia(photo)) {
     imageEl.addEventListener('error', () => {
@@ -3827,6 +4415,66 @@ async function showCurrentLightboxContextMenu() {
   const rect = button ? button.getBoundingClientRect() : { right: window.innerWidth - 18, bottom: 58 };
   await showPhotoContextMenu(rect.right, rect.bottom + 8, photo, findPhotoThumb(photo.id), state.lightboxPhotos);
 }
+function renderVideoBookmarkMenuContent(photo, video) {
+  const currentTime = Math.max(0, Number(video.currentTime) || 0);
+  return `
+    <div class="lightbox-bookmark-menu-head">
+      <div>
+        <div class="lightbox-bookmark-menu-title">视频书签</div>
+        <div class="lightbox-bookmark-menu-subtitle">按键盘上方 1-0 可添加或跳转</div>
+      </div>
+      <span class="lightbox-bookmark-menu-current">当前 ${escapeHTML(formatDuration(currentTime * 1000))}</span>
+    </div>
+    <div class="lightbox-bookmark-menu-list">
+      ${Array.from({ length: 10 }, (_, i) => {
+        const slot = i + 1;
+        const bookmark = getVideoBookmarkSlot(photo, slot);
+        const timeText = bookmark ? formatDuration(bookmark.time * 1000) : '空位';
+        const label = bookmark
+          ? `${bookmark.name || `书签 ${slot}`} · ${timeText}`
+          : `书签 ${slot} · 点击保存当前时间`;
+        if (!bookmark) {
+          return `
+            <button type="button" class="lightbox-bookmark-jump lightbox-bookmark-jump-standalone" data-video-bookmark-slot="${slot}" title="${escapeHTML(label)}">
+              <span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span>
+              <span class="lightbox-bookmark-text">${escapeHTML(label)}</span>
+            </button>`;
+        }
+        return `
+          <div class="lightbox-bookmark-row" data-slot="${slot}">
+            <button type="button" class="lightbox-bookmark-jump" data-video-bookmark-slot="${slot}" title="${escapeHTML(label)}">
+              <span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span>
+              <span class="lightbox-bookmark-text">${escapeHTML(label)}</span>
+            </button>
+            <button type="button" class="btn-icon lightbox-bookmark-delete" data-video-bookmark-delete="${slot}" aria-label="删除书签 ${slot}" title="删除书签 ${slot}">${icons.contextDelete}</button>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+function refreshVideoBookmarkMenu() {
+  const menu = _ctxMenu;
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!menu || !photo || !video || !menu.classList.contains('lightbox-bookmark-menu')) return;
+  menu.innerHTML = renderVideoBookmarkMenuContent(photo, video);
+}
+function showVideoBookmarkMenu() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return;
+  closeContextMenu();
+  const menu = el('div', 'context-menu lightbox-bookmark-menu');
+  const button = $('#lb-video-bookmark');
+  const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 18, right: window.innerWidth - 18, top: 58, bottom: 58 };
+  menu.style.left = `${rect.right}px`;
+  menu.style.top = `${rect.bottom + 8}px`;
+  menu.innerHTML = renderVideoBookmarkMenuContent(photo, video);
+  document.body.appendChild(menu);
+  _ctxMenu = menu;
+  const menuRect = menu.getBoundingClientRect();
+  if (menuRect.right > window.innerWidth) menu.style.left = `${Math.max(12, rect.right - menuRect.width)}px`;
+  if (menuRect.bottom > window.innerHeight) menu.style.top = `${Math.max(12, rect.top - menuRect.height - 8)}px`;
+}
 
 // 回收站图片右键菜单 (b-4)
 function showTrashContextMenu(x, y, photo) {
@@ -3916,6 +4564,15 @@ async function setPhotoFavorite(photoId, favorite) {
   updatePhotoFavoriteInCollections(photoId, favorite);
 }
 
+function updateLightboxFavoriteButton(photo) {
+  const favoriteBtn = $('#lb-favorite');
+  if (!favoriteBtn || !photo) return;
+  favoriteBtn.innerHTML = photo.is_favorite ? icons.favoriteFilled : icons.favorite;
+  favoriteBtn.title = photo.is_favorite ? '取消收藏' : '收藏';
+  favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
+  favoriteBtn.classList.toggle('active', !!photo.is_favorite);
+}
+
 async function toggleFavorite(photo) {
   const nextFavorite = !photo.is_favorite;
   try {
@@ -3927,7 +4584,7 @@ async function toggleFavorite(photo) {
       showToast('已取消收藏');
       return;
     }
-    if ($('#lightbox').classList.contains('open')) lbRender();
+    if ($('#lightbox').classList.contains('open')) updateLightboxFavoriteButton(photo);
     showToast(nextFavorite ? '已加入个人收藏' : '已取消收藏');
   } catch (e) {
     alert('操作失败: ' + ((e && e.error) || e));
@@ -4017,6 +4674,7 @@ async function deleteSelected() {
 
 function openInTimeline(photoId) {
   state.pendingTimelinePhotoID = photoId;
+  state.timelineJumpCancelRequested = false;
   closeLightbox();
   switchView('timeline');
 }
@@ -4031,17 +4689,31 @@ function openInAlbum(album, photoId) {
 async function focusPendingTimelinePhoto() {
   if (!state.pendingTimelinePhotoID) return false;
   const photoId = state.pendingTimelinePhotoID;
+  const token = ++state.timelineJumpToken;
   setTimelineJumpStatus('正在时间线中定位媒体，可能需要继续加载…');
-  showBlockingProgress('正在时间线中定位媒体', '正在检查已加载内容…');
+  showBlockingProgress('正在时间线中定位媒体', '正在检查已加载内容…', {
+    cancelText: '取消查找',
+    onCancel: () => {
+      state.timelineJumpCancelRequested = true;
+      state.pendingTimelinePhotoID = null;
+      state.timelineJumpToken += 1;
+      setTimelineJumpStatus('');
+      hideBlockingProgress();
+      showToast('已取消在时间线中查找');
+    },
+  });
   let thumb = findPhotoThumb(photoId);
-  while (!thumb && state.timelineHasMore && !state.timelineLoading) {
+  while (!thumb && state.timelineHasMore && !state.timelineLoading && !state.timelineJumpCancelRequested && token === state.timelineJumpToken) {
     setTimelineJumpStatus(`正在时间线中定位媒体… 已加载 ${state.photos.length} 条`);
     updateBlockingProgress(`已加载 ${state.photos.length} 条媒体，继续向下查找…`);
     await loadMoreTimeline();
+    if (state.timelineJumpCancelRequested || token !== state.timelineJumpToken) return false;
     if (state.timelineBulkLoading) break;
     thumb = findPhotoThumb(photoId);
   }
+  if (state.timelineJumpCancelRequested || token !== state.timelineJumpToken) return false;
   state.pendingTimelinePhotoID = null;
+  state.timelineJumpCancelRequested = false;
   if (!thumb) {
     setTimelineJumpStatus('');
     hideBlockingProgress();
@@ -4163,10 +4835,11 @@ async function renderAlbumDetail() {
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
-  }) + renderGridScaleControl();
+  }) + renderMediaKindFilterControl() + renderGridScaleControl();
   const prevAlbum = adjacentAlbum(-1);
   const nextAlbum = adjacentAlbum(1);
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group"><button class="btn btn-sm btn-iconish" id="prev-album-btn" title="上一个相册" aria-label="上一个相册" ${prevAlbum ? '' : 'disabled'}>${icons.prev}</button><button class="btn btn-sm btn-iconish" id="next-album-btn" title="下一个相册" aria-label="下一个相册" ${nextAlbum ? '' : 'disabled'}>${icons.next}</button></div><button class="btn btn-sm btn-iconish" id="back-albums-btn" title="返回相册" aria-label="返回相册">${icons.back}</button><button class="btn btn-sm btn-iconish" id="download-album-btn" title="下载相册" aria-label="下载相册">${icons.download}</button><button class="btn btn-danger btn-sm btn-iconish" id="delete-album-btn" title="删除相册" aria-label="删除相册">${icons.trash}</button>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
   $('#prev-album-btn')?.addEventListener('click', () => openAdjacentAlbum(-1));
@@ -4203,7 +4876,11 @@ async function loadMoreAlbumPhotos() {
   state.albumLoading = true;
 	try {
 		const id = state.currentAlbum.id;
-		const url = `/api/media/albums/${id}` + (state.albumCursor ? `?cursor=${encodeURIComponent(state.albumCursor)}` : '');
+		const params = new URLSearchParams();
+		appendMediaKindParam(params);
+		if (state.albumCursor) params.set('cursor', state.albumCursor);
+		const query = params.toString();
+		const url = `/api/media/albums/${id}` + (query ? `?${query}` : '');
 		const page = await api.get(url);
     state.albumPhotos.push(...(page.photos || []));
     state.albumCursor = page.next_cursor || '';
@@ -4269,8 +4946,9 @@ function renderAlbumGroups(newPhotos) {
 // ── 回收站 (b-4 修复) ─────────────────────────────────
 async function renderTrash() {
   $('#topbar-title').textContent = '回收站';
-  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderGridScaleControl();
+  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderMediaKindFilterControl() + renderGridScaleControl();
   $('#topbar-actions').innerHTML = `<button class="btn btn-danger btn-sm" id="empty-trash-btn">${icons.trash} 清空回收站</button>`;
+  bindMediaKindFilterControl();
   bindGridScaleControl();
   bindTrashSelectionBarHandlers();
   $('#empty-trash-btn').addEventListener('click', emptyTrash);
@@ -4290,7 +4968,11 @@ async function loadMoreTrash() {
   if (state.trashLoading || !state.trashHasMore) return;
   state.trashLoading = true;
   try {
-		const url = '/api/media/trash' + (state.trashCursor ? `?cursor=${encodeURIComponent(state.trashCursor)}` : '');
+		const params = new URLSearchParams();
+		appendMediaKindParam(params);
+		if (state.trashCursor) params.set('cursor', state.trashCursor);
+		const query = params.toString();
+		const url = '/api/media/trash' + (query ? `?${query}` : '');
     const page = await api.get(url);
     state.trashPhotos.push(...(page.photos || []));
     state.trashCursor = page.next_cursor || '';
@@ -4429,22 +5111,16 @@ function renderLightbox() {
         <button class="btn-icon lightbox-fit-height" id="lb-fit-height" title="适应（Alt + 0）" aria-label="适应">${icons.fit}</button>
       </div>
       <div class="lightbox-control-pill lightbox-slideshow-controls">
-        <select class="lightbox-select" id="lb-slideshow-mode" aria-label="播放模式">
-          <option value="sequential">顺序</option>
-          <option value="random">随机</option>
-        </select>
         <label class="lightbox-slider-wrap" for="lb-slideshow-interval">
           <span id="lb-slideshow-interval-value">5 秒</span>
           <input class="lightbox-slider" id="lb-slideshow-interval" type="range" min="1" max="30" step="1" aria-label="播放间隔">
         </label>
-        <label class="lightbox-loop-toggle" for="lb-slideshow-loop">
-          <input type="checkbox" id="lb-slideshow-loop">
-          <span>循环</span>
-        </label>
+        <button class="btn-icon lightbox-fit-height lightbox-loop-toggle" id="lb-slideshow-loop" type="button" title="开启循环" aria-label="开启循环" aria-pressed="false"></button>
       </div>
     </div>
     <div class="lightbox-action-group">
       <button class="btn-icon" id="lb-download" title="下载" aria-label="下载">${icons.download}</button>
+      <button class="btn-icon hidden" id="lb-video-bookmark" title="视频书签" aria-label="视频书签">${icons.bookmark}</button>
       <button class="btn-icon" id="lb-favorite" title="收藏" aria-label="收藏">${icons.favorite}</button>
       <button class="btn-icon" id="lb-share" title="分享" aria-label="分享">${icons.share}</button>
       <button class="btn-icon" id="lb-more" title="更多操作" aria-label="更多操作">${icons.more}</button>
@@ -4456,6 +5132,12 @@ function renderLightbox() {
     <div class="lightbox-media-frame" id="lb-frame">
       <img class="lightbox-img" id="lb-img" src="" alt="">
       <video class="lightbox-video hidden" id="lb-video" controls playsinline preload="metadata"></video>
+    </div>
+    <div class="lightbox-video-progress hidden" id="lb-video-progress" aria-hidden="true">
+      <div class="lightbox-video-progress-track">
+        <div class="lightbox-video-progress-fill" id="lb-video-progress-fill"></div>
+        <div class="lightbox-video-progress-markers" id="lb-video-progress-markers"></div>
+      </div>
     </div>
     <div class="lightbox-volume-feedback" id="lb-volume-feedback"><div class="lightbox-volume-fill" id="lb-volume-fill"></div><span id="lb-volume-label">100%</span></div>
     <button class="lb-nav lb-prev" id="lb-prev">${icons.prev}</button>
@@ -4479,7 +5161,9 @@ function unlockPageScrollForLightbox() {
   state.lightboxPageScrollTop = 0;
 }
 function bindGlobal() {
-  document.addEventListener('click', () => closeContextMenu());
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.context-menu')) closeContextMenu();
+  });
   window.addEventListener('scroll', () => saveViewScroll(), { passive: true });
   window.addEventListener('keydown', e => {
     if (handleSearchShortcut(e)) return;
@@ -4527,11 +5211,54 @@ function bindGlobal() {
     if (e.target.closest('#lb-prev'))  lbNav(-1);
     if (e.target.closest('#lb-next'))  lbNav(1);
     if (e.target.closest('#lb-download')) downloadCurrentPhoto();
+    if (e.target.closest('#lb-video-bookmark')) showVideoBookmarkMenu();
     if (e.target.closest('#lb-favorite')) toggleCurrentLightboxFavorite();
     if (e.target.closest('#lb-share')) lbShare();
     if (e.target.closest('#lb-more')) showCurrentLightboxContextMenu();
     if (e.target.closest('#lb-fit-height')) setLightboxFit();
     if (e.target.closest('#lb-slideshow-toggle')) toggleSlideshow();
+    const bookmarkDelete = e.target.closest('[data-video-bookmark-delete]');
+    if (bookmarkDelete) {
+      e.preventDefault();
+      e.stopPropagation();
+      const slot = Number(bookmarkDelete.dataset.videoBookmarkDelete);
+      const photo = state.lightboxPhotos[state.lightboxIndex];
+      if (slot && deleteVideoBookmarkSlot(photo, slot)) {
+        showToast(`已删除书签 ${slot}`);
+        refreshVideoBookmarkMenu();
+      }
+      return;
+    }
+    const bookmarkAction = e.target.closest('[data-video-bookmark-slot]');
+    if (bookmarkAction) {
+      const slot = Number(bookmarkAction.dataset.videoBookmarkSlot);
+      const photo = state.lightboxPhotos[state.lightboxIndex];
+      const video = $('#lb-video');
+      const bookmark = getVideoBookmarkSlot(photo, slot);
+      if (slot && video && !video.classList.contains('hidden')) {
+        if (bookmark) {
+          video.currentTime = bookmark.time;
+          updateVideoBookmarkProgress(video, photo);
+          showToast(`已跳转到书签 ${slot}${bookmark.name ? `：${bookmark.name}` : ''}`);
+        } else if (setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
+          showToast(`已添加书签 ${slot}`);
+          refreshVideoBookmarkMenu();
+        } else {
+          showToast('附近 1 秒内已有书签，未新增');
+        }
+      }
+    }
+    const progressTrack = e.target.closest('.lightbox-video-progress-track');
+    if (progressTrack) {
+      const photo = state.lightboxPhotos[state.lightboxIndex];
+      const video = $('#lb-video');
+      if (video && !video.classList.contains('hidden') && Number.isFinite(video.duration) && video.duration > 0) {
+        const rect = progressTrack.getBoundingClientRect();
+        const ratio = rect.width > 0 ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0;
+        video.currentTime = video.duration * ratio;
+        updateVideoBookmarkProgress(video, photo);
+      }
+    }
     if (shouldStopSlideshowFromClick(e.target)) stopSlideshow();
     if (e.target.closest('#global-search-btn')) openGlobalSearch();
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
@@ -4558,7 +5285,29 @@ function bindGlobal() {
     showVolumeOverlay(video);
   });
   document.addEventListener('input', e => {
-    if (e.target.matches('#global-search-input')) scheduleGlobalSearch();
+    if (e.target.matches('#global-search-input')) {
+      syncSearchInputs(e.target.value);
+      scheduleGlobalSearch();
+    }
+    if (e.target.matches('#topbar-search-input')) {
+      syncSearchInputs(e.target.value);
+      openGlobalSearch(e.target.value);
+      scheduleGlobalSearch();
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.target.matches('#topbar-search-input') && e.key === 'Enter') {
+      e.preventDefault();
+      openGlobalSearch(e.target.value);
+      scheduleGlobalSearch();
+    }
+  });
+  window.addEventListener('storage', e => {
+    if (e.key !== videoBookmarksStorageKey && e.key !== legacyVideoBookmarksStorageKey) return;
+    state.videoBookmarks = loadVideoBookmarks();
+    refreshVideoBookmarkThumbIndicators();
+    updateVideoBookmarkButton();
+    updateVideoBookmarkProgress();
   });
   document.addEventListener('change', async e => {
     if (!e.target.matches('#library-build-exit-after')) return;
@@ -4580,10 +5329,13 @@ function bindGlobal() {
     showPhotoContextMenu(e.clientX, e.clientY, photo, findPhotoThumb(photo.id), state.lightboxPhotos);
   });
   document.addEventListener('change', e => {
-    if (e.target.matches('#lb-slideshow-mode')) updateSlideshowSetting('mode', e.target.value);
     if (e.target.matches('#lb-slideshow-interval')) updateSlideshowSetting('interval', parseInt(e.target.value, 10) * 1000);
-    if (e.target.matches('#lb-slideshow-loop')) updateSlideshowSetting('loop', e.target.checked);
     if (e.target.matches('#lb-zoom')) setLightboxZoom(parseInt(e.target.value, 10));
+  });
+  document.addEventListener('click', e => {
+    if (e.target.closest('#lb-slideshow-loop')) {
+      updateSlideshowSetting('loop', !state.slideshowLoop);
+    }
   });
 }
 
@@ -4607,9 +5359,9 @@ async function openLightbox(photos, index) {
   const target = photos[Math.max(0, index)];
   if (target && isVideoMedia(target)) {
     await ensureSettingsDataLoaded();
-    if (state.serverSettings.use_system_player) {
+    if (state.serverSettings.use_system_player || requiresSystemPlayer(target)) {
       openWithSystemPlayer(target.id)
-        .then(() => showToast('已使用系统播放器打开'))
+        .then(() => showToast(requiresSystemPlayer(target) ? '当前浏览器不支持此视频格式，已使用系统播放器打开' : '已使用系统播放器打开'))
         .catch(e => alert('打开失败: ' + ((e && e.error) || e)));
       return;
     }
@@ -4635,6 +5387,7 @@ function closeLightbox() {
   setLightboxMediaLoading(false);
   resetLightboxFocusPoint();
   resetLightboxTemporaryZoom();
+  saveCurrentVideoResumePosition({ quiet: true });
   const video = $('#lb-video');
   if (video) {
     video.pause();
@@ -4684,6 +5437,7 @@ function lbGoTo(index, options = {}) {
   state.lightboxPlaybackToken += 1;
   const video = $('#lb-video');
   if (video) {
+    saveCurrentVideoResumePosition({ quiet: true });
     video.pause();
     video.removeAttribute('src');
     video.load();
@@ -4711,9 +5465,17 @@ function lbRender() {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
     };
-    video.onloadedmetadata = applyLightboxZoom;
+    video.onloadedmetadata = () => {
+      applyLightboxZoom();
+      restoreVideoResumePosition(video, p);
+      updateVideoBookmarkProgress(video, p);
+    };
     video.onerror = () => setLightboxMediaLoading(false);
     video.onfocus = refocusLightboxAfterVideoControl;
+    video.ontimeupdate = () => {
+      handleVideoResumeTimeUpdate(video);
+      updateVideoBookmarkProgress(video, p);
+    };
     video.src = mediaFileURL(p);
     video.poster = mediaThumbURL(p);
     video.load();
@@ -4721,7 +5483,7 @@ function lbRender() {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
     }
-    if (state.slideshowPlaying || state.experimentalAutoplayVideo) autoplayLightboxVideo(video);
+    if (state.slideshowPlaying || state.experimentalAutoplayVideo || isWindowsClient()) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
     video.pause();
@@ -4731,8 +5493,10 @@ function lbRender() {
     video.onloadedmetadata = null;
     video.onerror = null;
     video.onfocus = null;
+    video.ontimeupdate = null;
     video.removeAttribute('src');
     video.load();
+    updateVideoBookmarkProgress(video, p);
     img.classList.remove('hidden');
     img.onload = () => {
       setLightboxMediaLoading(false);
@@ -4746,13 +5510,9 @@ function lbRender() {
     }
   }
   $('#lb-title').textContent = p.original_name;
-  const favoriteBtn = $('#lb-favorite');
-  if (favoriteBtn) {
-    favoriteBtn.innerHTML = p.is_favorite ? icons.favoriteFilled : icons.favorite;
-    favoriteBtn.title = p.is_favorite ? '取消收藏' : '收藏';
-    favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
-    favoriteBtn.classList.toggle('active', !!p.is_favorite);
-  }
+  updateLightboxFavoriteButton(p);
+  updateVideoBookmarkButton(p);
+  updateVideoBookmarkProgress(video, p);
   $('#lb-prev').classList.toggle('hidden', state.lightboxIndex === 0);
   $('#lb-next').classList.toggle('hidden', state.lightboxIndex === state.lightboxPhotos.length - 1);
   applyLightboxZoom();
@@ -4766,7 +5526,7 @@ function lbRender() {
     [icons.infoDimensions, '尺寸', p.width && p.height ? `${p.width} × ${p.height}` : '—'],
     [icons.infoRatio, '宽高比（近似）', aspectRatioLabel(p.width, p.height)],
     [icons.infoFileSize, '大小（MB）', formatSizeMB(p.size)],
-  ];
+  ].concat(buildExifInfoItems(p));
   $('#lb-info').innerHTML = items.map(([icon, k, v]) => `<div class="lb-info-item" title="${escapeHTML(`${k}: ${v}`)}" aria-label="${escapeHTML(`${k}: ${v}`)}"><span class="lb-info-key">${icon}</span><span class="lb-info-value">${escapeHTML(v)}</span></div>`).join('');
 }
 

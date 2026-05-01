@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,10 +11,18 @@ import (
 
 func TestGetDownloadEntries_DeduplicatesNames(t *testing.T) {
 	repo := newMockRepo()
-	svc := newPhotoServiceSync(repo, t.TempDir(), t.TempDir(), t.TempDir())
+	sourceDir := t.TempDir()
+	svc := newPhotoServiceSync(repo, sourceDir, t.TempDir(), t.TempDir())
 
-	p1 := &storage.Photo{UUID: "u1", OriginalName: "same.jpg", MimeType: "image/jpeg", TakenAt: time.Now(), UploadedAt: time.Now(), UploadedBy: 1}
-	p2 := &storage.Photo{UUID: "u2", OriginalName: "same.jpg", MimeType: "image/jpeg", TakenAt: time.Now(), UploadedAt: time.Now(), UploadedBy: 1}
+	if err := os.WriteFile(filepath.Join(sourceDir, "same-1.jpg"), []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "same-2.jpg"), []byte("two"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	p1 := &storage.Photo{UUID: "u1", OriginalName: "same.jpg", MimeType: "image/jpeg", SourceRelPath: "same-1.jpg", TakenAt: time.Now(), UploadedAt: time.Now(), UploadedBy: 1}
+	p2 := &storage.Photo{UUID: "u2", OriginalName: "same.jpg", MimeType: "image/jpeg", SourceRelPath: "same-2.jpg", TakenAt: time.Now(), UploadedAt: time.Now(), UploadedBy: 1}
 	if err := repo.SavePhoto(p1); err != nil {
 		t.Fatal(err)
 	}

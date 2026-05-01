@@ -155,6 +155,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleServeLibraryLogo(cfg))
 	r.POST("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleRefreshVideoThumbnails(cfg, registrar))
+	r.POST("/api/settings/exif/backfill", authMiddleware(cfg), handleBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authMiddleware(cfg), handleGetPlayerKeymap(cfg))
 
 	media := r.Group("/api/media")
@@ -424,9 +425,10 @@ func handleListTrashMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			return
 		}
 		page, err := registrar.GetTrash(storage.ListPhotosParams{
-			UserID: userID,
-			Cursor: c.Query("cursor"),
-			Limit:  mediaPageLimit(c),
+			UserID:    userID,
+			Cursor:    c.Query("cursor"),
+			Limit:     mediaPageLimit(c),
+			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -448,9 +450,10 @@ func handleListFavoriteMedia(cfg *config.Config, registrar videoRegistrar) gin.H
 			return
 		}
 		page, err := registrar.GetFavorites(storage.ListPhotosParams{
-			UserID: userID,
-			Cursor: c.Query("cursor"),
-			Limit:  mediaPageLimit(c),
+			UserID:    userID,
+			Cursor:    c.Query("cursor"),
+			Limit:     mediaPageLimit(c),
+			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -510,10 +513,11 @@ func handleListAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			return
 		}
 		page, err := registrar.GetAlbumMedia(storage.ListAlbumPhotosParams{
-			AlbumID: albumID,
-			UserID:  userID,
-			Cursor:  c.Query("cursor"),
-			Limit:   mediaPageLimit(c),
+			AlbumID:   albumID,
+			UserID:    userID,
+			Cursor:    c.Query("cursor"),
+			Limit:     mediaPageLimit(c),
+			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1175,6 +1179,7 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 			Limit:     mediaPageLimit(c),
 			Reverse:   mediaPageReverse(c),
 			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
+			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1246,6 +1251,7 @@ func handleListRandomMedia(cfg *config.Config, registrar videoRegistrar) gin.Han
 			Cursor:    c.Query("cursor"),
 			Limit:     mediaPageLimit(c),
 			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
+			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

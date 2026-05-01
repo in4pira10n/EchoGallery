@@ -47,6 +47,7 @@ type Preferences struct {
 	ExperimentalAutoplayVideo     bool   `json:"experimental_autoplay_video"`
 	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
 	PlayerKeymap                  string `json:"player_keymap"`
 }
 
@@ -64,6 +65,7 @@ type configDefaultsProbe struct {
 		ExperimentalAutoplayVideo     *bool   `json:"experimental_autoplay_video"`
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
+		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
 		PlayerKeymap                  *string `json:"player_keymap"`
 	} `json:"preferences"`
 }
@@ -223,7 +225,7 @@ func (c *Config) applyDefaults() {
 		c.Preferences.ThumbRadius = 8
 	}
 	if c.Preferences.SlideshowMode == "" {
-		c.Preferences.SlideshowMode = "sequential"
+		c.Preferences.SlideshowMode = "random"
 	}
 	if c.Preferences.SlideshowInterval == 0 {
 		c.Preferences.SlideshowInterval = 5000
@@ -295,6 +297,9 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	}
 	if probe.Preferences.ExperimentalPrefetchNeighbors == nil {
 		c.Preferences.ExperimentalPrefetchNeighbors = true
+	}
+	if probe.Preferences.ContinueLastVideoPosition == nil {
+		c.Preferences.ContinueLastVideoPosition = true
 	}
 }
 

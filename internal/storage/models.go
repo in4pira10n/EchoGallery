@@ -14,8 +14,9 @@ type Photo struct {
 	Height         int        `json:"height"`
 	DurationMS     int64      `json:"duration_ms"`
 	IsFavorite     bool       `json:"is_favorite"`
-	StorageRelPath string     `json:"-"`        // 应用内部实际存储的相对路径
-	SourceRelPath  string     `json:"-"`        // 启动扫描导入时源文件的相对路径，用于避免重复导入
+	StorageRelPath string     `json:"-"` // 应用内部实际存储的相对路径
+	SourceRelPath  string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
+	EXIF           *PhotoEXIF `json:"exif,omitempty"`
 	SourceModUnix  int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
 	RandomSortKey  int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
 	TakenAt        time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
@@ -23,6 +24,23 @@ type Photo struct {
 	UploadedBy     int64      `json:"uploaded_by"` // 关联 users.id
 	DeletedAt      *time.Time `json:"deleted_at"`  // nil 表示未删除
 	DeletedBy      *int64     `json:"deleted_by"`  // nil 表示未删除
+}
+
+// PhotoEXIF 保存可展示的 EXIF 字段。
+type PhotoEXIF struct {
+	Make         string    `json:"make,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	Orientation  int       `json:"orientation,omitempty"`
+	TakenAt      time.Time `json:"taken_at,omitempty"`
+	Width        int       `json:"width,omitempty"`
+	Height       int       `json:"height,omitempty"`
+	FNumber      string    `json:"f_number,omitempty"`
+	ExposureTime string    `json:"exposure_time,omitempty"`
+	ISOSpeed     int       `json:"iso_speed,omitempty"`
+	FocalLength  string    `json:"focal_length,omitempty"`
+	Latitude     float64   `json:"latitude,omitempty"`
+	Longitude    float64   `json:"longitude,omitempty"`
+	HasGPS       bool      `json:"has_gps,omitempty"`
 }
 
 const (
@@ -83,6 +101,7 @@ type ListPhotosParams struct {
 	OnlyTrashed  bool   // true 时查询回收站
 	OnlyFavorite bool   // true 时仅查询个人收藏
 	SkipTotal    bool   // true 时跳过 COUNT(*)，用于后续分页降低大库滚动成本
+	MediaKind    string // image / video，空表示全部
 }
 
 // SearchPhotosParams 查询媒体搜索结果参数。
@@ -102,6 +121,7 @@ type RandomPhotosParams struct {
 	Cursor    string
 	Limit     int
 	SkipTotal bool
+	MediaKind string
 }
 
 // SourceMediaInfo 是启动扫描使用的轻量索引，避免为每个源文件做一次完整查询。
@@ -114,8 +134,9 @@ type SourceMediaInfo struct {
 
 // ListAlbumPhotosParams 查询相册内图片参数
 type ListAlbumPhotosParams struct {
-	AlbumID int64
-	UserID  int64
-	Cursor  string
-	Limit   int
+	AlbumID   int64
+	UserID    int64
+	Cursor    string
+	Limit     int
+	MediaKind string
 }
