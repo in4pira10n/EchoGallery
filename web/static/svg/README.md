@@ -23,6 +23,26 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `favorite-filled.svg`: Filled favorite state for media already added to Favorites.
 - `check.svg`: Selection checkmark on media thumbnails.
 - `plus.svg`: Create/add actions.
+- `library-create.svg`: Floating Settings action for creating a new library.
+- `advanced-settings.svg`: Settings summary entry for advanced options.
+- `topbar-load-all.svg`: Topbar icon-only action for loading all media in a view.
+- `topbar-upload.svg`: Topbar icon-only upload action.
+- `topbar-download-favorites.svg`: Topbar action for downloading all favorites.
+- `topbar-shuffle.svg`: Topbar action for reshuffling random albums.
+- `topbar-save-restart.svg`: Topbar save-and-restart action.
+- `topbar-save.svg`: Topbar save action.
+- `topbar-new-album.svg`: Topbar create-album action.
+- `topbar-prev-album.svg`: Topbar previous-album navigation.
+- `topbar-next-album.svg`: Topbar next-album navigation.
+- `topbar-back-albums.svg`: Topbar return-to-albums action.
+- `topbar-download-album.svg`: Topbar download-album action.
+- `topbar-delete-album.svg`: Topbar delete-album action.
+- `topbar-empty-trash.svg`: Topbar empty-trash action.
+- `topbar-clear-memories-action.svg`: Topbar clear-memories action.
+- `topbar-restore-selected.svg`: Batch restore action in Trash selection bar.
+- `topbar-timeline-order.svg`: Topbar timeline order toggle.
+- `album-view-grid.svg`: Album view toggle for grid mode.
+- `album-view-list.svg`: Album view toggle for list mode.
 - `close.svg`: Close buttons.
 - `back.svg`: Return/back action that exits the lightbox or returns to the previous UI context.
 - `more.svg`: More actions button, especially for touch-friendly access to context menus.

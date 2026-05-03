@@ -133,6 +133,13 @@ func TestSaveToPath_Success(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, configFileName)
 	cfg := validConfig()
+	cfg.Libraries = []Library{
+		{
+			Name:        "家庭相册",
+			Path:        "/tmp/photos",
+			AccentColor: "#3366ff",
+		},
+	}
 
 	if err := cfg.saveToPath(path); err != nil {
 		t.Fatalf("保存失败: %v", err)
@@ -148,6 +155,12 @@ func TestSaveToPath_Success(t *testing.T) {
 	}
 	if loaded.StoragePath != cfg.StoragePath {
 		t.Errorf("StoragePath 不一致")
+	}
+	if len(loaded.Libraries) != 1 {
+		t.Fatalf("期望保留 1 个资源库，得到 %d", len(loaded.Libraries))
+	}
+	if loaded.Libraries[0].AccentColor != "#3366ff" {
+		t.Errorf("AccentColor 未正确保存: %s", loaded.Libraries[0].AccentColor)
 	}
 }
 
