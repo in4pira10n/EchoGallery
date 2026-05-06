@@ -2,7 +2,7 @@
 
 Reshape the way you manage your photo gallery.
 
-<img width="1920" height="1080" alt="IMG_6248" src="https://github.com/user-attachments/assets/f865ef9c-3909-4247-96b5-f9b609065b27" />
+<img width="2880" height="1800" alt="1" src="https://github.com/user-attachments/assets/dae16cf6-55c7-4c46-be5c-136dfb5ebd53" />
 
 ## Intro
 
