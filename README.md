@@ -1,6 +1,6 @@
 # EchoGallery
 
-Reshape the way you manage your photo gallery.
+The next generation local photo gallery managing app.
 
 <img width="2880" height="1800" alt="1" src="https://github.com/user-attachments/assets/dae16cf6-55c7-4c46-be5c-136dfb5ebd53" />
 
