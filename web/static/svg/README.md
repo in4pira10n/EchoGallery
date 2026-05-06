@@ -43,6 +43,11 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `topbar-timeline-order.svg`: Topbar timeline order toggle.
 - `album-view-grid.svg`: Album view toggle for grid mode.
 - `album-view-list.svg`: Album view toggle for list mode.
+- `album-card-folder.svg`: Placeholder icon slot for folder-import album cards.
+- `album-card-user.svg`: Placeholder icon slot for manually-created album cards.
+- `album-card-count.svg`: Placeholder icon slot shown before the item count on album cards.
+- `floating-search.svg`: Dedicated oversized search glyph for the bottom-right floating search button.
+- `grid-scale-button.svg`: Dedicated floating control for cycling photo-wall thumbnail sizes.
 - `close.svg`: Close buttons.
 - `back.svg`: Return/back action that exits the lightbox or returns to the previous UI context.
 - `more.svg`: More actions button, especially for touch-friendly access to context menus.

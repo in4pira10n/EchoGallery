@@ -11,8 +11,8 @@ const el = (tag, cls, html = '') => {
   return e;
 };
 const api = {
-  async get(url) {
-    const r = await fetch(url);
+  async get(url, options = {}) {
+    const r = await fetch(url, options);
     if (!r.ok) throw await r.json();
     return r.json();
   },
@@ -246,10 +246,15 @@ function addLongPress(el, callback, delay = 500) {
 // ── SVG 图标 ──────────────────────────────────────────
 const icons = {
   timeline: '',
+  timelineBold: '',
   favorite: '',
+  favoriteBold: '',
   album: '',
+  albumBold: '',
   shuffle: '',
+  shuffleBold: '',
   trash: '',
+  trashBold: '',
   upload: '',
   sun: '',
   moon: '',
@@ -261,6 +266,7 @@ const icons = {
   check: '',
   photo: '',
   memories: '',
+  memoriesBold: '',
   logout: '',
   shutdown: '',
   plus: '',
@@ -280,11 +286,17 @@ const icons = {
   topbarDeleteAlbum: '',
   topbarEmptyTrash: '',
   topbarClearMemories: '',
+  libraryCardEdit: '',
+  libraryCardDelete: '',
   topbarTimelineOrder: '',
+  albumCardFolder: '',
+  albumCardUser: '',
+  albumCardCount: '',
   albumViewGrid: '',
   albumViewList: '',
   topbarRestoreSelected: '',
   settings: '',
+  settingsBold: '',
   shareSmall: '',
   favoriteSmall: '',
   favoriteFilled: '',
@@ -317,6 +329,8 @@ const icons = {
   mediaImage: '',
   mediaVideo: '',
   bookmark: '',
+  floatingSearch: '',
+  gridScaleButton: '',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>',
   contextSelect: '',
   contextView: '',
@@ -331,13 +345,19 @@ const icons = {
 };
 const svgIconFiles = {
   timeline: 'timeline.svg',
+  timelineBold: 'timeline-bold.svg',
   favorite: 'favorite.svg',
+  favoriteBold: 'favorite-bold.svg',
   album: 'album.svg',
+  albumBold: 'album-bold.svg',
   shuffle: 'shuffle.svg',
+  shuffleBold: 'shuffle-bold.svg',
   trash: 'trash.svg',
+  trashBold: 'trash-bold.svg',
   upload: 'upload.svg',
   share: 'share.svg',
   settings: 'settings.svg',
+  settingsBold: 'settings-bold.svg',
   sun: 'sun.svg',
   moon: 'moon.svg',
   close: 'close.svg',
@@ -347,6 +367,7 @@ const svgIconFiles = {
   check: 'check.svg',
   photo: 'photo.svg',
   memories: 'memories.svg',
+  memoriesBold: 'memories-bold.svg',
   logout: 'logout-1.svg',
   shutdown: 'shutdown.svg',
   plus: 'plus.svg',
@@ -365,11 +386,21 @@ const svgIconFiles = {
   topbarDownloadAlbum: 'topbar-download-album.svg',
   topbarDeleteAlbum: 'topbar-delete-album.svg',
   topbarEmptyTrash: 'topbar-empty-trash.svg',
+  topbarRestoreAll: 'topbar-restore-all.svg',
   topbarClearMemories: 'topbar-clear-memories-action.svg',
+  libraryCardEdit: 'library-card-edit.svg',
+  libraryCardDelete: 'library-card-delete.svg',
   topbarTimelineOrder: 'topbar-timeline-order.svg',
+  albumCardFolder: 'album-card-folder.svg',
+  albumCardUser: 'album-card-user.svg',
+  albumCardCount: 'album-card-count.svg',
+  albumNavPrev: 'album-nav-prev.svg',
+  albumNavNext: 'album-nav-next.svg',
   albumViewGrid: 'album-view-grid.svg',
   albumViewList: 'album-view-list.svg',
   topbarRestoreSelected: 'topbar-restore-selected.svg',
+  floatingSearch: 'floating-search.svg',
+  gridScaleButton: 'grid-scale-button.svg',
   shareSmall: 'share-small.svg',
   favoriteSmall: 'favorite-small.svg',
   favoriteFilled: 'favorite-filled.svg',
@@ -413,6 +444,20 @@ const svgIconFiles = {
   contextDelete: 'context-delete.svg',
   contextRestore: 'context-restore.svg',
 };
+
+function navIconMarkup(view, active = false) {
+  const iconSets = {
+    timeline: [icons.timeline, icons.timelineBold || icons.timeline],
+    favorites: [icons.favorite, icons.favoriteBold || icons.favorite],
+    'random-album': [icons.shuffle, icons.shuffleBold || icons.shuffle],
+    albums: [icons.album, icons.albumBold || icons.album],
+    memories: [icons.memories, icons.memoriesBold || icons.memories],
+    trash: [icons.trash, icons.trashBold || icons.trash],
+    settings: [icons.settings, icons.settingsBold || icons.settings],
+  };
+  const pair = iconSets[view] || [icons.photo, icons.photo];
+  return active ? (pair[1] || pair[0] || '') : (pair[0] || '');
+}
 async function loadInlineSVGIcons() {
   await Promise.all(Object.entries(svgIconFiles).map(async ([key, file]) => {
     try {
@@ -467,16 +512,36 @@ function sanitizeSVGNode(node) {
 }
 
 // ── 主题 ──────────────────────────────────────────────
+const themeManualStorageKey = 'echogallery_theme_manual';
+const systemThemeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function systemTheme() {
+  return systemThemeQuery && systemThemeQuery.matches ? 'dark' : 'light';
+}
+function hasManualThemePreference() {
+  return localStorage.getItem(themeManualStorageKey) === '1';
+}
+function setThemeValue(theme, { manual = false, persist = false } = {}) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  state.theme = next;
+  if (manual) localStorage.setItem(themeManualStorageKey, '1');
+  updateThemeBtn();
+  applyLibraryBranding();
+  if (persist) persistSettings().catch(() => {});
+}
 function initTheme() {
-  document.documentElement.dataset.theme = 'light';
+  document.documentElement.dataset.theme = systemTheme();
+  if (systemThemeQuery) {
+    const sync = () => {
+      if (!hasManualThemePreference()) setThemeValue(systemTheme());
+    };
+    if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener('change', sync);
+    else if (systemThemeQuery.addListener) systemThemeQuery.addListener(sync);
+  }
 }
 function toggleTheme() {
   const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = t;
-  state.theme = t;
-  updateThemeBtn();
-  applyLibraryBranding();
-  persistSettings().catch(() => {});
+  setThemeValue(t, { manual: true, persist: true });
 }
 function updateThemeBtn() {
   const btn = $('#theme-btn');
@@ -503,14 +568,16 @@ function mediaKindMatchesFilter(photo) {
   const kind = currentMediaKindParam();
   return !kind || (photo && photo.media_kind === kind);
 }
-function renderMediaKindFilterControl() {
+function renderMediaKindFilterControl(className = '') {
   const active = normalizeMediaKindFilter(state.mediaKindFilter);
   const items = [
     { key: 'all', icon: icons.mediaAll || icons.photo, label: '显示全部媒体' },
     { key: 'image', icon: icons.mediaImage || icons.photo, label: '只显示图片' },
     { key: 'video', icon: icons.mediaVideo || icons.play, label: '只显示视频' },
   ];
-  return `<div class="topbar-media-filter" role="group" aria-label="媒体类型筛选">
+  const classes = ['topbar-media-filter'];
+  if (className) classes.push(className);
+  return `<div class="${classes.join(' ')}" role="group" aria-label="媒体类型筛选">
     ${items.map(item => `<button class="media-filter-btn ${active === item.key ? 'active' : ''}" type="button" data-media-kind-filter="${item.key}" title="${item.label}" aria-label="${item.label}" aria-pressed="${active === item.key ? 'true' : 'false'}">${item.icon}</button>`).join('')}
   </div>`;
 }
@@ -519,6 +586,11 @@ function renderTopbarGlassButton({ id = '', icon = '', label = '', className = '
   if (variant) classes.push(`topbar-glass-btn-${variant}`);
   if (className) classes.push(className);
   return `<button class="${classes.join(' ')}" ${id ? `id="${id}"` : ''} type="button" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" ${disabled ? 'disabled' : ''} ${extraAttrs}>${icon}</button>`;
+}
+function renderTopbarLeadingGroup(buttons = []) {
+  const items = (buttons || []).filter(Boolean);
+  if (!items.length) return '';
+  return items.length === 1 ? items[0] : `<div class="topbar-action-group">${items.join('')}</div>`;
 }
 function bindMediaKindFilterControl() {
   $$('[data-media-kind-filter]').forEach(btn => {
@@ -708,21 +780,29 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
   const track = $('#lb-video-progress');
   const fill = $('#lb-video-progress-fill');
   const markers = $('#lb-video-progress-markers');
+  const currentLabel = $('#lb-video-progress-current');
+  const durationLabel = $('#lb-video-progress-duration');
   if (!track || !fill || !markers) return;
   const isVideo = isVideoMedia(photo) && video && !video.classList.contains('hidden');
   track.classList.toggle('hidden', !isVideo);
   if (!isVideo) {
     fill.style.width = '0%';
     markers.innerHTML = '';
+    if (currentLabel) currentLabel.textContent = '0:00';
+    if (durationLabel) durationLabel.textContent = '0:00';
     return;
   }
   if (!Number.isFinite(video.duration) || video.duration <= 0) {
     fill.style.width = '0%';
     markers.innerHTML = '';
+    if (currentLabel) currentLabel.textContent = formatDuration((video.currentTime || 0) * 1000);
+    if (durationLabel) durationLabel.textContent = '0:00';
     return;
   }
   const current = Math.max(0, Number(video.currentTime) || 0);
   fill.style.width = `${Math.max(0, Math.min(100, current / video.duration * 100))}%`;
+  if (currentLabel) currentLabel.textContent = formatDuration(current * 1000);
+  if (durationLabel) durationLabel.textContent = formatDuration(video.duration * 1000);
   const bookmarks = getVideoBookmarkList(photo);
   markers.innerHTML = bookmarks.map(bookmark => {
     const left = Math.max(0, Math.min(100, bookmark.time / video.duration * 100));
@@ -792,10 +872,59 @@ function handleVideoBookmarkShortcut(e) {
 function initGridScale() {
   state.gridSize = 180;
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
+  updateGridScaleProgress();
 }
 function setGridScale(size) {
   state.gridSize = Math.min(260, Math.max(72, Number(size) || 180));
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
+  updateGridScaleProgress();
+  updateGridScaleButtonTitle();
+}
+function updateGridScaleProgress() {
+  const min = 72;
+  const max = 260;
+  const value = Math.min(max, Math.max(min, Number(state.gridSize) || 180));
+  const progress = ((value - min) / (max - min)) * 100;
+  document.documentElement.style.setProperty('--grid-scale-progress', `${progress}%`);
+  updateRangeProgress($('#floating-grid-scale-input'));
+}
+function updateRangeProgress(input) {
+  if (!input || input.type !== 'range') return;
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const value = Math.min(max, Math.max(min, Number(input.value) || min));
+  const progress = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  input.style.setProperty('--range-progress', `${progress}%`);
+}
+function syncRangeProgress(scope = document) {
+  $$('input[type="range"]', scope).forEach(updateRangeProgress);
+}
+function clampThumbnailBuildSize(value) {
+  return Math.min(1024, Math.max(96, Number(value) || 512));
+}
+function updateGridScaleButtonTitle() {
+  const btn = $('#grid-scale-btn');
+  const label = `缩放，当前 ${state.gridSize}px`;
+  if (btn) {
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+  const input = $('#floating-grid-scale-input');
+  if (input && input.value !== String(state.gridSize)) input.value = String(state.gridSize);
+  updateRangeProgress(input);
+}
+function cycleGridScale(direction = 1) {
+  const presets = [72, 88, 104, 120, 136, 152, 168, 180, 196, 212, 228, 244, 260];
+  const current = Math.min(260, Math.max(72, Number(state.gridSize) || 180));
+  let index = presets.findIndex(value => value >= current);
+  if (index < 0) index = presets.length - 1;
+  if (presets[index] !== current && direction < 0) index -= 1;
+  else if (presets[index] === current) index += direction;
+  if (index >= presets.length) index = 0;
+  if (index < 0) index = presets.length - 1;
+  setGridScale(presets[index]);
+  persistGridScaleSoon();
+  updateGridScaleButtonTitle();
 }
 function persistGridScaleSoon() {
   if (!state.settingsReady) return;
@@ -830,7 +959,9 @@ function setThumbRadius(size) {
   applyDisplaySettings();
 }
 function initSidebarPreference() {
-  state.sidebarCompact = localStorage.getItem('echogallery_sidebar_compact') === '1';
+  const saved = localStorage.getItem('echogallery_sidebar_compact');
+  state.sidebarCompact = saved == null ? true : saved !== '0';
+  if (saved == null) localStorage.setItem('echogallery_sidebar_compact', '1');
 }
 function isMobileLayout() {
   return window.matchMedia('(max-width: 640px)').matches;
@@ -841,19 +972,6 @@ function syncSidebarUI() {
   if (!app || !nav) return;
 
   app.classList.toggle('sidebar-compact', !!state.sidebarCompact && !isMobileLayout());
-
-  const compactToggle = $('#nav-compact-toggle');
-  if (compactToggle) {
-    const label = state.sidebarCompact ? '展开侧栏' : '折叠侧栏';
-    compactToggle.title = label;
-    compactToggle.setAttribute('aria-label', label);
-  }
-}
-
-function toggleSidebarCompact() {
-  state.sidebarCompact = !state.sidebarCompact;
-  localStorage.setItem('echogallery_sidebar_compact', state.sidebarCompact ? '1' : '0');
-  syncSidebarUI();
 }
 
 function initSlideshowSettings() {
@@ -881,7 +999,10 @@ function updateSlideshowControls() {
     btn.setAttribute('aria-label', btn.title);
     btn.classList.toggle('active', state.slideshowPlaying);
   }
-  if (interval) interval.value = String(state.slideshowInterval / 1000);
+  if (interval) {
+    interval.value = String(state.slideshowInterval / 1000);
+    updateRangeProgress(interval);
+  }
   if (intervalValue) intervalValue.textContent = `${state.slideshowInterval / 1000} 秒`;
   if (loop) {
     loop.innerHTML = icons.slideshowLoop;
@@ -1143,7 +1264,10 @@ function applyLightboxZoom() {
   if (body) body.classList.toggle('zoomed', zoomed);
   if (fitBtn) fitBtn.classList.toggle('active', effective.mode === 'fit' && !state.lightboxBoostActive);
   if (label) label.textContent = `${effective.zoom}%`;
-  if (input) input.value = String(state.lightboxZoom);
+  if (input) {
+    input.value = String(state.lightboxZoom);
+    updateRangeProgress(input);
+  }
 }
 function initExperimentalSettings() {
   state.experimentalAutoplayVideo = false;
@@ -1301,6 +1425,12 @@ async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
   if (!library || library.logo_asset || library.logo_image_url || library.logoImageUrl || state.libraryRandomLogoLoading) return;
   const key = libraryVisualSeed(library);
   if (!key || state.libraryRandomLogos[key] || state.libraryRandomLogoTried[key]) return;
+  const activePath = String(state.serverSettings.storage_path || '').trim();
+  const libraryPath = String(library.path || '').trim();
+  if (!libraryPath || libraryPath !== activePath || state.settingsDirty) return;
+  const libraries = normalizeLibraries(state.serverSettings.libraries, activePath);
+  const index = libraries.findIndex(item => item.path === libraryPath);
+  if (index < 0) return;
   state.libraryRandomLogoTried[key] = true;
   state.libraryRandomLogoLoading = true;
   try {
@@ -1308,8 +1438,16 @@ async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
     const page = await api.get(`/api/media/random?limit=1&seed=${seed}`);
     const photo = page.photos && page.photos[0];
     if (photo && photo.uuid) {
-      state.libraryRandomLogos[key] = mediaThumbURL(photo);
-      applyLibraryBranding();
+      const thumbURL = mediaThumbURL(photo);
+      state.libraryRandomLogos[key] = thumbURL;
+      const res = await fetch(thumbURL);
+      if (!res.ok) throw new Error('随机缩略图读取失败');
+      const blob = await res.blob();
+      const mime = blob.type || 'image/webp';
+      const ext = mime.includes('png') ? 'png' : mime.includes('jpeg') ? 'jpg' : mime.includes('gif') ? 'gif' : 'webp';
+      const file = new File([blob], `library-random-logo-${photo.uuid}.${ext}`, { type: mime });
+      await uploadLibraryLogo(index, file);
+      if (state.view === 'settings') renderSettings().catch(e => console.warn('刷新资源库头像失败', e));
     }
   } catch (e) {
     console.warn('随机资源库头像加载失败', e);
@@ -1317,17 +1455,13 @@ async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
     state.libraryRandomLogoLoading = false;
   }
 }
-function libraryFallbackText(library = {}, limit = 3) {
-  const label = String(library.name || library.path || 'EchoGallery').trim();
-  return escapeHTML((label || 'EG').slice(0, limit));
-}
 function applyNavLogoFallback(navLogo, library = {}) {
   if (!navLogo) return;
   const img = $('.nav-logo-image', navLogo);
   const media = $('.nav-logo-media', navLogo);
   if (!img || !media) return;
   const fallback = () => {
-    media.innerHTML = `<span class="nav-logo-mark">${libraryFallbackText(library)}</span>`;
+    media.innerHTML = `<span class="nav-logo-mark">${icons.photo}</span>`;
   };
   img.addEventListener('error', fallback, { once: true });
 }
@@ -1337,7 +1471,7 @@ function applyLibraryPreviewFallback(preview, library = {}) {
   if (!img) return;
   const fallback = () => {
     preview.classList.remove('has-image');
-    preview.innerHTML = `<span>${libraryFallbackText(library)}</span>`;
+    preview.innerHTML = `<span class="library-avatar-placeholder">${icons.photo}</span>`;
   };
   img.addEventListener('error', fallback, { once: true });
 }
@@ -1379,6 +1513,7 @@ function applyLibraryBranding() {
     navLogo.innerHTML = renderNavLogo();
     applyNavLogoFallback(navLogo, current || {});
   }
+  syncTopbarTitleNote();
   ensureRandomLibraryLogo(current);
 }
 async function refreshVideoThumbnails() {
@@ -1394,12 +1529,34 @@ function renderNavLogo() {
     const logoURL = resolveLibraryLogoURL(current);
     const media = logoURL
       ? `<img class="nav-logo-image" src="${logoURL}" alt="${escapeHTML(label)}">`
-      : `<span class="nav-logo-mark">${libraryFallbackText(current)}</span>`;
-    return `<span class="nav-logo-media">${media}</span><span class="nav-logo-text">${escapeHTML(label)}</span>`;
+      : `<span class="nav-logo-mark">${icons.photo}</span>`;
+    return `<span class="nav-logo-media">${media}</span>`;
   }
-  const logoText = current && current.name ? current.name.trim() : '';
-  const logoMark = logoText ? `<span class="nav-logo-mark">${logoText.slice(0, 3)}</span>` : icons.photo;
-  return `${logoMark} ${logoText || 'EchoGallery'}`;
+  return `<span class="nav-logo-media"><span class="nav-logo-mark">${icons.photo}</span></span>`;
+}
+
+function topbarNoteText() {
+  const current = currentLibraryBrand();
+  return current && current.name ? current.name : 'EchoGallery Library';
+}
+
+function syncTopbarTitleNote() {
+  const title = $('#topbar-title');
+  if (title) title.dataset.note = topbarNoteText();
+}
+
+function isCompactNavLayout() {
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function setNavPickerOpen(open) {
+  const nav = $('#main-nav');
+  if (!nav) return;
+  nav.classList.toggle('nav-picker-open', !!open);
+}
+
+function closeNavPicker() {
+  setNavPickerOpen(false);
 }
 
 function renderSearchOverlay() {
@@ -1433,9 +1590,7 @@ function renderSearchFilterButton(value, label) {
 
 function syncSearchInputs(value = '') {
   const text = String(value);
-  const topbarInput = $('#topbar-search-input');
   const overlayInput = $('#global-search-input');
-  if (topbarInput && topbarInput.value !== text) topbarInput.value = text;
   if (overlayInput && overlayInput.value !== text) overlayInput.value = text;
 }
 
@@ -1446,7 +1601,7 @@ function openGlobalSearch(prefill) {
   state.searchOpen = true;
   overlay.classList.add('open');
   overlay.setAttribute('aria-hidden', 'false');
-  if (prefill === undefined) syncSearchInputs(input.value || $('#topbar-search-input')?.value || state.searchQuery || '');
+  if (prefill === undefined) syncSearchInputs(input.value || state.searchQuery || '');
   else syncSearchInputs(prefill);
   setTimeout(() => {
     input.focus();
@@ -1670,8 +1825,15 @@ function handleViewNumberShortcut(e) {
   }
   if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
   if (shouldIgnoreGlobalShortcut(e.target)) return false;
-  if (!/^[1-7]$/.test(e.key)) return false;
-  const view = viewShortcutMap()[Number(e.key) - 1];
+  const code = String(e.code || '');
+  let index = -1;
+  if (/^Digit[1-7]$/.test(code)) {
+    index = Number(code.slice(5)) - 1;
+  } else if (/^Numpad[1-7]$/.test(code)) {
+    index = Number(code.slice(6)) - 1;
+  }
+  if (index < 0) return false;
+  const view = viewShortcutMap()[index];
   if (!view) return false;
   e.preventDefault();
   e.stopImmediatePropagation();
@@ -1794,7 +1956,7 @@ async function loadServerSettings() {
       storage_path: '',
       libraries: [],
       thumbnail_dir: '',
-      thumbnail_size: 256,
+      thumbnail_size: 512,
       trash_dir: '',
       use_system_player: false,
       jwt_secret_masked: '未加载',
@@ -1843,13 +2005,12 @@ function applyServerSettings(data = {}) {
   state.serverSettings.storage_path = data.storage_path || '';
   state.serverSettings.libraries = normalizeLibraryList(data.libraries, data.storage_path || '');
   state.serverSettings.thumbnail_dir = data.thumbnail_dir || '';
-  state.serverSettings.thumbnail_size = Math.min(512, Math.max(96, Number(data.thumbnail_size) || 256));
+  state.serverSettings.thumbnail_size = Math.min(1024, Math.max(96, Number(data.thumbnail_size) || 512));
   state.serverSettings.trash_dir = data.trash_dir || '';
   state.serverSettings.use_system_player = !!data.use_system_player;
   state.serverSettings.jwt_secret_masked = data.jwt_secret_masked || '未设置';
   state.serverSettings.users = Array.isArray(data.users) ? data.users : [];
-  state.theme = data.theme || 'light';
-  document.documentElement.dataset.theme = state.theme;
+  setThemeValue(hasManualThemePreference() ? data.theme : systemTheme());
   state.gridSize = Math.min(260, Math.max(72, Number(data.grid_size) || 180));
   state.gridGap = Math.min(24, Math.max(0, Number(data.grid_gap) || 8));
   state.thumbRadius = Math.min(24, Math.max(0, Number(data.thumb_radius) || 8));
@@ -1864,6 +2025,7 @@ function applyServerSettings(data = {}) {
   state.continueLastVideoPosition = data.continue_last_video_position !== false;
   updatePlayerKeymapSource(data.player_keymap || '');
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
+  updateGridScaleProgress();
   applyDisplaySettings();
   applyLightboxZoom();
   updateSlideshowControls();
@@ -1880,7 +2042,7 @@ function buildSettingsPayload() {
     storage_path: activePath,
     libraries,
     thumbnail_dir: state.serverSettings.thumbnail_dir || '',
-    thumbnail_size: state.serverSettings.thumbnail_size || 256,
+    thumbnail_size: state.serverSettings.thumbnail_size || 512,
     trash_dir: state.serverSettings.trash_dir || '',
     use_system_player: !!state.serverSettings.use_system_player,
     theme: state.theme || 'light',
@@ -1913,6 +2075,12 @@ async function uploadLibraryLogo(index, file) {
 }
 async function deleteLibraryLogo(index) {
   const resp = await api.del(`/api/settings/libraries/${index}/logo`);
+  state.serverSettings = resp.data || state.serverSettings;
+  applyServerSettings(state.serverSettings);
+  return resp;
+}
+async function refreshLibraryLogos(replaceExisting = false) {
+  const resp = await api.post('/api/settings/libraries/logos/refresh', { replace_existing: !!replaceExisting });
   state.serverSettings = resp.data || state.serverSettings;
   applyServerSettings(state.serverSettings);
   return resp;
@@ -2117,12 +2285,14 @@ function handleLightboxKeydown(e) {
   }
   return false;
 }
-function renderGridScaleControl() {
-  return `<label class="grid-scale" title="调整每页显示密度">
-    <span class="grid-scale-step" aria-hidden="true">-</span>
-    <input type="range" id="grid-scale" min="72" max="260" step="8" value="${state.gridSize}">
-    <span class="grid-scale-step" aria-hidden="true">+</span>
-  </label>`;
+function renderGridScaleButton() {
+  const label = `缩放，当前 ${state.gridSize}px`;
+  return `<div class="floating-grid-scale-control" id="grid-scale-control">
+    <button class="floating-search-btn floating-grid-scale-btn" id="grid-scale-btn" type="button" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}">${icons.gridScaleButton || icons.search}</button>
+    <label class="floating-grid-scale-slider" for="floating-grid-scale-input" aria-label="照片墙缩放">
+      <input id="floating-grid-scale-input" type="range" min="72" max="260" step="8" value="${state.gridSize}">
+    </label>
+  </div>`;
 }
 function renderTimelineOrderControl() {
   const ascending = state.timelineOrder === 'asc';
@@ -2141,14 +2311,6 @@ function renderAlbumViewModeControl() {
     <button class="media-filter-btn album-view-btn ${state.albumViewMode === 'grid' ? 'active' : ''}" id="album-view-grid-btn" type="button" title="大图" aria-label="大图" aria-pressed="${state.albumViewMode === 'grid' ? 'true' : 'false'}">${icons.albumViewGrid}</button>
     <button class="media-filter-btn album-view-btn ${state.albumViewMode === 'list' ? 'active' : ''}" id="album-view-list-btn" type="button" title="列表" aria-label="列表" aria-pressed="${state.albumViewMode === 'list' ? 'true' : 'false'}">${icons.albumViewList}</button>
   </div>`;
-}
-function bindGridScaleControl() {
-  const input = $('#grid-scale');
-  if (!input) return;
-  input.addEventListener('input', () => {
-    setGridScale(input.value);
-    persistGridScaleSoon();
-  });
 }
 async function revealInFinder(photoId) {
   try {
@@ -2190,6 +2352,7 @@ const state = {
   albumHasMore: true,
   albumLoading: false,
   pendingAlbumPhotoID: null,
+  lastAlbumDetailID: null,
   selected: new Set(),
   lightboxPhotos: [],
   lightboxIndex: 0,
@@ -2234,7 +2397,7 @@ const state = {
     storage_path: '',
     libraries: [],
     thumbnail_dir: '',
-    thumbnail_size: 256,
+    thumbnail_size: 512,
     trash_dir: '',
     use_system_player: false,
     jwt_secret_masked: '未加载',
@@ -2265,6 +2428,8 @@ const state = {
   favoriteHasMore: true,
   favoriteLoading: false,
   favoriteTotal: 0,
+  timelineAutoLoadPaused: false,
+  randomAlbumAutoLoadPaused: false,
   memoryPhotos: [],
   memoryEntries: [],
   memoriesLoading: false,
@@ -2274,6 +2439,7 @@ const state = {
   settingsScrollRestorePending: true,
   lightboxPlaybackToken: 0,
   lightboxMediaLoading: false,
+  lightboxUiIdleTimer: null,
   lightboxVolumeTimer: null,
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
@@ -2298,6 +2464,7 @@ const state = {
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
   videoBookmarks: loadVideoBookmarks(),
   videoBookmarkSaveTimer: null,
+  activePreloadJobs: new Set(),
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
@@ -2308,12 +2475,14 @@ const state = {
   randomAlbumBulkLoading: false,
   randomAlbumBulkCancelRequested: false,
   randomAlbumBulkAbortController: null,
+  timelineLoadAbortController: null,
   lightboxPageScrollTop: 0,
   pendingLibraryLogoGuide: null,
   pendingLibraryLogoCrop: null,
   libraryRandomLogos: {},
   libraryRandomLogoTried: {},
   libraryRandomLogoLoading: false,
+  libraryLogosRefreshStarted: false,
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -2405,6 +2574,49 @@ function hideBlockingProgress() {
   const overlay = $('#blocking-progress');
   if (overlay) overlay.classList.remove('show');
 }
+
+function cancelActivePreloads() {
+  for (const job of state.activePreloadJobs) {
+    if (!job || !job.img) continue;
+    job.img.onload = null;
+    job.img.onerror = null;
+    job.img.src = '';
+    if (typeof job.resolve === 'function') job.resolve(false);
+  }
+  state.activePreloadJobs.clear();
+}
+
+function pauseAutoLoadMore(kind = '') {
+  if (kind === 'timeline') {
+    state.timelineAutoLoadPaused = true;
+  } else if (kind === 'random-album') {
+    state.randomAlbumAutoLoadPaused = true;
+  }
+}
+
+function resumeAutoLoadMore(kind = '') {
+  if (kind === 'timeline') {
+    state.timelineAutoLoadPaused = false;
+    if (state.view === 'timeline') {
+      observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
+      maybeLoadMoreImmediately('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
+    }
+  } else if (kind === 'random-album') {
+    state.randomAlbumAutoLoadPaused = false;
+    if (state.view === 'random-album') {
+      observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+      maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+    }
+  }
+}
+
+function armAutoLoadMoreResume(kind = '') {
+  const resume = () => resumeAutoLoadMore(kind);
+  window.addEventListener('wheel', resume, { once: true, passive: true });
+  window.addEventListener('touchmove', resume, { once: true, passive: true });
+  window.addEventListener('keydown', resume, { once: true });
+}
+
 function setLightboxMediaLoading(loading) {
   state.lightboxMediaLoading = !!loading;
   const spinner = $('#lb-loading');
@@ -2440,16 +2652,14 @@ function closeContextMenu() {
 
 // ── 渲染框架 ──────────────────────────────────────────
 function renderApp() {
-  const isDark = document.documentElement.dataset.theme === 'dark';
   const navItem = (view, icon, label, active = state.view === view) =>
-    `<a class="nav-item${active ? ' active' : ''}" href="#" data-view="${view}" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${icon}<span class="nav-label">${escapeHTML(label)}</span></a>`;
+    `<a class="nav-item${active ? ' active' : ''}" href="#" data-view="${view}" data-label="${escapeHTML(label)}" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${navIconMarkup(view, active) || icon}<span class="nav-label">${escapeHTML(label)}</span></a>`;
   document.body.innerHTML = `
 <div class="drawer-overlay" id="drawer-overlay"></div>
 <div id="app">
   <div class="sidebar-peek-zone" id="sidebar-peek-zone" aria-hidden="true"></div>
+  <button class="nav-logo nav-logo-floating" id="nav-logo-btn" type="button" title="打开资源库设置">${renderNavLogo()}</button>
   <nav class="nav" id="main-nav">
-    <button class="nav-logo" id="nav-logo-btn" type="button" title="打开资源库设置">${renderNavLogo()}</button>
-    <button class="nav-item nav-compact-toggle" id="nav-compact-toggle" type="button" title="折叠侧栏" aria-label="折叠侧栏">${icons.menu}<span class="nav-label">折叠侧栏</span></button>
     ${navItem('timeline', icons.timeline, '时间线')}
     ${navItem('favorites', icons.favorite, '个人收藏')}
     ${navItem('random-album', icons.shuffle, '乱序相册')}
@@ -2458,31 +2668,22 @@ function renderApp() {
     ${navItem('trash', icons.trash, '回收站')}
     ${navItem('settings', icons.settings, '设置')}
     <div class="nav-spacer"></div>
-    <div class="nav-bottom">
-      <a class="nav-item" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer" title="源码仓库" aria-label="源码仓库">${icons.github}<span class="nav-label">源码仓库</span></a>
-      <a class="nav-item" href="#" id="theme-btn" title="切换主题" aria-label="切换主题"><span class="theme-icon">${isDark ? icons.sun : icons.moon}</span><span class="nav-label">切换主题</span></a>
-      <a class="nav-item" href="#" id="logout-btn" title="退出登录" aria-label="退出登录">${icons.logout}<span class="nav-label">退出登录</span></a>
-      <div class="nav-separator" aria-hidden="true"></div>
-      <a class="nav-item nav-item-danger" href="#" id="shutdown-btn" title="退出程序" aria-label="退出程序">${icons.shutdown}<span class="nav-label">退出程序</span></a>
-    </div>
   </nav>
   <div class="main">
     <div class="topbar">
       <button class="hamburger" id="hamburger-btn" aria-label="菜单">
         <span></span><span></span><span></span>
       </button>
-      <span class="topbar-title" id="topbar-title"></span>
+      <span class="topbar-title" id="topbar-title" data-note="${escapeHTML(topbarNoteText())}"></span>
+      <div class="topbar-leading" id="topbar-leading"></div>
       <div class="topbar-meta" id="topbar-meta"></div>
-      <label class="global-search-btn" id="global-search-btn" aria-label="搜索" title="搜索">
-        <span class="global-search-icon">${icons.search}</span>
-        <span class="global-search-text">搜索</span>
-        <input id="topbar-search-input" type="search" autocomplete="off" spellcheck="false" placeholder="搜索资源库">
-      </label>
       <div id="topbar-actions"></div>
     </div>
     <div class="content" id="content"></div>
   </div>
 </div>
+<button class="floating-search-btn" id="floating-search-btn" type="button" aria-label="搜索" title="搜索">${icons.floatingSearch || icons.search}</button>
+${renderGridScaleButton()}
 ${renderLightbox()}
 ${renderSearchOverlay()}
 ${renderUploadModal()}
@@ -2497,6 +2698,7 @@ ${renderLibraryLogoGuideModal()}`;
   bindNav();
   bindGlobal();
   syncSidebarUI();
+  syncRangeProgress();
   ensureSettingsDataLoaded();
   startLibraryBuildPolling();
   renderView();
@@ -2504,14 +2706,31 @@ ${renderLibraryLogoGuideModal()}`;
 
 function bindNav() {
   $$('.nav-item[data-view]').forEach(a => {
-    a.addEventListener('click', e => { e.preventDefault(); closeDrawer(); switchView(a.dataset.view); });
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      closeDrawer();
+      const nav = $('#main-nav');
+      const isActive = a.classList.contains('active');
+      if (isCompactNavLayout()) {
+        if (isActive && nav && !nav.classList.contains('nav-picker-open')) {
+          setNavPickerOpen(true);
+          return;
+        }
+        if (isActive && nav && nav.classList.contains('nav-picker-open')) {
+          closeNavPicker();
+          return;
+        }
+      }
+      closeNavPicker();
+      if (a.dataset.view === 'albums' && state.lastAlbumDetailID) {
+        openLastAlbumDetail();
+        return;
+      }
+      switchView(a.dataset.view);
+    });
   });
   const navLogoBtn = $('#nav-logo-btn');
   if (navLogoBtn) navLogoBtn.addEventListener('click', () => openLibrarySettings());
-  $('#nav-compact-toggle')?.addEventListener('click', toggleSidebarCompact);
-  $('#theme-btn').addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
-  $('#shutdown-btn').addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
-  $('#logout-btn').addEventListener('click', e => { e.preventDefault(); logout(); });
 
   // 汉堡按钮 / 抽屉 (b-6)
   const hamburger = $('#hamburger-btn');
@@ -2520,7 +2739,18 @@ function bindNav() {
   if (overlay)   overlay.addEventListener('click', closeDrawer);
   window.addEventListener('resize', () => {
     syncSidebarUI();
-    if ($('#lightbox')?.classList.contains('open')) applyLightboxZoom();
+    if (!isCompactNavLayout()) closeNavPicker();
+    if ($('#lightbox')?.classList.contains('open')) {
+      applyLightboxZoom();
+      updateLightboxHeaderLayout();
+    }
+  });
+  document.addEventListener('click', e => {
+    const nav = $('#main-nav');
+    if (!nav || !nav.classList.contains('nav-picker-open')) return;
+    if (e.target.closest('#main-nav')) return;
+    if (e.target.closest('#nav-logo-btn')) return;
+    closeNavPicker();
   });
 }
 
@@ -2555,9 +2785,42 @@ function openLibrarySettings() {
   switchView('settings');
 }
 
+function openLastAlbumDetail() {
+  const albumID = Number(state.lastAlbumDetailID) || 0;
+  if (!albumID) {
+    switchView('albums');
+    return;
+  }
+  if (state.currentAlbum && Number(state.currentAlbum.id) === albumID) {
+    state.currentAlbumID = albumID;
+    state.view = 'album-detail';
+    setHashView('album-detail', albumID);
+    $$('.nav-item[data-view]').forEach(a => {
+      const active = a.dataset.view === 'albums';
+      a.classList.toggle('active', active);
+      a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
+    });
+    applyLibraryBranding();
+    renderView();
+    return;
+  }
+  state.currentAlbum = null;
+  state.currentAlbumID = albumID;
+  state.view = 'album-detail';
+  setHashView('album-detail', albumID);
+  $$('.nav-item[data-view]').forEach(a => {
+    const active = a.dataset.view === 'albums';
+    a.classList.toggle('active', active);
+    a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
+  });
+  applyLibraryBranding();
+  renderView();
+}
+
 function switchView(view) {
   saveViewScroll();
   disconnectLoadMoreObserver();
+  closeNavPicker();
   if (view === 'settings' && state.view !== 'settings') {
     state.settingsScrollRestorePending = true;
   }
@@ -2565,10 +2828,14 @@ function switchView(view) {
   state.selected.clear();
   if (view !== 'album-detail') state.pendingAlbumPhotoID = null;
   if (view !== 'album-detail') {
-    state.currentAlbumID = null;
+    if (view !== 'albums') state.currentAlbumID = null;
     setHashView(view); // c-2: 同步到 hash
   }
-  $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === view));
+  $$('.nav-item[data-view]').forEach(a => {
+    const active = a.dataset.view === view || (view === 'album-detail' && a.dataset.view === 'albums');
+    a.classList.toggle('active', active);
+    a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
+  });
   applyLibraryBranding();
   renderView();
 }
@@ -2643,6 +2910,8 @@ function renderLibraryBuild() {
 </div>`;
 }
 function renderView() {
+  const leading = $('#topbar-leading');
+  if (leading) leading.innerHTML = '';
   if (isLibraryBuildBlocking()) {
     renderLibraryBuild();
     return;
@@ -2771,6 +3040,11 @@ function closeOrCancelRandomAlbumLoadAll() {
   if (state.randomAlbumBulkLoading) {
     state.randomAlbumBulkCancelRequested = true;
     if (state.randomAlbumBulkAbortController) state.randomAlbumBulkAbortController.abort();
+    if (state.randomAlbumAbortController) state.randomAlbumAbortController.abort();
+    cancelActivePreloads();
+    disconnectLoadMoreObserver();
+    pauseAutoLoadMore('random-album');
+    armAutoLoadMoreResume('random-album');
     updateRandomAlbumLoadAllProgress(state.randomAlbumPhotos.length, state.randomAlbumPhotos.length, '正在取消…');
     $('#random-album-load-all-cancel').disabled = true;
     return;
@@ -2792,13 +3066,32 @@ function updateRandomAlbumLoadAllProgress(loaded, total, message = '') {
   }
 }
 
-function preloadThumbnail(photo) {
+function preloadThumbnail(photo, shouldCancel) {
   return new Promise(resolve => {
+    if (shouldCancel && shouldCancel()) {
+      resolve(false);
+      return;
+    }
     const img = new Image();
+    const job = {
+      img,
+      resolve: value => resolve(value),
+    };
+    state.activePreloadJobs.add(job);
+    const cleanup = value => {
+      img.onload = null;
+      img.onerror = null;
+      state.activePreloadJobs.delete(job);
+      resolve(value);
+    };
     img.decoding = 'async';
-    img.onload = resolve;
-    img.onerror = resolve;
+    img.onload = () => cleanup(true);
+    img.onerror = () => cleanup(false);
     img.src = mediaThumbURL(photo);
+    if (shouldCancel && shouldCancel()) {
+      img.src = '';
+      cleanup(false);
+    }
   });
 }
 
@@ -2808,7 +3101,8 @@ async function preloadThumbnailsInBatches(photos, onProgress, shouldCancel) {
   for (let i = 0; i < photos.length; i += batchSize) {
     if (shouldCancel && shouldCancel()) break;
     const batch = photos.slice(i, i + batchSize);
-    await Promise.allSettled(batch.map(preloadThumbnail));
+    await Promise.allSettled(batch.map(photo => preloadThumbnail(photo, shouldCancel)));
+    if (shouldCancel && shouldCancel()) break;
     loaded += batch.length;
     if (onProgress) onProgress(Math.min(loaded, photos.length), photos.length);
     await new Promise(resolve => requestAnimationFrame(resolve));
@@ -2820,6 +3114,7 @@ async function loadAllRandomAlbumPhotos() {
   state.randomAlbumBulkLoading = true;
   state.randomAlbumBulkCancelRequested = false;
   state.blockingInteraction = true;
+  disconnectLoadMoreObserver();
   const startBtn = $('#random-album-load-all-start');
   const cancelBtn = $('#random-album-load-all-cancel');
   if (startBtn) {
@@ -2900,11 +3195,14 @@ async function loadAllRandomAlbumPhotos() {
       cancelBtn.disabled = false;
       cancelBtn.textContent = '关闭';
     }
+    if (state.view === 'random-album') {
+      observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+    }
   }
 }
 
 async function loadMoreRandomAlbum() {
-  if (state.randomAlbumLoading || !state.randomAlbumHasMore) return;
+  if (state.randomAlbumLoading || state.randomAlbumBulkLoading || state.randomAlbumAutoLoadPaused || !state.randomAlbumHasMore) return;
   state.randomAlbumLoading = true;
   try {
     state.randomAlbumAbortController = new AbortController();
@@ -2925,16 +3223,21 @@ async function loadMoreRandomAlbum() {
     state.randomAlbumLoading = false;
     state.randomAlbumAbortController = null;
     updateRandomAlbumLoadMoreUI();
-    maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
+    maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
   }
 }
 
 async function renderRandomAlbum() {
+  state.randomAlbumAutoLoadPaused = false;
   $('#topbar-title').textContent = '乱序相册';
-  $('#topbar-meta').innerHTML = renderMediaKindFilterControl() + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'random-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部', variant: 'accent' })}${renderTopbarGlassButton({ id: 'reshuffle-btn', icon: icons.topbarShuffle, label: '重新打乱' })}</div>`;
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'reshuffle-btn', icon: icons.topbarShuffle, label: '打乱相册顺序', variant: 'accent' }),
+  ]);
+  $('#topbar-meta').innerHTML = renderMediaKindFilterControl();
+  $('#topbar-actions').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'random-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部', variant: 'accent' }),
+  ]);
   bindMediaKindFilterControl();
-  bindGridScaleControl();
   $('#random-load-all-btn').addEventListener('click', openRandomAlbumLoadAllModal);
   $('#reshuffle-btn').addEventListener('click', async () => {
     state.randomAlbumSeed = Date.now();
@@ -2952,7 +3255,7 @@ async function renderRandomAlbum() {
   if (state.randomAlbumPhotos.length) {
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
     renderRandomAlbumGrid();
-    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
+    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
     restoreViewScroll('random-album');
     return;
   }
@@ -2966,7 +3269,7 @@ async function renderRandomAlbum() {
     state.randomAlbumLoaded = false;
     state.randomAlbumTotal = 0;
     await loadMoreRandomAlbum();
-    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading);
+    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
     restoreViewScroll('random-album');
   } catch (e) {
     $('#random-album-wrap').innerHTML = `<p style="color:var(--danger)">加载失败: ${(e && e.error) || e}</p>`;
@@ -2996,6 +3299,8 @@ function updateRandomAlbumLoadMoreUI() {
     loadMore.innerHTML = `<div class="spinner"></div>正在载入乱序媒体… 已读取 ${state.randomAlbumPhotos.length}${state.randomAlbumTotal ? ` / ${state.randomAlbumTotal}` : ''} 条 <button class="btn btn-sm" id="random-page-cancel" type="button">取消</button>`;
     $('#random-page-cancel')?.addEventListener('click', () => {
       if (state.randomAlbumAbortController) state.randomAlbumAbortController.abort();
+      pauseAutoLoadMore('random-album');
+      armAutoLoadMoreResume('random-album');
     });
     return;
   }
@@ -3008,8 +3313,12 @@ function updateRandomAlbumLoadMoreUI() {
 
 async function renderSettings() {
   $('#topbar-title').textContent = '设置';
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'settings-save-top-btn', icon: icons.topbarSave, label: '保存', variant: 'accent', disabled: !state.settingsDirty }),
+    renderTopbarGlassButton({ id: 'settings-save-restart-top-btn', icon: icons.topbarSaveRestart, label: '保存并重启' }),
+  ]);
   $('#topbar-meta').innerHTML = '';
-  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'settings-save-restart-top-btn', icon: icons.topbarSaveRestart, label: '保存并重启' })}${renderTopbarGlassButton({ id: 'settings-save-top-btn', icon: icons.topbarSave, label: '保存设置', variant: 'accent', disabled: !state.settingsDirty })}</div>`;
+  $('#topbar-actions').innerHTML = '';
   if (!state.settingsReady) {
     $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>加载设置中…</div>`;
     await Promise.allSettled([ensureSettingsDataLoaded(), loadShareMap()]);
@@ -3025,6 +3334,7 @@ async function renderSettings() {
       restoreViewScroll('settings');
       state.settingsScrollRestorePending = false;
     }
+    refreshMissingLibraryLogosOnce();
   } catch (e) {
     console.error('render settings failed', e);
     $('#content').innerHTML = `<div class="card settings-panel"><h3>设置加载失败</h3><p>设置项已经回退到当前可用值，你可以刷新后重试。</p><p style="color:var(--danger)">${(e && e.message) || e}</p></div>`;
@@ -3043,37 +3353,41 @@ function renderLibrarySettingsRows() {
   return libraries.map((library, index) => renderLibrarySettingsRow(library, index)).join('');
 }
 
+function renderLibraryAccentSwatches(accentColor) {
+  const color = normalizeHexColor(accentColor) || defaultLibraryAccentPalette[0];
+  const weights = [100, 82, 64, 46, 30, 18];
+  return `<div class="settings-library-swatches" aria-hidden="true">
+    ${weights.map((weight, index) => `<span style="--swatch-mix:${weight}%;--swatch-color:${color};--swatch-layer:${weights.length - index}"></span>`).join('')}
+  </div>`;
+}
+
 function renderLibrarySettingsRow(library = {}, index = 0) {
   const name = library.name || `资源库 ${index + 1}`;
   const path = library.path || '';
   const logoAsset = library.logo_asset || '';
   const logoURL = library.logo_image_url || '';
   const accentColor = resolveLibraryAccentColor(library);
-  const accentTextColor = readableTextColorForBackground(accentColor);
   const isActive = path && path === (state.serverSettings.storage_path || '');
   return `
-    <div class="settings-library-row${isActive ? ' active' : ''}" data-library-index="${index}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" style="--library-accent:${accentColor};--library-accent-text:${accentTextColor}">
-      <div class="settings-library-logo-block">
-        <div class="settings-library-logo-preview"></div>
-      </div>
-      <div class="settings-library-fields">
-        <input class="settings-library-name" type="hidden" value="${escapeHTML(name)}">
-        <input class="settings-library-path" type="hidden" value="${escapeHTML(path)}">
-        <input class="settings-library-accent" type="hidden" value="${accentColor}">
-        <div class="settings-library-name-display">${escapeHTML(name)}</div>
-        <div class="settings-library-path-display">${escapeHTML(path || '尚未设置路径')}</div>
-        <div class="settings-library-meta-row">
-          ${isActive ? '<span class="settings-library-status" style="--highlight-bg:' + accentColor + ';--highlight-text:' + accentTextColor + '">当前启用</span>' : ''}
+    <div class="settings-library-row${isActive ? ' active' : ''}" draggable="true" data-library-index="${index}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" style="--library-accent:${accentColor}">
+      <div class="settings-library-main">
+        <div class="settings-library-logo-block">
+          <div class="settings-library-logo-preview"></div>
+        </div>
+        <div class="settings-library-fields">
+          <input class="settings-library-name" type="hidden" value="${escapeHTML(name)}">
+          <input class="settings-library-path" type="hidden" value="${escapeHTML(path)}">
+          <input class="settings-library-accent" type="hidden" value="${accentColor}">
+          <div class="settings-library-name-display">${escapeHTML(name)}</div>
+          <div class="settings-library-path-display">${escapeHTML(path || '尚未设置路径')}</div>
+          <div class="settings-library-meta-row">
+            ${renderLibraryAccentSwatches(accentColor)}
+          </div>
         </div>
       </div>
       <div class="settings-library-row-actions">
-        <div class="settings-library-move-group">
-          <button class="btn btn-sm settings-library-move settings-library-move-up" type="button" data-library-move="up">上移</button>
-          <button class="btn btn-sm settings-library-move settings-library-move-down" type="button" data-library-move="down">下移</button>
-        </div>
-        <button class="btn btn-sm settings-library-edit" type="button">编辑资源库</button>
-        <button class="btn btn-sm settings-library-switch" type="button">切换资源库</button>
-        <button class="btn btn-danger btn-sm settings-library-remove" type="button">删除资源库</button>
+        <button class="settings-library-icon-action settings-library-edit" type="button" title="编辑资源库" aria-label="编辑资源库">${icons.libraryCardEdit}</button>
+        <button class="settings-library-icon-action settings-library-remove" type="button" title="删除资源库" aria-label="删除资源库">${icons.libraryCardDelete}</button>
       </div>
     </div>`;
 }
@@ -3110,30 +3424,14 @@ function syncLibraryDraftsToRuntime() {
   return state.serverSettings.libraries;
 }
 
-function updateLibraryRowMoveButtons() {
-  const rows = $$('.settings-library-row');
-  rows.forEach((row, index) => {
-    const upBtn = $('.settings-library-move-up', row);
-    const downBtn = $('.settings-library-move-down', row);
-    if (upBtn) upBtn.disabled = index === 0;
-    if (downBtn) downBtn.disabled = index === rows.length - 1;
-  });
-}
-
-function moveLibraryRow(row, direction) {
-  const list = $('#settings-library-list');
-  if (!row || !list) return false;
-  const sibling = direction === 'up' ? row.previousElementSibling : row.nextElementSibling;
-  if (!sibling || !sibling.classList.contains('settings-library-row')) return false;
-  if (direction === 'up') list.insertBefore(row, sibling);
-  else list.insertBefore(sibling, row);
+let draggedLibraryRow = null;
+let libraryDragChanged = false;
+function commitLibraryRowOrderChange() {
   reindexLibrarySettingsRows();
   syncActiveLibrarySelect();
   applyLibraryBranding();
   setSettingsDirty();
-  return true;
 }
-
 function buildLibraryLogoPreview(row, library = {}) {
   const preview = $('.settings-library-logo-preview', row);
   const file = row._pendingLogoFile || null;
@@ -3153,7 +3451,7 @@ function buildLibraryLogoPreview(row, library = {}) {
     preview.classList.toggle('has-image', !!logoURL);
     preview.innerHTML = logoURL
       ? `<img src="${logoURL}" alt="${escapeHTML(displayName || '资源库 Logo')}">`
-      : `<span>${libraryFallbackText(displayLibrary)}</span>`;
+      : `<span class="library-avatar-placeholder">${icons.photo}</span>`;
     preview.style.borderColor = accent;
     preview.style.boxShadow = 'none';
     applyLibraryPreviewFallback(preview, displayLibrary);
@@ -3237,6 +3535,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   logoInput.hidden = true;
   modal.appendChild(logoInput);
   let pendingFile = editing ? row._pendingLogoFile || null : null;
+  let pendingLogoNeedsCrop = editing ? !!row._pendingLogoNeedsCrop : false;
   let logoAsset = draft.logo_asset || '';
   let logoPreviewUrl = draft.logo_image_url || '';
   let logoAction = editing ? row.dataset.logoAction || '' : '';
@@ -3254,7 +3553,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     };
     const logoURL = logoPreviewUrl || resolveLibraryLogoURL(library);
     preview.classList.toggle('has-image', !!logoURL);
-    preview.innerHTML = logoURL ? `<img src="${logoURL}" alt="${escapeHTML(library.name || '资源库头像')}">` : `<span>${libraryFallbackText(library)}</span>`;
+    preview.innerHTML = logoURL ? `<img src="${logoURL}" alt="${escapeHTML(library.name || '资源库头像')}">` : `<span class="library-avatar-placeholder">${icons.photo}</span>`;
     preview.style.borderColor = accentValue;
     preview.style.boxShadow = 'none';
     accentInput.value = accentValue;
@@ -3291,6 +3590,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     openLibraryLogoGuideModal(file, croppedFile => {
       if (logoPreviewUrl && logoPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(logoPreviewUrl);
       pendingFile = croppedFile;
+      pendingLogoNeedsCrop = false;
       logoAction = 'upload';
       logoPreviewUrl = URL.createObjectURL(croppedFile);
       updatePreview();
@@ -3317,6 +3617,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     const nextRow = createLibraryRowElement(library, index);
     nextRow.dataset.logoAction = logoAction;
     nextRow._pendingLogoFile = pendingFile;
+    nextRow._pendingLogoNeedsCrop = pendingLogoNeedsCrop;
     if (editing && row.classList.contains('active')) state.serverSettings.storage_path = library.path;
     if (editing) row.replaceWith(nextRow);
     else {
@@ -3365,21 +3666,6 @@ function syncActiveLibrarySelect() {
   $$('.settings-library-row').forEach(row => {
     const path = $('.settings-library-path', row)?.value.trim() || '';
     row.classList.toggle('active', !!path && path === activePath);
-    let status = $('.settings-library-status', row);
-    if (path && path === activePath) {
-      const accent = normalizeHexColor($('.settings-library-accent', row)?.value) || resolveLibraryAccentColor(libraryDraftFromRow(row));
-      const text = readableTextColorForBackground(accent);
-      if (!status) {
-        $('.settings-library-meta-row', row)?.insertAdjacentHTML('afterbegin', `<span class="settings-library-status">当前启用</span>`);
-        status = $('.settings-library-status', row);
-      }
-      if (status) {
-        status.style.setProperty('--highlight-bg', accent);
-        status.style.setProperty('--highlight-text', text);
-      }
-    } else if (status && path !== activePath) {
-      status.remove();
-    }
   });
   const floatingAdd = $('#settings-add-library-btn');
   const activeLibrary = resolveActiveLibrary(libraries, activePath);
@@ -3394,13 +3680,27 @@ function reindexLibrarySettingsRows() {
   $$('.settings-library-row').forEach((row, index) => {
     row.dataset.libraryIndex = String(index);
   });
-  updateLibraryRowMoveButtons();
 }
 
 function setSettingsDirty(dirty = true) {
   state.settingsDirty = !!dirty;
   const saveBtn = $('#settings-save-top-btn');
   if (saveBtn) saveBtn.disabled = !state.settingsDirty;
+}
+
+async function refreshMissingLibraryLogosOnce() {
+  if (state.libraryLogosRefreshStarted || state.settingsDirty) return;
+  const libraries = normalizeLibraries(state.serverSettings.libraries, state.serverSettings.storage_path || '');
+  if (!libraries.some(library => !library.logo_asset && !library.logo_image_url && !library.logoImageUrl)) return;
+  state.libraryLogosRefreshStarted = true;
+  try {
+    const resp = await refreshLibraryLogos(false);
+    const data = resp.result || {};
+    if (data.updated > 0) showToast(`已更新 ${data.updated} 个资源库头像`);
+    if (state.view === 'settings' && !state.settingsDirty) renderSettings();
+  } catch (e) {
+    console.warn('批量更新资源库头像失败', e);
+  }
 }
 
 async function persistSettingsWithLibraryAssets() {
@@ -3475,7 +3775,7 @@ function collectSettingsFormState() {
   state.serverSettings.port = parseInt($('#settings-port')?.value, 10) || state.serverSettings.port || 8080;
   state.serverSettings.storage_path = $('#settings-active-library')?.value.trim() || state.serverSettings.storage_path || state.serverSettings.libraries[0].path;
   state.serverSettings.thumbnail_dir = $('#settings-thumbnail-dir').value.trim();
-  state.serverSettings.thumbnail_size = state.serverSettings.thumbnail_size || 256;
+  state.serverSettings.thumbnail_size = clampThumbnailBuildSize($('#settings-thumbnail-size')?.value || state.serverSettings.thumbnail_size || 512);
   state.serverSettings.trash_dir = $('#settings-trash-dir').value.trim();
   state.serverSettings.use_system_player = !!state.serverSettings.use_system_player;
   updatePlayerKeymapSource($('#settings-player-keymap').value);
@@ -3573,6 +3873,7 @@ function renderSettingsContent() {
   const users = (state.serverSettings.users || []).map(name => `<span class="settings-chip">${name}</span>`).join('');
   const activeAccent = resolveLibraryAccentColor(currentLibraryBrand() || {});
   const activeAccentText = readableTextColorForBackground(activeAccent);
+  const thumbnailBuildSize = clampThumbnailBuildSize(state.serverSettings.thumbnail_size || 512);
   $('#content').innerHTML = `
 <div class="settings-layout">
   <section class="card settings-panel settings-panel-application">
@@ -3601,6 +3902,10 @@ function renderSettingsContent() {
       <div class="settings-control">
         <label for="settings-thumb-radius"><span>图像圆角</span><span id="settings-thumb-radius-value">${state.thumbRadius}px</span></label>
         <input class="input" id="settings-thumb-radius" type="range" min="0" max="24" step="1" value="${state.thumbRadius}">
+      </div>
+      <div class="settings-control">
+        <label for="settings-thumbnail-size"><span>缩略图生成大小</span><span id="settings-thumbnail-size-value">${thumbnailBuildSize}px</span></label>
+        <input class="input" id="settings-thumbnail-size" type="range" min="96" max="1024" step="32" value="${thumbnailBuildSize}">
       </div>
       <div class="settings-control">
         <label for="settings-thumbnail-dir"><span>缩略图目录</span><span>建议放到空间更充足的磁盘，重启后生效</span></label>
@@ -3695,6 +4000,17 @@ function renderSettingsContent() {
     </div>
   </section>
 
+  <section class="card settings-panel settings-panel-app">
+    <h3>应用配置</h3>
+    <p>这些入口从侧边栏移动到这里，保持浏览界面更轻盈。</p>
+    <div class="settings-actions settings-app-actions">
+      <a class="btn" id="settings-github-btn" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} 项目仓库</a>
+      <button class="btn" id="theme-btn" type="button"><span class="theme-icon">${document.documentElement.dataset.theme === 'dark' ? icons.sun : icons.moon}</span> 模式切换</button>
+      <button class="btn" id="logout-btn" type="button">${icons.logout} 退出登录</button>
+      <button class="btn btn-danger" id="shutdown-btn" type="button">${icons.shutdown} 退出程序</button>
+    </div>
+  </section>
+
   <section class="card settings-panel settings-panel-share">
     <h3>分享链接</h3>
     <p>这里集中查看、复制和删除当前账号创建的全部分享链接。</p>
@@ -3711,50 +4027,86 @@ function renderSettingsContent() {
   $('#settings-thumbnail-dir').value = state.serverSettings.thumbnail_dir || '';
   $('#settings-trash-dir').value = state.serverSettings.trash_dir || '';
   $('#settings-player-keymap').value = state.playerKeymapSource || '';
+  syncRangeProgress($('#content'));
 
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
 
-  async function switchLibraryAndRestart(row, button) {
-    const path = $('.settings-library-path', row)?.value.trim() || '';
-    if (!path) {
-      showToast('请先填写资源库路径');
-      return;
-    }
-    const select = $('#settings-active-library');
-    syncActiveLibrarySelect();
-    if (select) select.value = path;
-    state.serverSettings.storage_path = path;
-    applyLibraryBranding();
-    setSettingsDirty();
-    collectSettingsFormState();
-    await withButtonBusy(button, '切换中…', async () => {
-      await persistSettingsWithLibraryAssets();
-      const resp = await restartApp();
-      setSettingsDirty(false);
-      showToast((resp && resp.message) || '资源库已切换，服务正在重启', 2600);
-      setTimeout(() => location.reload(), 1800);
-    });
-  }
-
   function bindLibraryRow(row) {
-    $$('.settings-library-move', row).forEach(button => {
-      button.addEventListener('click', e => {
-        const direction = e.currentTarget.dataset.libraryMove;
-        moveLibraryRow(row, direction);
-      });
+    row.addEventListener('dragstart', e => {
+      if (e.target.closest('button, input, textarea, select')) {
+        e.preventDefault();
+        return;
+      }
+      draggedLibraryRow = row;
+      libraryDragChanged = false;
+      row.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', row.dataset.libraryIndex || '');
+      }
     });
-    $('.settings-library-switch', row)?.addEventListener('click', async e => {
-      const button = e.currentTarget;
+    row.addEventListener('dragend', () => {
+      if (draggedLibraryRow === row) draggedLibraryRow = null;
+      if (libraryDragChanged) {
+        commitLibraryRowOrderChange();
+        libraryDragChanged = false;
+        row._suppressNextClick = true;
+        setTimeout(() => { row._suppressNextClick = false; }, 120);
+      }
+      row.classList.remove('dragging');
+      $$('.settings-library-row.drag-over').forEach(item => item.classList.remove('drag-over'));
+    });
+    row.addEventListener('dragover', e => {
+      if (!draggedLibraryRow || draggedLibraryRow === row) return;
+      e.preventDefault();
+      const list = $('#settings-library-list');
+      if (!list) return;
+      $$('.settings-library-row.drag-over').forEach(item => item.classList.remove('drag-over'));
+      const previousSibling = draggedLibraryRow.previousElementSibling;
+      const previousParent = draggedLibraryRow.parentElement;
+      const rect = row.getBoundingClientRect();
+      const columns = getComputedStyle(list).gridTemplateColumns.split(' ').filter(Boolean).length;
+      const insertAfter = columns > 1
+        ? e.clientX > rect.left + rect.width / 2
+        : e.clientY > rect.top + rect.height / 2;
+      const reference = insertAfter ? row.nextElementSibling : row;
+      if (reference !== draggedLibraryRow) list.insertBefore(draggedLibraryRow, reference);
+      if (draggedLibraryRow.parentElement !== previousParent || draggedLibraryRow.previousElementSibling !== previousSibling) libraryDragChanged = true;
+      row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', e => {
+      if (!draggedLibraryRow) return;
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const movedRow = draggedLibraryRow;
+      movedRow.classList.remove('dragging');
+      draggedLibraryRow = null;
+      if (libraryDragChanged) {
+        commitLibraryRowOrderChange();
+        libraryDragChanged = false;
+        movedRow._suppressNextClick = true;
+        row._suppressNextClick = true;
+        setTimeout(() => {
+          movedRow._suppressNextClick = false;
+          row._suppressNextClick = false;
+        }, 120);
+      }
+    });
+    row.addEventListener('click', async e => {
+      if (row._suppressNextClick) return;
+      if (e.target.closest('button, input, textarea, select, .settings-library-row-actions')) return;
       const path = $('.settings-library-path', row)?.value.trim() || '';
       if (!path) {
         showToast('请先填写资源库路径');
         return;
       }
-      try {
-        await switchLibraryAndRestart(row, button);
-      } catch (err) {
-        alert('切换资源库失败: ' + ((err && err.error) || err.message || err));
-      }
+      if (path === (state.serverSettings.storage_path || '').trim()) return;
+      state.serverSettings.storage_path = path;
+      syncActiveLibrarySelect();
+      applyLibraryBranding();
+      setSettingsDirty();
+      showToast('资源库切换已暂存，点击“保存并重启”后生效');
     });
     $('.settings-library-edit', row)?.addEventListener('click', () => openLibraryEditorModal(row, bindLibraryRow));
     $('.settings-library-remove', row).addEventListener('click', () => {
@@ -3797,6 +4149,11 @@ function renderSettingsContent() {
   $('#settings-thumb-radius').addEventListener('input', e => {
     setThumbRadius(e.target.value);
     $('#settings-thumb-radius-value').textContent = `${state.thumbRadius}px`;
+    setSettingsDirty();
+  });
+  $('#settings-thumbnail-size').addEventListener('input', e => {
+    state.serverSettings.thumbnail_size = clampThumbnailBuildSize(e.target.value);
+    $('#settings-thumbnail-size-value').textContent = `${state.serverSettings.thumbnail_size}px`;
     setSettingsDirty();
   });
   $('#settings-lightbox-zoom').addEventListener('input', e => {
@@ -3864,6 +4221,9 @@ function renderSettingsContent() {
     localStorage.setItem('echogallery_auto_update', state.autoUpdateEnabled ? '1' : '0');
     showToast(state.autoUpdateEnabled ? '已开启自动更新提示' : '已关闭自动更新');
   });
+  $('#theme-btn')?.addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
+  $('#shutdown-btn')?.addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
+  $('#logout-btn')?.addEventListener('click', e => { e.preventDefault(); logout(); });
   refreshShareManagementUI();
   applyLibraryBranding();
   if (state.settingsFocus === 'libraries') {
@@ -3911,18 +4271,23 @@ function bindTrashSelectionBarHandlers() {
 }
 
 async function renderTimeline() {
+  state.timelineAutoLoadPaused = false;
   $('#topbar-title').textContent = '时间线';
+  $('#topbar-leading').innerHTML = renderTimelineOrderControl();
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '张已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
-  }) + `<span class="timeline-jump-status" id="timeline-jump-status" hidden></span>` + renderTimelineOrderControl() + renderMediaKindFilterControl() + renderGridScaleControl();
+  }) + `<span class="timeline-jump-status" id="timeline-jump-status" hidden></span>` + renderMediaKindFilterControl();
   $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'timeline-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部' })}${renderTopbarGlassButton({ id: 'upload-btn', icon: icons.topbarUpload, label: '上传', variant: 'accent' })}</div>`;
   bindMediaKindFilterControl();
-  bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
   $('#timeline-order-btn').addEventListener('click', () => {
     state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
     localStorage.setItem(timelineOrderStorageKey, state.timelineOrder);
+    state.photos = [];
+    state.timelineCursor = '';
+    state.timelineHasMore = true;
+    state.timelineTotal = 0;
     state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
     switchView('timeline');
   });
@@ -3930,18 +4295,26 @@ async function renderTimeline() {
   $('#upload-btn').addEventListener('click', openUploadModal);
 
   $('#content').innerHTML = `
-<div id="timeline-groups"></div>
+<div id="timeline-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
+
+  const hasPendingFocus = !!state.pendingTimelinePhotoID;
+  if (state.photos.length && !hasPendingFocus) {
+    await loadShareMap();
+    renderTimelineGrid();
+    observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
+    restoreViewScroll('timeline');
+    return;
+  }
 
   state.photos = [];
   state.timelineCursor = '';
   state.timelineHasMore = true;
   state.timelineTotal = 0;
-  const hasPendingFocus = !!state.pendingTimelinePhotoID;
   await loadShareMap();   // b-2: 加载分享状态
   await loadMoreTimeline();
   const focusedPending = await focusPendingTimelinePhoto();
-  observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading);
+  observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
   if (!hasPendingFocus || !focusedPending) restoreViewScroll('timeline');
 }
 
@@ -3990,6 +4363,11 @@ function closeOrCancelTimelineLoadAll() {
   if (state.timelineBulkLoading) {
     state.timelineBulkCancelRequested = true;
     if (state.timelineBulkAbortController) state.timelineBulkAbortController.abort();
+    if (state.timelineLoadAbortController) state.timelineLoadAbortController.abort();
+    cancelActivePreloads();
+    disconnectLoadMoreObserver();
+    pauseAutoLoadMore('timeline');
+    armAutoLoadMoreResume('timeline');
     updateTimelineLoadAllProgress(state.photos.length, state.timelineTotal, '正在取消…');
     $('#timeline-load-all-cancel').disabled = true;
     return;
@@ -4012,11 +4390,7 @@ function updateTimelineLoadAllProgress(loaded, total, message = '') {
 }
 
 function preloadTimelineThumbnails(photos) {
-  (photos || []).forEach(photo => {
-    const img = new Image();
-    img.decoding = 'async';
-    img.src = mediaThumbURL(photo);
-  });
+  void preloadThumbnailsInBatches(photos || [], null, () => state.timelineBulkCancelRequested);
 }
 
 async function fetchTimelinePage(cursor, limit, signal) {
@@ -4061,7 +4435,7 @@ async function loadAllTimelinePhotos() {
       cursor = state.timelineCursor;
       hasMore = state.timelineHasMore;
       loaded = state.photos.length;
-      renderTimelineGroups(photos, loaded - photos.length);
+      appendTimelineGrid(photos);
       preloadTimelineThumbnails(photos);
       updateTimelineLoadAllProgress(loaded, total, `正在加载… 已读取 ${loaded}${total ? ` / ${total}` : ''} 条`);
       const loadMore = $('#load-more');
@@ -4097,24 +4471,26 @@ async function loadAllTimelinePhotos() {
     $('#timeline-load-all-cancel').textContent = '关闭';
     updateLoadMoreUI('load-more', state.timelineHasMore);
     if (state.view === 'timeline') {
-      observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading);
+      observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
     }
   }
 }
 
 async function renderFavorites() {
   $('#topbar-title').textContent = '个人收藏';
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'download-all-favorites-btn', icon: icons.topbarDownloadFavorites, label: '下载全部收藏', variant: 'accent' }),
+  ]);
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.favorite} 取消收藏</button>`,
-  }) + renderMediaKindFilterControl() + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = renderTopbarGlassButton({ id: 'download-all-favorites-btn', icon: icons.topbarDownloadFavorites, label: '下载全部收藏', variant: 'accent' });
+  }) + renderMediaKindFilterControl();
+  $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
-  bindGridScaleControl();
   bindSelectionBarHandlers({ extraButtonID: 'unfavorite-sel-btn', extraAction: unfavoriteSelected });
 
   $('#content').innerHTML = `
-<div id="favorite-groups"></div>
+<div id="favorite-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
   $('#download-all-favorites-btn').addEventListener('click', downloadAllFavorites);
 
@@ -4130,9 +4506,10 @@ async function renderFavorites() {
 }
 
 async function loadMoreTimeline() {
-  if (state.timelineLoading || state.timelineBulkLoading || !state.timelineHasMore) return;
+  if (state.timelineLoading || state.timelineBulkLoading || state.timelineAutoLoadPaused || !state.timelineHasMore) return;
   state.timelineLoading = true;
   try {
+    state.timelineLoadAbortController = new AbortController();
     const params = new URLSearchParams({
       limit: state.pendingTimelinePhotoID ? '180' : '30',
       order: state.timelineOrder === 'asc' ? 'asc' : 'desc',
@@ -4140,63 +4517,70 @@ async function loadMoreTimeline() {
     appendMediaKindParam(params);
     if (state.timelineCursor) params.set('cursor', state.timelineCursor);
     const url = `/api/media?${params.toString()}`;
-    const page = await api.get(url);
+    const page = await api.get(url, { signal: state.timelineLoadAbortController.signal });
     state.timelineTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.timelineTotal;
     state.photos.push(...(page.photos || []));
     state.timelineCursor = page.next_cursor || '';
     state.timelineHasMore = page.has_more || false;
-    renderTimelineGroups(page.photos || [], state.photos.length - (page.photos || []).length);
-  } catch (e) { console.error(e); }
+    appendTimelineGrid(page.photos || []);
+  } catch (e) {
+    if (!e || e.name !== 'AbortError') console.error(e);
+  }
   finally {
     state.timelineLoading = false;
+    state.timelineLoadAbortController = null;
     updateLoadMoreUI('load-more', state.timelineHasMore);
-    maybeLoadMoreImmediately('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading);
+    maybeLoadMoreImmediately('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
   }
 }
 
-function renderTimelineGroups(newPhotos, offset) {
-  const container = $('#timeline-groups');
+function appendTimelineGrid(newPhotos) {
+  const container = $('#timeline-wrap');
   if (!container) return;
-  // 只有在确认当前筛选下确实没有任何媒体时，才展示空态。
-  if (offset === 0 && newPhotos.length === 0 && state.timelineTotal === 0 && !state.timelineHasMore) {
+  if (state.photos.length === 0 && newPhotos.length === 0 && state.timelineTotal === 0 && !state.timelineHasMore) {
     container.innerHTML = `<div class="empty">${icons.photo}<p>还没有媒体，点击右上角上传吧</p></div>`;
     return;
   }
-  const groups = groupByDate(newPhotos);
-  for (const [date, photos] of Object.entries(groups)) {
-    let group = container.querySelector(`[data-date="${CSS.escape(date)}"]`);
-    if (!group) {
-      group = el('div', 'date-group');
-      group.dataset.date = date;
-      group.innerHTML = `<div class="date-label"><span class="date-text">${date}</span><button class="date-select-all" type="button">全选</button></div><div class="photo-grid"></div>`;
-      group.querySelector('.date-select-all').addEventListener('click', () => selectAllInGroup(group));
-      container.appendChild(group);
-    }
-    const grid = group.querySelector('.photo-grid');
-    photos.forEach(p => grid.appendChild(makePhotoThumb(p, state.photos)));
+  if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
+  let grid = $('#timeline-grid');
+  if (!grid) {
+    grid = el('div', 'photo-grid');
+    grid.id = 'timeline-grid';
+    container.appendChild(grid);
   }
+  const fragment = document.createDocumentFragment();
+  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.photos)));
+  grid.appendChild(fragment);
 }
 
-function renderFavoriteGroups(newPhotos) {
-  const container = $('#favorite-groups');
+function renderTimelineGrid() {
+  const container = $('#timeline-wrap');
+  if (!container) return;
+  container.innerHTML = '';
+  if (state.photos.length) appendTimelineGrid(state.photos);
+  if (state.photos.length === 0 && !state.timelineHasMore && !state.timelineLoading) {
+    container.innerHTML = `<div class="empty">${icons.photo}<p>还没有媒体，点击右上角上传吧</p></div>`;
+  }
+  updateLoadMoreUI('load-more', state.timelineHasMore);
+}
+
+function appendFavoriteGrid(newPhotos) {
+  const container = $('#favorite-wrap');
   if (!container) return;
   if (state.favoritePhotos.length === 0 && newPhotos.length === 0) {
     container.innerHTML = `<div class="empty">${icons.favorite}<p>还没有加入个人收藏的媒体</p></div>`;
     return;
   }
-  const groups = groupByDate(newPhotos);
-  for (const [date, photos] of Object.entries(groups)) {
-    let group = container.querySelector(`[data-date="${CSS.escape(date)}"]`);
-    if (!group) {
-      group = el('div', 'date-group');
-      group.dataset.date = date;
-      group.innerHTML = `<div class="date-label"><span class="date-text">${date}</span><button class="date-select-all" type="button">全选</button></div><div class="photo-grid"></div>`;
-      group.querySelector('.date-select-all').addEventListener('click', () => selectAllInGroup(group));
-      container.appendChild(group);
-    }
-    const grid = group.querySelector('.photo-grid');
-    photos.forEach(p => grid.appendChild(makePhotoThumb(p, state.favoritePhotos)));
+  if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
+  let grid = $('#favorite-grid');
+  if (!grid) {
+    grid = el('div', 'photo-grid');
+    grid.id = 'favorite-grid';
+    container.appendChild(grid);
   }
+  const fragment = document.createDocumentFragment();
+  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.favoritePhotos)));
+  grid.appendChild(fragment);
 }
 
 function updateFavoriteTotalHint() {
@@ -4220,7 +4604,7 @@ async function loadMoreFavorites() {
     state.favoritePhotos.push(...(page.photos || []));
     state.favoriteCursor = page.next_cursor || '';
     state.favoriteHasMore = page.has_more || false;
-    renderFavoriteGroups(page.photos || []);
+    appendFavoriteGrid(page.photos || []);
   } catch (e) {
     console.error(e);
   } finally {
@@ -4253,11 +4637,14 @@ function rememberPhoto(photo) {
 
 async function renderMemories() {
   $('#topbar-title').textContent = '回忆';
-  $('#topbar-meta').innerHTML = renderMediaKindFilterControl() + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = renderTopbarGlassButton({ id: 'clear-memories-btn', icon: icons.topbarClearMemories, label: '清空回忆' });
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'clear-memories-btn', icon: icons.topbarClearMemories, label: '清除回忆' }),
+  ]);
+  $('#topbar-meta').innerHTML = renderMediaKindFilterControl();
+  $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
-  bindGridScaleControl();
   $('#clear-memories-btn')?.addEventListener('click', () => {
+    if (!confirm('确定要清空全部回忆记录吗？此操作只会移除浏览历史，不会删除媒体文件。')) return;
     localStorage.removeItem(memoriesStorageKey);
     state.memoryEntries = [];
     state.memoryPhotos = [];
@@ -4298,11 +4685,9 @@ function renderMemoryGroups() {
     return;
   }
   container.innerHTML = '';
-  const group = el('div', 'date-group');
-  group.innerHTML = `<div class="date-label"><span class="date-text">最近浏览</span></div><div class="photo-grid"></div>`;
-  const grid = group.querySelector('.photo-grid');
+  const grid = el('div', 'photo-grid');
   photos.forEach(photo => grid.appendChild(makePhotoThumb(photo, photos)));
-  container.appendChild(group);
+  container.appendChild(grid);
 }
 
 function isVideoMedia(photo) {
@@ -4329,6 +4714,15 @@ function mediaThumbURL(photo) {
 
 function mediaFileURL(photo) {
   return isVideoMedia(photo) ? `/media/files/${photo.uuid}` : `/media/photos/${photo.uuid}`;
+}
+
+function videoFormatLabel(photo) {
+  const ext = mediaExtension(photo).replace(/^\./, '').trim();
+  if (ext) return ext.toUpperCase();
+  const mime = String((photo && photo.mime_type) || '').toLowerCase();
+  if (mime.includes('quicktime')) return 'MOV';
+  const subtype = mime.split('/')[1]?.split(';')[0]?.trim();
+  return subtype ? subtype.replace(/^x-/, '').toUpperCase() : 'VIDEO';
 }
 
 function formatDuration(durationMS) {
@@ -4446,7 +4840,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const shareBadge = isShared
     ? `<span class="share-badge">${icons.shareSmall}</span>` : '';
   const mediaBadge = isVideoMedia(photo)
-    ? `<span class="media-badge">视频${photo.duration_ms ? ` · ${formatDuration(photo.duration_ms)}` : ''}</span>`
+    ? `<span class="media-badge">${escapeHTML(videoFormatLabel(photo))}${photo.duration_ms ? ` · ${formatDuration(photo.duration_ms)}` : ''}</span>`
     : '';
   const bookmarkCount = getVideoBookmarkCount(photo);
   const videoBookmarkBadge = bookmarkCount > 0
@@ -4722,14 +5116,8 @@ function removePhotoFromList(list, photoId) {
   return true;
 }
 
-function cleanupEmptyDateGroup(group) {
-  if (!group) return;
-  if (group.querySelector('.photo-thumb')) return;
-  group.remove();
-}
-
 function renderFavoritesEmptyStateIfNeeded() {
-  const container = $('#favorite-groups');
+  const container = $('#favorite-wrap');
   if (!container) return;
   if (container.querySelector('.photo-thumb')) return;
   container.innerHTML = `<div class="empty">${icons.favorite}<p>还没有加入个人收藏的媒体</p></div>`;
@@ -4749,9 +5137,7 @@ function removeFavoritePhotoFromUI(photoId) {
     updateSelectionBar();
     return;
   }
-  const group = thumb.closest('.date-group');
   thumb.remove();
-  cleanupEmptyDateGroup(group);
   renderFavoritesEmptyStateIfNeeded();
   updateSelectionModeUI();
   updateSelectionBar();
@@ -4929,8 +5315,11 @@ async function focusPendingTimelinePhoto() {
 // ── 相册列表 ──────────────────────────────────────────
 async function renderAlbums() {
   $('#topbar-title').textContent = '相册';
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'new-album-btn', icon: icons.topbarNewAlbum, label: '新建相册', variant: 'accent' }),
+  ]);
   $('#topbar-meta').innerHTML = renderAlbumViewModeControl();
-  $('#topbar-actions').innerHTML = renderTopbarGlassButton({ id: 'new-album-btn', icon: icons.topbarNewAlbum, label: '新建相册', variant: 'accent' });
+  $('#topbar-actions').innerHTML = '';
   $('#new-album-btn').addEventListener('click', openCreateAlbumModal);
   $('#album-view-grid-btn').addEventListener('click', () => {
     state.albumViewMode = 'grid';
@@ -4953,7 +5342,7 @@ function renderAlbumGrid() {
   const wrap = $('#album-grid-wrap');
   if (!wrap) return;
   if (!state.albums || !state.albums.length) {
-    wrap.innerHTML = `<div class="empty">${icons.album}<p>还没有相册，点击右上角新建</p></div>`;
+    wrap.innerHTML = `<div class="empty">${icons.album}<p>还没有相册，点击左上角新建</p></div>`;
     return;
   }
   const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
@@ -4969,7 +5358,11 @@ function isFolderAlbum(album) {
 function makeAlbumCard(album) {
   const albumKind = isFolderAlbum(album) ? 'folder' : 'user';
   const albumKindLabel = albumKind === 'folder' ? '文件夹' : '自建';
-  const albumKindHtml = albumKind === 'folder' ? '' : `<div class="album-meta-row"><span class="album-kind">${albumKindLabel}</span></div>`;
+  const albumKindIcon = albumKind === 'folder' ? icons.albumCardFolder : icons.albumCardUser;
+  const rawDescription = String(album.description || '').trim();
+  const description = albumKind === 'folder' && rawDescription === '自动从文件夹导入'
+    ? '自动从文件夹导入'
+    : rawDescription || '还没有相册描述';
   const card = el('div', `album-card album-card-${albumKind}${state.albumViewMode === 'list' ? ' list' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const coverHtml = album.cover_uuid
@@ -4978,10 +5371,14 @@ function makeAlbumCard(album) {
   card.innerHTML = `
 	<div class="album-cover">${coverHtml}</div>
 	<div class="album-info">
-	  ${albumKindHtml}
 	  <div class="album-name">${escapeHTML(album.name)}</div>
-  <div class="album-count">${album.photo_count || 0} 条照片/视频</div>
-</div>`;
+    <div class="album-subtitle">${escapeHTML(description)}</div>
+    <div class="album-count-row">${icons.albumCardCount || icons.photo}<span>${album.photo_count || 0} 个项目</span></div>
+  </div>`;
+  const kind = el('span', 'album-kind', albumKindIcon);
+  kind.title = albumKindLabel;
+  kind.setAttribute('aria-label', albumKindLabel);
+  $('.album-info', card)?.appendChild(kind);
   card.addEventListener('click', () => openAlbumDetail(album));
   return card;
 }
@@ -4991,6 +5388,7 @@ async function openAlbumDetail(album) {
   saveViewScroll();
   state.currentAlbum = album;
   state.currentAlbumID = album.id;
+  state.lastAlbumDetailID = album.id;
   state.albumPhotos = [];
   state.albumCursor = '';
   state.albumHasMore = true;
@@ -5034,16 +5432,9 @@ async function renderAlbumDetail() {
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
-  }) + renderMediaKindFilterControl() + renderGridScaleControl();
-  const prevAlbum = adjacentAlbum(-1);
-  const nextAlbum = adjacentAlbum(1);
-  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'prev-album-btn', icon: icons.topbarPrevAlbum, label: '上一个相册', disabled: !prevAlbum })}${renderTopbarGlassButton({ id: 'next-album-btn', icon: icons.topbarNextAlbum, label: '下一个相册', disabled: !nextAlbum })}</div>${renderTopbarGlassButton({ id: 'back-albums-btn', icon: icons.topbarBackAlbums, label: '返回相册' })}${renderTopbarGlassButton({ id: 'download-album-btn', icon: icons.topbarDownloadAlbum, label: '下载相册' })}${renderTopbarGlassButton({ id: 'delete-album-btn', icon: icons.topbarDeleteAlbum, label: '删除相册', variant: 'danger' })}`;
-  bindMediaKindFilterControl();
-  bindGridScaleControl();
+  });
+  $('#topbar-actions').innerHTML = `${renderTopbarGlassButton({ id: 'download-album-btn', icon: icons.topbarDownloadAlbum, label: '下载相册' })}${renderTopbarGlassButton({ id: 'delete-album-btn', icon: icons.topbarDeleteAlbum, label: '删除相册', variant: 'danger' })}`;
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
-  $('#prev-album-btn')?.addEventListener('click', () => openAdjacentAlbum(-1));
-  $('#next-album-btn')?.addEventListener('click', () => openAdjacentAlbum(1));
-  $('#back-albums-btn').addEventListener('click', () => switchView('albums'));
   $('#download-album-btn').addEventListener('click', () => {
     withButtonBusy($('#download-album-btn'), '打包中…', async () => {
 		triggerDownload(`/api/media/albums/${album.id}/download`);
@@ -5062,7 +5453,16 @@ async function renderAlbumDetail() {
   });
 
   $('#content').innerHTML = `
+<div class="album-detail-pill" id="album-detail-pill">
+  <button class="album-detail-back-btn" id="album-detail-back-btn" type="button" title="返回相册" aria-label="返回相册">${icons.topbarBackAlbums}</button>
+  <span class="album-detail-title" title="${escapeHTML(album.name)}">${escapeHTML(album.name)}</span>
+</div>
+<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">
+  ${renderMediaKindFilterControl('album-detail-filter')}
+</div>
 <div id="album-groups"></div><div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
+  bindMediaKindFilterControl();
+  $('#album-detail-back-btn')?.addEventListener('click', () => switchView('albums'));
   state.albumPhotos = []; state.albumCursor = ''; state.albumHasMore = true;
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   await loadMoreAlbumPhotos();
@@ -5124,38 +5524,38 @@ function renderAlbumGroups(newPhotos) {
   const container = $('#album-groups');
   if (!container) return;
   if (state.albumPhotos.length === 0 && newPhotos.length === 0) {
-    container.innerHTML = `<div class="empty">${icons.photo}<p>相册里还没有照片/视频</p></div>`;
+    container.innerHTML = `<div class="empty">${icons.photo}<p>相册里还没有媒体</p></div>`;
     return;
   }
-  const groups = groupByDate(newPhotos);
-  for (const [date, photos] of Object.entries(groups)) {
-    let group = container.querySelector(`[data-date="${CSS.escape(date)}"]`);
-    if (!group) {
-      group = el('div', 'date-group');
-      group.dataset.date = date;
-      group.innerHTML = `<div class="date-label"><span class="date-text">${date}</span><button class="date-select-all" type="button">全选</button></div><div class="photo-grid"></div>`;
-      group.querySelector('.date-select-all').addEventListener('click', () => selectAllInGroup(group));
-      container.appendChild(group);
-    }
-    const grid = group.querySelector('.photo-grid');
-    photos.forEach(p => grid.appendChild(makePhotoThumb(p, state.albumPhotos)));
+  if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
+  let grid = $('#album-grid');
+  if (!grid) {
+    grid = el('div', 'photo-grid');
+    grid.id = 'album-grid';
+    container.appendChild(grid);
   }
+  const fragment = document.createDocumentFragment();
+  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.albumPhotos)));
+  grid.appendChild(fragment);
 }
 
 // ── 回收站 (b-4 修复) ─────────────────────────────────
 async function renderTrash() {
   $('#topbar-title').textContent = '回收站';
-  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderMediaKindFilterControl() + renderGridScaleControl();
-  $('#topbar-actions').innerHTML = renderTopbarGlassButton({ id: 'empty-trash-btn', icon: icons.topbarEmptyTrash, label: '清空回收站', variant: 'danger' });
+  $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ id: 'restore-all-trash-btn', icon: icons.topbarRestoreAll || icons.restore, label: '恢复全部' }),
+    renderTopbarGlassButton({ id: 'empty-trash-btn', icon: icons.topbarEmptyTrash, label: '清空回收站', variant: 'danger' }),
+  ]);
+  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderMediaKindFilterControl();
+  $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
-  bindGridScaleControl();
   bindTrashSelectionBarHandlers();
   $('#empty-trash-btn').addEventListener('click', emptyTrash);
+  $('#restore-all-trash-btn')?.addEventListener('click', restoreAllTrash);
 
   // c-5: 加入批量恢复工具栏
   $('#content').innerHTML = `
-<p style="font-size:.82rem;color:var(--text2);margin-bottom:8px">左键预览，右键或长按恢复/删除，点击勾选图标批量操作</p>
-<div id="trash-groups"></div>
+<div id="trash-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
 
   state.trashPhotos = []; state.trashCursor = ''; state.trashHasMore = true;
@@ -5185,36 +5585,31 @@ async function loadMoreTrash() {
   }
 }
 function renderTrashGroups(newPhotos) {
-  const container = $('#trash-groups');
+  const container = $('#trash-wrap');
   if (!container) return;
   if (state.trashPhotos.length === 0 && newPhotos.length === 0) {
     container.innerHTML = `<div class="empty">${icons.trash}<p>回收站是空的</p></div>`;
     return;
   }
-  const groups = groupByDate(newPhotos);
-  for (const [date, photos] of Object.entries(groups)) {
-    let group = container.querySelector(`[data-date="${CSS.escape(date)}"]`);
-    if (!group) {
-      group = el('div', 'date-group');
-      group.dataset.date = date;
-      group.innerHTML = `<div class="date-label"><span class="date-text">${date}</span><button class="date-select-all" type="button">全选</button></div><div class="photo-grid"></div>`;
-      group.querySelector('.date-select-all').addEventListener('click', () => selectAllInGroup(group));
-      container.appendChild(group);
-    }
-    const grid = group.querySelector('.photo-grid');
-    // b-4 + c-5: trashMode 支持勾选批量恢复
-    photos.forEach(p => {
-      const thumb = makePhotoThumb(p, state.trashPhotos, { trashMode: true });
-      // 覆盖 check 的点击，同时更新回收站选择栏
-      const ck = thumb.querySelector('.check');
-      ck.addEventListener('click', e => {
-        e.stopPropagation();
-        toggleSelect(p.id, thumb);
-        updateTrashSelBar();
-      }, { capture: true });
-      grid.appendChild(thumb);
-    });
+  if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
+  let grid = $('#trash-grid');
+  if (!grid) {
+    grid = el('div', 'photo-grid');
+    grid.id = 'trash-grid';
+    container.appendChild(grid);
   }
+  const fragment = document.createDocumentFragment();
+  newPhotos.forEach(p => {
+    const thumb = makePhotoThumb(p, state.trashPhotos, { trashMode: true });
+    const ck = thumb.querySelector('.check');
+    ck.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleSelect(p.id, thumb);
+      updateTrashSelBar();
+    }, { capture: true });
+    fragment.appendChild(thumb);
+  });
+  grid.appendChild(fragment);
 }
 async function emptyTrash() {
   if (!confirm('确定要永久删除回收站中所有照片/视频吗？此操作不可恢复。')) return;
@@ -5247,6 +5642,55 @@ async function restoreSelected() {
     catch(e) { console.error('恢复失败:', id, e); }
   }
   switchView('trash');
+}
+
+async function collectTrashPhotoIDs() {
+  const ids = [];
+  const seen = new Set();
+  const appendPageIDs = photos => {
+    (photos || []).forEach(photo => {
+      const id = Number(photo && photo.id);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      ids.push(id);
+    });
+  };
+  appendPageIDs(state.trashPhotos);
+  let cursor = state.trashCursor || '';
+  let hasMore = !!state.trashHasMore;
+  while (hasMore) {
+    const params = new URLSearchParams();
+    appendMediaKindParam(params);
+    if (cursor) params.set('cursor', cursor);
+    const query = params.toString();
+    const page = await api.get('/api/media/trash' + (query ? `?${query}` : ''));
+    appendPageIDs(page.photos);
+    cursor = page.next_cursor || '';
+    hasMore = !!page.has_more;
+  }
+  return ids;
+}
+
+async function restoreAllTrash() {
+  try {
+    const ids = await collectTrashPhotoIDs();
+    if (!ids.length) {
+      showToast('当前没有可恢复的媒体');
+      return;
+    }
+    if (!confirm(`确定要恢复当前列表中的 ${ids.length} 条媒体吗？`)) return;
+    for (const id of ids) {
+      try {
+        await api.post(`/api/media/${id}/restore`, {});
+      } catch (e) {
+        console.error('恢复失败:', id, e);
+      }
+    }
+    showToast(`已恢复 ${ids.length} 条媒体`);
+    switchView('trash');
+  } catch (e) {
+    alert('恢复全部失败: ' + ((e && e.error) || e.message || e));
+  }
 }
 
 async function hardDeleteSelected() {
@@ -5294,7 +5738,7 @@ function maybeLoadMoreImmediately(id, loadFn, canLoad) {
 // ── 灯箱 ──────────────────────────────────────────────
 function renderLightbox() {
   return `<div class="lightbox" id="lightbox" tabindex="-1">
-  <div class="lightbox-header">
+  <div class="lightbox-header" id="lightbox-header">
     <div class="lightbox-header-main">
       <button class="btn-icon lightbox-back-btn" id="lb-close" title="返回" aria-label="返回">${icons.back}</button>
       <span class="lb-title" id="lb-title"></span>
@@ -5333,10 +5777,12 @@ function renderLightbox() {
       <video class="lightbox-video hidden" id="lb-video" playsinline preload="metadata"></video>
     </div>
     <div class="lightbox-video-progress hidden" id="lb-video-progress" aria-hidden="true">
+      <span class="lightbox-video-progress-time" id="lb-video-progress-current">0:00</span>
       <div class="lightbox-video-progress-track">
         <div class="lightbox-video-progress-fill" id="lb-video-progress-fill"></div>
         <div class="lightbox-video-progress-markers" id="lb-video-progress-markers"></div>
       </div>
+      <span class="lightbox-video-progress-time" id="lb-video-progress-duration">0:00</span>
     </div>
     <div class="lightbox-volume-feedback" id="lb-volume-feedback"><div class="lightbox-volume-fill" id="lb-volume-fill"></div><span id="lb-volume-label">100%</span></div>
     <button class="lb-nav lb-prev" id="lb-prev">${icons.prev}</button>
@@ -5344,6 +5790,66 @@ function renderLightbox() {
   </div>
   <div class="lightbox-info" id="lb-info"></div>
 </div>`;
+}
+function updateLightboxHeaderLayout() {
+  const header = $('#lightbox-header');
+  const main = header ? $('.lightbox-header-main', header) : null;
+  const controls = header ? $('.lightbox-header-controls', header) : null;
+  const slideshow = header ? $('.lightbox-slideshow-controls', header) : null;
+  const actions = header ? $('.lightbox-action-group', header) : null;
+  const zoom = header ? $('.lightbox-zoom-panel', header) : null;
+  if (!header || !main || !controls || !slideshow || !actions || !zoom) return;
+  const applyMode = mode => {
+    header.classList.toggle('lightbox-hide-slideshow-controls', mode >= 1);
+    header.classList.toggle('lightbox-hide-zoom-controls', mode >= 2);
+    header.classList.toggle('lightbox-compact-controls', mode >= 3 || isMobileLayout());
+    main.style.maxWidth = '';
+  };
+  const constrainTitle = () => {
+    const headerRect = header.getBoundingClientRect();
+    const actionRect = actions.getBoundingClientRect();
+    const controlsVisible = getComputedStyle(controls).display !== 'none' && controls.offsetWidth > 0;
+    const controlsRect = controlsVisible ? controls.getBoundingClientRect() : null;
+    const rightBoundary = controlsRect ? controlsRect.left : actionRect.left;
+    const maxWidth = Math.max(0, Math.floor(rightBoundary - headerRect.left - 16));
+    main.style.maxWidth = `${maxWidth}px`;
+  };
+  const hasOverlap = () => {
+    const headerRect = header.getBoundingClientRect();
+    const visible = [main, controls, actions].filter(node => {
+      const style = getComputedStyle(node);
+      return style.display !== 'none' && node.offsetWidth > 0;
+    });
+    const rects = visible.map(node => node.getBoundingClientRect());
+    if (rects.some(rect => rect.left < headerRect.left - 1 || rect.right > headerRect.right + 1)) return true;
+    for (let i = 0; i < rects.length - 1; i += 1) {
+      if (rects[i].right + 16 > rects[i + 1].left) return true;
+    }
+    return false;
+  };
+  if (isMobileLayout()) {
+    applyMode(3);
+    return;
+  }
+  for (let mode = 0; mode <= 3; mode += 1) {
+    applyMode(mode);
+    constrainTitle();
+    if (!hasOverlap()) return;
+  }
+}
+function refreshLightboxUiActivity() {
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) return;
+  lightbox.classList.remove('ui-idle');
+  clearTimeout(state.lightboxUiIdleTimer);
+  state.lightboxUiIdleTimer = setTimeout(() => {
+    if ($('#lightbox')?.classList.contains('open')) lightbox.classList.add('ui-idle');
+  }, 3000);
+}
+function clearLightboxUiIdleTimer() {
+  clearTimeout(state.lightboxUiIdleTimer);
+  state.lightboxUiIdleTimer = null;
+  $('#lightbox')?.classList.remove('ui-idle');
 }
 function lockPageScrollForLightbox() {
   if (document.body.classList.contains('lightbox-page-lock')) return;
@@ -5402,6 +5908,7 @@ function bindGlobal() {
   });
   document.addEventListener('mousemove', e => {
     if (!$('#lightbox').classList.contains('open')) return;
+    refreshLightboxUiActivity();
     updateLightboxFocusPointFromPointer(e.clientX, e.clientY);
     if (state.lightboxBoostActive && state.lightboxPointerInside) applyLightboxZoom();
   }, { passive: true });
@@ -5459,7 +5966,7 @@ function bindGlobal() {
       }
     }
     if (shouldStopSlideshowFromClick(e.target)) stopSlideshow();
-    if (e.target.closest('#global-search-btn')) openGlobalSearch();
+    if (e.target.closest('#global-search-btn, #floating-search-btn')) openGlobalSearch();
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
     if (e.target.closest('#search-overlay') && !e.target.closest('.search-panel')) closeGlobalSearch();
     if (e.target.closest('#search-more-btn') && state.searchHasMore) runGlobalSearch(state.searchQuery, { reset: false });
@@ -5484,20 +5991,16 @@ function bindGlobal() {
     showVolumeOverlay(video);
   });
   document.addEventListener('input', e => {
+    if (e.target.matches('input[type="range"]')) updateRangeProgress(e.target);
+    if (e.target.matches('#floating-grid-scale-input')) {
+      setGridScale(e.target.value);
+      persistGridScaleSoon();
+      return;
+    }
+    if (e.target.matches('#lb-slideshow-interval')) updateSlideshowSetting('interval', parseInt(e.target.value, 10) * 1000);
+    if (e.target.matches('#lb-zoom')) setLightboxZoom(parseInt(e.target.value, 10));
     if (e.target.matches('#global-search-input')) {
       syncSearchInputs(e.target.value);
-      scheduleGlobalSearch();
-    }
-    if (e.target.matches('#topbar-search-input')) {
-      syncSearchInputs(e.target.value);
-      openGlobalSearch(e.target.value);
-      scheduleGlobalSearch();
-    }
-  });
-  document.addEventListener('keydown', e => {
-    if (e.target.matches('#topbar-search-input') && e.key === 'Enter') {
-      e.preventDefault();
-      openGlobalSearch(e.target.value);
       scheduleGlobalSearch();
     }
   });
@@ -5558,9 +6061,9 @@ async function openLightbox(photos, index) {
   const target = photos[Math.max(0, index)];
   if (target && isVideoMedia(target)) {
     await ensureSettingsDataLoaded();
-    if (state.serverSettings.use_system_player || requiresSystemPlayer(target)) {
+    if (state.serverSettings.use_system_player) {
       openWithSystemPlayer(target.id)
-        .then(() => showToast(requiresSystemPlayer(target) ? '当前浏览器不支持此视频格式，已使用系统播放器打开' : '已使用系统播放器打开'))
+        .then(() => showToast('已使用系统播放器打开'))
         .catch(e => alert('打开失败: ' + ((e && e.error) || e)));
       return;
     }
@@ -5576,11 +6079,14 @@ async function openLightbox(photos, index) {
   applyLightboxZoom();
   lockPageScrollForLightbox();
   $('#lightbox').classList.add('open');
+  updateLightboxHeaderLayout();
+  refreshLightboxUiActivity();
   focusLightboxKeyboardSurface();
   lbRender();
 }
 function closeLightbox() {
   stopSlideshow();
+  clearLightboxUiIdleTimer();
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
   setLightboxMediaLoading(false);
@@ -5591,6 +6097,11 @@ function closeLightbox() {
   if (video) {
     video.pause();
     video.removeAttribute('src');
+    video.removeAttribute('controls');
+    video.removeAttribute('controlslist');
+    video.removeAttribute('disablepictureinpicture');
+    video.removeAttribute('disableremoteplayback');
+    video.removeAttribute('x-webkit-airplay');
     video.load();
   }
   $('#lightbox').classList.remove('open');
@@ -5640,6 +6151,10 @@ function lbGoTo(index, options = {}) {
     video.pause();
     video.removeAttribute('src');
     video.removeAttribute('controls');
+    video.removeAttribute('controlslist');
+    video.removeAttribute('disablepictureinpicture');
+    video.removeAttribute('disableremoteplayback');
+    video.removeAttribute('x-webkit-airplay');
     video.load();
   }
   state.lightboxIndex = index;
@@ -5661,6 +6176,11 @@ function lbRender() {
     img.removeAttribute('src');
     video.classList.remove('hidden');
     video.removeAttribute('controls');
+    video.setAttribute('controlslist', 'nodownload noplaybackrate noremoteplayback');
+    video.setAttribute('disablepictureinpicture', '');
+    video.setAttribute('disableremoteplayback', 'true');
+    video.setAttribute('x-webkit-airplay', 'deny');
+    video.playsInline = true;
     video.preload = 'auto';
     video.onloadeddata = () => {
       setLightboxMediaLoading(false);
@@ -5671,7 +6191,10 @@ function lbRender() {
       restoreVideoResumePosition(video, p);
       updateVideoBookmarkProgress(video, p);
     };
-    video.onerror = () => setLightboxMediaLoading(false);
+    video.onerror = () => {
+      setLightboxMediaLoading(false);
+      showToast('当前浏览器无法播放这个视频文件，可在设置中手动启用系统播放器');
+    };
     video.onfocus = refocusLightboxAfterVideoControl;
     video.ontimeupdate = () => {
       handleVideoResumeTimeUpdate(video);
@@ -5697,6 +6220,10 @@ function lbRender() {
     video.ontimeupdate = null;
     video.removeAttribute('src');
     video.removeAttribute('controls');
+    video.removeAttribute('controlslist');
+    video.removeAttribute('disablepictureinpicture');
+    video.removeAttribute('disableremoteplayback');
+    video.removeAttribute('x-webkit-airplay');
     video.load();
     updateVideoBookmarkProgress(video, p);
     img.classList.remove('hidden');
@@ -5718,6 +6245,7 @@ function lbRender() {
   $('#lb-prev').classList.toggle('hidden', state.lightboxIndex === 0);
   $('#lb-next').classList.toggle('hidden', state.lightboxIndex === state.lightboxPhotos.length - 1);
   applyLightboxZoom();
+  updateLightboxHeaderLayout();
   updateSlideshowControls();
   if (state.slideshowPlaying) scheduleSlideshowStep();
   if (state.experimentalPrefetchNeighbors) prefetchAdjacentMedia();
@@ -6320,10 +6848,12 @@ function openLibraryLogoGuideModal(file, onConfirm, onCancel) {
   state.pendingLibraryLogoCrop = crop;
   img.src = objectURL;
   zoom.value = '1';
+  updateRangeProgress(zoom);
   const apply = () => {
     img.style.transform = `translate(${crop.x}px, ${crop.y}px) scale(${crop.zoom})`;
   };
   zoom.oninput = () => {
+    updateRangeProgress(zoom);
     crop.zoom = Number(zoom.value) || 1;
     apply();
   };

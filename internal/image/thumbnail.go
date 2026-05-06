@@ -17,7 +17,7 @@ import (
 	"golang.org/x/image/webp"
 )
 
-const DefaultThumbnailLongEdge = 256
+const DefaultThumbnailLongEdge = 512
 
 // GenerateThumbnail 从 src 读取原图，生成缩略图写入 destPath。
 // 长边缩放到 maxEdge，保持比例，使用近似双线性插值以提升性能。

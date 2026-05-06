@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -63,6 +64,18 @@ type settingsUpdateRequest struct {
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
 	PlayerKeymap                  string           `json:"player_keymap"`
+}
+
+type refreshLibraryLogosRequest struct {
+	ReplaceExisting bool `json:"replace_existing"`
+}
+
+type refreshLibraryLogosResult struct {
+	Scanned int      `json:"scanned"`
+	Updated int      `json:"updated"`
+	Skipped int      `json:"skipped"`
+	Failed  int      `json:"failed"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 type libraryResponse struct {
@@ -320,6 +333,135 @@ func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			"message": "资源库图像已移除",
 			"data":    buildSettingsResponse(cfg),
 		})
+	}
+}
+
+func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req refreshLibraryLogosRequest
+		_ = c.ShouldBindJSON(&req)
+
+		result := refreshLibraryLogosResult{}
+		if len(cfg.Libraries) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"message": "没有可更新的资源库头像",
+				"result":  result,
+				"data":    buildSettingsResponse(cfg),
+			})
+			return
+		}
+
+		assetDir, err := cfg.LibraryAssetsDir()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if err := os.MkdirAll(assetDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		next := *cfg
+		next.Libraries = append([]config.Library(nil), cfg.Libraries...)
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		previousAssets := make([]string, len(next.Libraries))
+		for index, library := range next.Libraries {
+			result.Scanned++
+			if strings.TrimSpace(library.Path) == "" {
+				result.Skipped++
+				continue
+			}
+			if strings.TrimSpace(library.LogoAsset) != "" && !req.ReplaceExisting {
+				result.Skipped++
+				continue
+			}
+			sourcePath, err := randomLibraryLogoSource(library.Path, rng)
+			if err != nil {
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", library.Name, err))
+				continue
+			}
+			file, err := os.Open(sourcePath)
+			if err != nil {
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", library.Name, err))
+				continue
+			}
+			fileName := fmt.Sprintf("library-%d-%d.png", index, time.Now().UnixNano())
+			destPath := filepath.Join(assetDir, fileName)
+			saveErr := imgpkg.SaveSquareLibraryLogo(file, imgpkg.DetectMimeType(sourcePath), destPath, imgpkg.DefaultLibraryLogoEdge)
+			_ = file.Close()
+			if saveErr != nil {
+				_ = os.Remove(destPath)
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", library.Name, saveErr))
+				continue
+			}
+			previousAssets[index] = next.Libraries[index].LogoAsset
+			next.Libraries[index].LogoAsset = fileName
+			result.Updated++
+		}
+
+		if result.Updated > 0 {
+			if err := next.Save(); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			cfg.Libraries = append([]config.Library(nil), next.Libraries...)
+			for _, previous := range previousAssets {
+				if previous != "" {
+					_ = os.Remove(filepath.Join(assetDir, previous))
+				}
+			}
+		}
+
+		message := fmt.Sprintf("资源库头像刷新完成：更新 %d 个，跳过 %d 个，失败 %d 个", result.Updated, result.Skipped, result.Failed)
+		c.JSON(http.StatusOK, gin.H{
+			"message": message,
+			"result":  result,
+			"data":    buildSettingsResponse(cfg),
+		})
+	}
+}
+
+func randomLibraryLogoSource(root string, rng *rand.Rand) (string, error) {
+	var selected string
+	seen := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".thumbnails" || name == ".DS_Store" || strings.HasPrefix(name, ".echogallery") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isLibraryLogoCandidate(path) {
+			return nil
+		}
+		seen++
+		if rng.Intn(seen) == 0 {
+			selected = path
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if selected == "" {
+		return "", fmt.Errorf("未找到可用图片")
+	}
+	return selected, nil
+}
+
+func isLibraryLogoCandidate(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	default:
+		return false
 	}
 }
 

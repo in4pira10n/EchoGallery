@@ -151,6 +151,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/shutdown", authMiddleware(cfg), handleShutdownApp(shutdown))
 	r.GET("/api/library-build/status", authMiddleware(cfg), handleGetLibraryBuildStatus(buildHooks))
 	r.PUT("/api/library-build/exit-after-complete", authMiddleware(cfg), handleSetLibraryBuildExitAfterComplete(buildHooks))
+	r.POST("/api/settings/libraries/logos/refresh", authMiddleware(cfg), handleRefreshLibraryLogos(cfg))
 	r.POST("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleServeLibraryLogo(cfg))
@@ -1319,6 +1320,10 @@ func handleServeMediaFile(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
 			return
 		}
+		if strings.TrimSpace(photo.MimeType) != "" {
+			c.Header("Content-Type", photo.MimeType)
+		}
+		c.Header("Accept-Ranges", "bytes")
 		c.File(registrar.MediaPath(photo))
 	}
 }

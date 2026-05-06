@@ -176,7 +176,7 @@ func (c *Config) validate() error {
 	c.normalizeLibraries()
 	c.ThumbnailDir = strings.TrimSpace(c.ThumbnailDir)
 	if c.ThumbnailSize < 96 || c.ThumbnailSize > 1024 {
-		c.ThumbnailSize = 256
+		c.ThumbnailSize = 512
 	}
 	if c.StoragePath == "" {
 		return fmt.Errorf("storage_path 不能为空")
@@ -210,7 +210,7 @@ func (c *Config) applyDefaults() {
 		c.ThumbnailDir = filepath.Join(c.AppDataDir, "thumbnails")
 	}
 	if c.ThumbnailSize == 0 {
-		c.ThumbnailSize = 256
+		c.ThumbnailSize = 512
 	}
 	if c.Preferences.Theme == "" {
 		c.Preferences.Theme = "light"

@@ -168,8 +168,8 @@ func TestGenerateThumbnail_JPEG(t *testing.T) {
 	if format != "webp" {
 		t.Fatalf("缩略图编码格式期望 webp，得到 %s", format)
 	}
-	if cfg.Width != 256 || cfg.Height != 192 {
-		t.Errorf("缩略图尺寸期望 256x192，得到 %dx%d", cfg.Width, cfg.Height)
+	if cfg.Width != 512 || cfg.Height != 384 {
+		t.Errorf("缩略图尺寸期望 512x384，得到 %dx%d", cfg.Width, cfg.Height)
 	}
 }
 
