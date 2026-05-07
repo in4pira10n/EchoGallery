@@ -101,6 +101,7 @@ func (s *libraryBuildState) start(message string) {
 	s.status.Total = 0
 	s.status.Imported = 0
 	s.status.Skipped = 0
+	s.status.Pruned = 0
 	s.status.Error = ""
 }
 
@@ -131,6 +132,7 @@ func (s *libraryBuildState) finish(summary *service.ImportSummary, err error) {
 		if summary != nil {
 			s.status.Imported = summary.Imported
 			s.status.Skipped = summary.Skipped
+			s.status.Pruned = summary.Pruned
 		}
 		if s.status.Total == 0 {
 			s.status.Percent = 100
@@ -373,6 +375,9 @@ func runLibraryBuild(ctx context.Context, photoService *service.PhotoService, bu
 	}
 	if summary != nil && summary.Imported > 0 {
 		fmt.Printf("已导入 %d 张历史图片\n", summary.Imported)
+	}
+	if summary != nil && summary.Pruned > 0 {
+		fmt.Printf("已清理 %d 条失效媒体记录\n", summary.Pruned)
 	}
 	buildState.finish(summary, err)
 }

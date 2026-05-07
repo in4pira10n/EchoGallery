@@ -11,9 +11,10 @@ import (
 // CreateAlbum 创建相册
 func (s *DB) CreateAlbum(album *storage.Album) error {
 	result, err := s.db.Exec(`
-		INSERT INTO albums (name, description, cover_photo_id, created_by, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
+		INSERT INTO albums (name, description, cover_photo_id, source_kind, source_rel_path, created_by, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		album.Name, album.Description, album.CoverPhotoID,
+		album.SourceKind, album.SourceRelPath,
 		album.CreatedBy, album.CreatedAt,
 	)
 	if err != nil {
@@ -30,7 +31,7 @@ func (s *DB) CreateAlbum(album *storage.Album) error {
 // GetAlbumByID 按 ID 查询相册，附带图片数量（不含已软删除的图片）
 func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 	row := s.db.QueryRow(`
-		SELECT a.id, a.name, a.description, a.cover_photo_id, a.created_by, a.created_at,
+		SELECT a.id, a.name, a.description, a.cover_photo_id, a.source_kind, a.source_rel_path, a.created_by, a.created_at,
 		       COUNT(p.id) as photo_count,
 		       COALESCE(
 		         (SELECT ph.uuid FROM photos ph
@@ -56,7 +57,7 @@ func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 // ListAlbums 查询用户所有相册（photo_count 不含已软删除的图片，附带封面 UUID）
 func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 	rows, err := s.db.Query(`
-		SELECT a.id, a.name, a.description, a.cover_photo_id, a.created_by, a.created_at,
+		SELECT a.id, a.name, a.description, a.cover_photo_id, a.source_kind, a.source_rel_path, a.created_by, a.created_at,
 		       COUNT(p.id) as photo_count,
 		       COALESCE(
 		         (SELECT ph.uuid FROM photos ph
@@ -91,7 +92,7 @@ func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 // ListAlbumsForPhoto 查询包含指定图片/视频的相册。
 func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
 	rows, err := s.db.Query(`
-		SELECT a.id, a.name, a.description, a.cover_photo_id, a.created_by, a.created_at,
+		SELECT a.id, a.name, a.description, a.cover_photo_id, a.source_kind, a.source_rel_path, a.created_by, a.created_at,
 		       COUNT(p.id) as photo_count,
 		       COALESCE(
 		         (SELECT ph.uuid FROM photos ph
@@ -260,6 +261,7 @@ func scanAlbum(row interface {
 	var coverUUID sql.NullString
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Description, &coverPhotoID,
+		&a.SourceKind, &a.SourceRelPath,
 		&a.CreatedBy, &a.CreatedAt, &a.PhotoCount, &coverUUID,
 	)
 	if err != nil {

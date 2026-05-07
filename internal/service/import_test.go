@@ -156,6 +156,52 @@ func TestImportExistingPhotos_CreatesAlbumsFromFolders(t *testing.T) {
 	}
 }
 
+func TestImportExistingPhotos_PrunesMissingFolderAlbums(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	folder := filepath.Join(svc.sourcePath, "旧旅程")
+	if err := os.MkdirAll(folder, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "IMG_1002.jpg"), createJPEGBytes(200, 120), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	albums, err := svc.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册失败: %v", err)
+	}
+	if len(albums) != 1 {
+		t.Fatalf("期望生成 1 个文件夹相册，得到 %d", len(albums))
+	}
+
+	if err := os.RemoveAll(folder); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("二次导入失败: %v", err)
+	}
+	if summary.Pruned != 1 {
+		t.Fatalf("期望清理 1 条失效媒体记录，得到 %d", summary.Pruned)
+	}
+	albums, err = svc.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册失败: %v", err)
+	}
+	if len(albums) != 0 {
+		t.Fatalf("删除源文件夹后不应继续展示自动相册，得到 %d 个", len(albums))
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询时间线失败: %v", err)
+	}
+	if len(page.Photos) != 0 {
+		t.Fatalf("删除源文件后不应继续展示媒体，得到 %d 条", len(page.Photos))
+	}
+}
+
 func TestImportExistingPhotos_SkipsBrokenSupportedFiles(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	if err := os.WriteFile(filepath.Join(svc.sourcePath, "broken.png"), []byte("not-a-real-png"), 0644); err != nil {

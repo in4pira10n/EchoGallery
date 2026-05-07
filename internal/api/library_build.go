@@ -13,6 +13,7 @@ type LibraryBuildStatus struct {
 	Total             int     `json:"total"`
 	Imported          int     `json:"imported"`
 	Skipped           int     `json:"skipped"`
+	Pruned            int     `json:"pruned"`
 	StartedAt         string  `json:"started_at,omitempty"`
 	UpdatedAt         string  `json:"updated_at,omitempty"`
 	FinishedAt        string  `json:"finished_at,omitempty"`

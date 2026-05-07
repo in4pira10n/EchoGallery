@@ -78,6 +78,11 @@ type favoriteRequest struct {
 	Favorite bool `json:"favorite"`
 }
 
+type videoPlaybackPreferenceRequest struct {
+	Volume *float64 `json:"volume"`
+	Muted  *bool    `json:"muted"`
+}
+
 type albumRequest struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
@@ -179,6 +184,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/favorites", authMiddleware(cfg), handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", authMiddleware(cfg), handleListTrashMedia(cfg, registrar))
 		media.GET("/:id/albums", authMiddleware(cfg), handleListMediaAlbums(cfg, registrar))
+		media.GET("/:id/playback", authMiddleware(cfg), handleGetVideoPlaybackPreference(cfg, registrar))
+		media.PUT("/:id/playback", authMiddleware(cfg), handleSaveVideoPlaybackPreference(cfg, registrar))
 		media.GET("/:id", authMiddleware(cfg), handleGetMedia(cfg, registrar))
 		media.GET("/:id/download", authMiddleware(cfg), handleDownloadMedia(cfg, registrar))
 		media.POST("/:id/play", authMiddleware(cfg), handlePlayMediaWithSystemPlayer(cfg, registrar))
@@ -494,6 +501,82 @@ func handleSetMediaFavorite(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			message = "已加入个人收藏"
 		}
 		c.JSON(http.StatusOK, gin.H{"message": message})
+	}
+}
+
+func handleGetVideoPlaybackPreference(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	type playbackGetter interface {
+		GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
+	}
+	return func(c *gin.Context) {
+		getter, ok := registrar.(playbackGetter)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "视频播放偏好服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "照片/视频ID 无效"})
+			return
+		}
+		pref, err := getter.GetVideoPlaybackPreference(id, userID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, pref)
+	}
+}
+
+func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	type playbackSaver interface {
+		GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
+		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*storage.VideoPlaybackPreference, error)
+	}
+	return func(c *gin.Context) {
+		saver, ok := registrar.(playbackSaver)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "视频播放偏好服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "照片/视频ID 无效"})
+			return
+		}
+		var req videoPlaybackPreferenceRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		volume := 1.0
+		muted := false
+		if existing, err := saver.GetVideoPlaybackPreference(id, userID); err == nil && existing != nil {
+			volume = existing.Volume
+			muted = existing.Muted
+		}
+		if req.Volume != nil {
+			volume = *req.Volume
+		}
+		if req.Muted != nil {
+			muted = *req.Muted
+		}
+		pref, err := saver.SaveVideoPlaybackPreference(id, userID, volume, muted)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, pref)
 	}
 }
 

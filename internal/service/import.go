@@ -19,10 +19,16 @@ import (
 	"echogallery/internal/storage"
 )
 
+const (
+	folderAlbumDescription = "自动从文件夹导入"
+	folderAlbumSourceKind  = "folder"
+)
+
 // ImportSummary 汇总一次启动扫描导入的结果。
 type ImportSummary struct {
 	Imported int
 	Skipped  int
+	Pruned   int
 }
 
 type importJob struct {
@@ -59,6 +65,8 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	}
 	totalCandidates := 0
 	indexSkippedCandidates := 0
+	seenSourcePaths := make(map[string]bool)
+	seenFolderAlbums := make(map[string]bool)
 
 	err = filepath.WalkDir(s.sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
@@ -94,6 +102,10 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 			return err
 		}
 		sourceRelPath = filepath.Clean(sourceRelPath)
+		seenSourcePaths[sourceRelPath] = true
+		if albumName := folderAlbumNameForSourceRelPath(sourceRelPath); albumName != "" {
+			seenFolderAlbums[albumName] = true
+		}
 		totalCandidates++
 
 		var info fs.FileInfo
@@ -117,6 +129,14 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		return nil
 	})
 	if err != nil {
+		return summary, err
+	}
+	pruned, err := s.pruneMissingSourceMedia(ctx, uploadedBy, sourceIndex, seenSourcePaths)
+	if err != nil {
+		return summary, err
+	}
+	summary.Pruned += pruned
+	if err := s.pruneMissingFolderAlbums(uploadedBy, seenFolderAlbums); err != nil {
 		return summary, err
 	}
 
@@ -218,6 +238,34 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	summary.Imported += int(importedCount)
 	summary.Skipped += int(skippedCount)
 	return summary, nil
+}
+
+func folderAlbumNameForSourceRelPath(sourceRelPath string) string {
+	if sourceRelPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(sourceRelPath)
+	if dir == "." || dir == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(dir))
+}
+
+func (s *PhotoService) pruneMissingSourceMedia(ctx context.Context, uploadedBy int64, sourceIndex map[string]storage.SourceMediaInfo, seenSourcePaths map[string]bool) (int, error) {
+	pruned := 0
+	for sourceRelPath, existing := range sourceIndex {
+		if err := ctx.Err(); err != nil {
+			return pruned, err
+		}
+		if sourceRelPath == "" || seenSourcePaths[filepath.Clean(sourceRelPath)] {
+			continue
+		}
+		if err := s.repo.HardDeletePhoto(existing.ID, uploadedBy); err != nil {
+			return pruned, err
+		}
+		pruned++
+	}
+	return pruned, nil
 }
 
 func sourceMediaUnchanged(existing storage.SourceMediaInfo, info fs.FileInfo) bool {
@@ -335,19 +383,20 @@ func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, up
 	if photo == nil || photo.SourceRelPath == "" {
 		return nil
 	}
-	dir := filepath.Dir(photo.SourceRelPath)
-	if dir == "." || dir == "" {
+	albumName := folderAlbumNameForSourceRelPath(photo.SourceRelPath)
+	if albumName == "" {
 		return nil
 	}
 
-	albumName := filepath.ToSlash(dir)
 	albumID, ok := albumCache[albumName]
 	if !ok {
 		album := &storage.Album{
-			Name:        albumName,
-			Description: "自动从文件夹导入",
-			CreatedBy:   uploadedBy,
-			CreatedAt:   time.Now(),
+			Name:          albumName,
+			Description:   folderAlbumDescription,
+			SourceKind:    folderAlbumSourceKind,
+			SourceRelPath: albumName,
+			CreatedBy:     uploadedBy,
+			CreatedAt:     time.Now(),
 		}
 		if err := s.repo.CreateAlbum(album); err != nil {
 			return err
@@ -356,4 +405,47 @@ func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, up
 		albumCache[albumName] = albumID
 	}
 	return s.repo.AddPhotoToAlbum(albumID, photo.ID, uploadedBy)
+}
+
+func (s *PhotoService) pruneMissingFolderAlbums(uploadedBy int64, seenFolderAlbums map[string]bool) error {
+	albums, err := s.repo.ListAlbums(uploadedBy)
+	if err != nil {
+		return err
+	}
+	for _, album := range albums {
+		if !isAutoFolderAlbum(album) {
+			continue
+		}
+		albumPath := autoFolderAlbumPath(album)
+		if albumPath == "" || seenFolderAlbums[albumPath] {
+			continue
+		}
+		if err := s.repo.DeleteAlbum(album.ID, uploadedBy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isAutoFolderAlbum(album *storage.Album) bool {
+	if album == nil {
+		return false
+	}
+	if album.SourceKind == folderAlbumSourceKind {
+		return true
+	}
+	return album.SourceKind == "" && album.Description == folderAlbumDescription
+}
+
+func autoFolderAlbumPath(album *storage.Album) string {
+	if album == nil {
+		return ""
+	}
+	if album.SourceRelPath != "" {
+		return filepath.ToSlash(filepath.Clean(album.SourceRelPath))
+	}
+	if album.Description == folderAlbumDescription {
+		return filepath.ToSlash(filepath.Clean(album.Name))
+	}
+	return ""
 }

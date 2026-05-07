@@ -78,6 +78,12 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("photos", "is_favorite", `ALTER TABLE photos ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("albums", "source_kind", `ALTER TABLE albums ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("albums", "source_rel_path", `ALTER TABLE albums ADD COLUMN source_rel_path TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if _, err := s.db.Exec(`
 		UPDATE photos
 		SET random_sort_key = ((id * 1103515245 + 12345) % 2147483647) + 1
@@ -93,6 +99,23 @@ func (s *DB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_random_sort_key
 		ON photos(uploaded_by, random_sort_key, id)
 		WHERE deleted_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_albums_created_by_source
+		ON albums(created_by, source_kind, source_rel_path)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS video_playback_preferences (
+		    photo_id   INTEGER NOT NULL,
+		    user_id    INTEGER NOT NULL,
+		    volume     REAL    NOT NULL DEFAULT 1,
+		    muted      INTEGER NOT NULL DEFAULT 0,
+		    updated_at DATETIME NOT NULL,
+		    PRIMARY KEY (photo_id, user_id),
+		    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+		)`); err != nil {
 		return err
 	}
 	return nil
@@ -136,6 +159,8 @@ CREATE TABLE IF NOT EXISTS albums (
     name           TEXT    NOT NULL,
     description    TEXT    NOT NULL DEFAULT '',
     cover_photo_id INTEGER,
+    source_kind    TEXT    NOT NULL DEFAULT '',
+    source_rel_path TEXT   NOT NULL DEFAULT '',
     created_by     INTEGER NOT NULL,
     created_at     DATETIME NOT NULL,
     FOREIGN KEY (cover_photo_id) REFERENCES photos(id) ON DELETE SET NULL
@@ -171,6 +196,16 @@ CREATE INDEX IF NOT EXISTS idx_share_links_token
 
 CREATE INDEX IF NOT EXISTS idx_share_links_created_by
     ON share_links(created_by);
+
+CREATE TABLE IF NOT EXISTS video_playback_preferences (
+    photo_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    volume     REAL    NOT NULL DEFAULT 1,
+    muted      INTEGER NOT NULL DEFAULT 0,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (photo_id, user_id),
+    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+);
 `
 
 func (s *DB) ensureColumn(table, column, alterSQL string) error {

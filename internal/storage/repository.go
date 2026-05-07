@@ -26,6 +26,12 @@ type Repository interface {
 	// ListSourceMediaIndex 批量加载导入源索引，用于大资源库启动扫描时避免逐文件查询。
 	ListSourceMediaIndex(userID int64) (map[string]SourceMediaInfo, error)
 
+	// GetVideoPlaybackPreference 获取单个视频的播放偏好。
+	GetVideoPlaybackPreference(photoID int64, userID int64) (*VideoPlaybackPreference, error)
+
+	// UpsertVideoPlaybackPreference 保存单个视频的播放偏好。
+	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*VideoPlaybackPreference, error)
+
 	// ListPhotos 查询用户图片（时间线，游标分页，不包含已删除）
 	ListPhotos(params ListPhotosParams) (*PhotoPage, error)
 

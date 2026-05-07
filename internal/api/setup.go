@@ -229,6 +229,7 @@ func buildSetupPageHTML(payload string) string {
   }
 
   function renderInit() {
+    root.className = 'login-card setup-card';
     var libraries = (state.libraries || []).length ? state.libraries : [{name:'默认资源库', path:''}];
     root.innerHTML = '<div class="login-logo">EchoGallery</div>' +
       '<div class="setup-title">网页初始化</div>' +
@@ -316,21 +317,42 @@ func buildSetupPageHTML(payload string) string {
   }
 
   function renderRecovery() {
+    root.className = 'login-card setup-card setup-recovery-card';
     var libraries = state.libraries || [];
-    root.innerHTML = '<div class="login-logo">EchoGallery</div>' +
-      '<div class="setup-title">资源库恢复</div>' +
-      '<p class="setup-desc">' + esc(state.message || '当前资源库不可用，请选择其他资源库后重启。') + '</p>' +
-      '<div class="setup-library-chooser" id="setup-library-chooser">' + libraries.map(function (library) {
-        var active = library.path === state.current_storage_path ? ' active' : '';
-        return '<button class="setup-library-option' + active + '" type="button" data-path="' + esc(library.path) + '">' +
-          '<strong>' + esc(library.name || library.path) + '</strong>' +
-          '<span>' + esc(library.path) + '</span>' +
-        '</button>';
-      }).join('') + '</div>' +
-      '<div class="form-group"><label class="form-label" for="setup-new-library-name">或新建资源库名称</label><input class="input" id="setup-new-library-name" type="text" placeholder="例如：新资源库"></div>' +
-      '<div class="form-group"><label class="form-label" for="setup-new-library-path">新资源库路径</label><input class="input" id="setup-new-library-path" type="text" placeholder="输入新路径后会自动创建目录"></div>' +
-      '<button class="btn btn-primary" style="width:100%%;justify-content:center" id="setup-select-library">切换资源库并重启</button>' +
-      '<div class="login-error" id="setup-error"></div>';
+    root.innerHTML =
+      '<div class="setup-recovery-hero">' +
+        '<div class="setup-recovery-brand"><span class="setup-recovery-mark">E</span><span>EchoGallery</span></div>' +
+        '<span class="setup-recovery-status">需要选择资源库</span>' +
+        '<h1>资源库恢复</h1>' +
+        '<p>' + esc(state.message || '当前资源库不可用，请选择其他资源库后重启。') + '</p>' +
+        '<div class="setup-recovery-current"><span>当前路径</span><strong>' + esc(state.current_storage_path || '未记录') + '</strong></div>' +
+      '</div>' +
+      '<div class="setup-recovery-grid">' +
+        '<section class="setup-recovery-section">' +
+          '<div class="setup-recovery-section-head"><strong>选择已有资源库</strong><span>' + libraries.length + ' 个记录</span></div>' +
+          '<div class="setup-library-chooser" id="setup-library-chooser">' + (libraries.length ? libraries.map(function (library, index) {
+            var currentClass = library.path === state.current_storage_path ? ' current' : '';
+            var current = library.path === state.current_storage_path ? '<em>当前不可用</em>' : '';
+            return '<button class="setup-library-option' + currentClass + '" type="button" data-path="' + esc(library.path) + '">' +
+              '<span class="setup-library-option-dot">' + (index + 1) + '</span>' +
+              '<span class="setup-library-option-main">' +
+                '<strong>' + esc(library.name || library.path) + '</strong>' +
+                '<small>' + esc(library.path) + '</small>' +
+              '</span>' +
+              current +
+            '</button>';
+          }).join('') : '<div class="setup-recovery-empty">config.json 中还没有可切换的资源库记录。</div>') + '</div>' +
+        '</section>' +
+        '<section class="setup-recovery-section setup-recovery-create">' +
+          '<div class="setup-recovery-section-head"><strong>新建资源库</strong><span>自动创建目录</span></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-new-library-name">资源库名称</label><input class="input" id="setup-new-library-name" type="text" placeholder="例如：新资源库"></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-new-library-path">资源库路径</label><input class="input" id="setup-new-library-path" type="text" placeholder="输入新路径后会自动创建目录"></div>' +
+        '</section>' +
+      '</div>' +
+      '<div class="setup-recovery-footer">' +
+        '<button class="btn btn-primary" id="setup-select-library">切换资源库并重启</button>' +
+        '<div class="login-error" id="setup-error"></div>' +
+      '</div>';
 
     var selectedPath = '';
     Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (btn) {

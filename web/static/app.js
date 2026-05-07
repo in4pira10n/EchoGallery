@@ -777,6 +777,10 @@ function updateVideoBookmarkButton(photo = state.lightboxPhotos[state.lightboxIn
   btn.setAttribute('aria-label', btn.title);
 }
 function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
+  if (video && !('currentTime' in video) && !video.classList) {
+    photo = video;
+    video = $('#lb-video');
+  }
   const track = $('#lb-video-progress');
   const fill = $('#lb-video-progress-fill');
   const markers = $('#lb-video-progress-markers');
@@ -809,6 +813,145 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
     const label = bookmark.name ? `${bookmark.name} · ${formatDuration(bookmark.time * 1000)}` : `书签 ${bookmark.slot} · ${formatDuration(bookmark.time * 1000)}`;
     return `<button type="button" class="lightbox-video-progress-marker" data-video-bookmark-slot="${bookmark.slot}" style="left:${left}%" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${bookmark.slot === 10 ? '0' : bookmark.slot}</button>`;
   }).join('');
+}
+function videoPlaybackPreferenceKey(photo) {
+  return photo && photo.id ? String(photo.id) : '';
+}
+function normalizeVideoPlaybackPreference(raw) {
+  const volume = Number(raw && raw.volume);
+  return {
+    volume: Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1,
+    muted: !!(raw && raw.muted),
+  };
+}
+async function loadVideoPlaybackPreference(photo) {
+  const key = videoPlaybackPreferenceKey(photo);
+  if (!key || !isVideoMedia(photo)) return normalizeVideoPlaybackPreference(null);
+  if (state.videoPlaybackPreferences[key]) return state.videoPlaybackPreferences[key];
+  try {
+    const pref = await api.get(`/api/media/${photo.id}/playback`);
+    state.videoPlaybackPreferences[key] = normalizeVideoPlaybackPreference(pref);
+  } catch (_) {
+    state.videoPlaybackPreferences[key] = normalizeVideoPlaybackPreference(null);
+  }
+  return state.videoPlaybackPreferences[key];
+}
+async function restoreVideoPlaybackPreference(video, photo) {
+  if (!video || !isVideoMedia(photo)) return;
+  const pref = await loadVideoPlaybackPreference(photo);
+  if (state.lightboxPhotos[state.lightboxIndex] !== photo) return;
+  video.dataset.restoringPlaybackPreference = '1';
+  video.volume = pref.volume;
+  video.muted = pref.muted;
+  requestAnimationFrame(() => {
+    if (video) delete video.dataset.restoringPlaybackPreference;
+  });
+}
+function persistVideoPlaybackPreferenceSoon(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
+  if (!video || !isVideoMedia(photo) || !photo.id || video.dataset.restoringPlaybackPreference === '1') return;
+  const key = videoPlaybackPreferenceKey(photo);
+  const pref = normalizeVideoPlaybackPreference({ volume: video.volume, muted: video.muted });
+  state.videoPlaybackPreferences[key] = pref;
+  clearTimeout(state.videoPlaybackPreferenceSaveTimer);
+  state.videoPlaybackPreferenceSaveTimer = setTimeout(() => {
+    api.put(`/api/media/${photo.id}/playback`, pref).catch(() => {});
+  }, 400);
+}
+function showVideoProgressActivity(duration = 3000) {
+  const progress = $('#lb-video-progress');
+  if (!progress || progress.classList.contains('hidden')) return;
+  progress.classList.add('active');
+  clearTimeout(state.lightboxVideoProgressTimer);
+  state.lightboxVideoProgressTimer = setTimeout(() => {
+    if (!progress.classList.contains('scrubbing')) progress.classList.remove('active');
+  }, duration);
+}
+function seekVideoFromProgressClientX(track, clientX) {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!track || !video || video.classList.contains('hidden') || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+  const rect = track.getBoundingClientRect();
+  const ratio = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0;
+  video.currentTime = video.duration * ratio;
+  updateVideoBookmarkProgress(video, photo);
+  showVideoProgressActivity();
+  return true;
+}
+function beginVideoProgressScrub(e, track) {
+  if (!track || e.button > 0) return false;
+  const progress = $('#lb-video-progress');
+  if (!progress || !seekVideoFromProgressClientX(track, e.clientX)) return false;
+  state.videoProgressScrubPointerId = e.pointerId;
+  state.videoProgressClickSuppressUntil = Date.now() + 450;
+  progress.classList.add('active', 'scrubbing');
+  progress.classList.toggle('touching', e.pointerType === 'touch' || e.pointerType === 'pen');
+  if (track.setPointerCapture) {
+    try { track.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
+function updateVideoProgressScrub(e) {
+  if (state.videoProgressScrubPointerId !== e.pointerId) return false;
+  const track = $('.lightbox-video-progress-track');
+  if (!track) return false;
+  seekVideoFromProgressClientX(track, e.clientX);
+  e.preventDefault();
+  return true;
+}
+function endVideoProgressScrub(e) {
+  if (state.videoProgressScrubPointerId !== e.pointerId) return false;
+  const progress = $('#lb-video-progress');
+  const track = $('.lightbox-video-progress-track');
+  if (track && track.releasePointerCapture) {
+    try { track.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+  state.videoProgressScrubPointerId = null;
+  state.videoProgressClickSuppressUntil = Date.now() + 450;
+  if (progress) {
+    progress.classList.remove('scrubbing', 'touching');
+    showVideoProgressActivity();
+  }
+  e.preventDefault();
+  return true;
+}
+function handleLightboxVideoSurfaceClick(e) {
+  if (!e || Date.now() < state.videoProgressClickSuppressUntil) return false;
+  if (state.slideshowPlaying) return false;
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const video = $('#lb-video');
+  if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return false;
+  if (!e.target.closest('.lightbox-body')) return false;
+  if (e.target.closest('.lightbox-header, .lightbox-info, .lightbox-video-progress, .lightbox-volume-feedback, .lb-nav, .context-menu, button, input, select, label, a')) return false;
+  if (!e.target.closest('.lightbox-media-frame, #lb-video')) return false;
+  const body = $('.lightbox-body');
+  const rect = body ? body.getBoundingClientRect() : video.getBoundingClientRect();
+  const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+  const side = ratio <= 0.25 ? 'left' : ratio >= 0.75 ? 'right' : '';
+  const isTouch = state.lightboxLastPointerType === 'touch' || state.lightboxLastPointerType === 'pen';
+  if (isTouch && side) {
+    const now = Date.now();
+    const last = state.videoSurfaceLastTap || {};
+    clearTimeout(state.videoSurfaceTapTimer);
+    if (last.side === side && now - last.time <= 340) {
+      state.videoSurfaceLastTap = null;
+      adjustVideoTime(side === 'left' ? -5 : 5);
+    } else {
+      state.videoSurfaceLastTap = { side, time: now };
+      state.videoSurfaceTapTimer = setTimeout(() => {
+        state.videoSurfaceLastTap = null;
+        toggleVideoPlayback();
+      }, 260);
+    }
+  } else {
+    clearTimeout(state.videoSurfaceTapTimer);
+    state.videoSurfaceLastTap = null;
+    toggleVideoPlayback();
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
 }
 function saveCurrentVideoResumePosition({ quiet = false } = {}) {
   const photo = state.lightboxPhotos[state.lightboxIndex];
@@ -2125,6 +2268,8 @@ function adjustVideoTime(seconds) {
   const video = $('#lb-video');
   if (!video || video.classList.contains('hidden')) return false;
   video.currentTime = Math.max(0, Math.min(video.duration || Infinity, video.currentTime + seconds));
+  updateVideoBookmarkProgress(video);
+  showVideoProgressActivity();
   return true;
 }
 function adjustVideoVolume(delta) {
@@ -2133,6 +2278,7 @@ function adjustVideoVolume(delta) {
   video.volume = Math.max(0, Math.min(1, video.volume + delta / 100));
   video.muted = false;
   showVolumeOverlay(video);
+  persistVideoPlaybackPreferenceSoon(video);
   return true;
 }
 function setVideoSpeed(rate) {
@@ -2146,6 +2292,7 @@ function toggleVideoMute() {
   if (!video || video.classList.contains('hidden')) return false;
   video.muted = !video.muted;
   showVolumeOverlay(video);
+  persistVideoPlaybackPreferenceSoon(video);
   return true;
 }
 
@@ -2441,6 +2588,12 @@ const state = {
   lightboxMediaLoading: false,
   lightboxUiIdleTimer: null,
   lightboxVolumeTimer: null,
+  lightboxVideoProgressTimer: null,
+  videoProgressScrubPointerId: null,
+  videoProgressClickSuppressUntil: 0,
+  videoSurfaceLastTap: null,
+  videoSurfaceTapTimer: null,
+  lightboxLastPointerType: '',
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
   loadMoreObserver: null,
@@ -2464,6 +2617,8 @@ const state = {
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
   videoBookmarks: loadVideoBookmarks(),
   videoBookmarkSaveTimer: null,
+  videoPlaybackPreferences: {},
+  videoPlaybackPreferenceSaveTimer: null,
   activePreloadJobs: new Set(),
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
@@ -2900,6 +3055,7 @@ function renderLibraryBuild() {
       <div><strong>${Math.round(percent)}%</strong><span>完成度</span></div>
       <div><strong>${formatSecondsShort(status.elapsed_seconds)}</strong><span>已用时间</span></div>
       <div><strong>${status.eta_seconds > 0 ? formatSecondsShort(status.eta_seconds) : '计算中'}</strong><span>预计剩余</span></div>
+      ${Number(status.pruned) > 0 ? `<div><strong>${Number(status.pruned)}</strong><span>已清理失效媒体</span></div>` : ''}
     </div>
     ${status.error ? `<div class="library-build-error">${escapeHTML(status.error)}</div>` : ''}
     <label class="library-build-exit">
@@ -4492,7 +4648,9 @@ async function renderFavorites() {
   $('#content').innerHTML = `
 <div id="favorite-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-  $('#download-all-favorites-btn').addEventListener('click', downloadAllFavorites);
+  $('#download-all-favorites-btn').addEventListener('click', () => {
+    if (confirm('确定要打包下载全部个人收藏吗？媒体较多时可能需要一些时间。')) downloadAllFavorites();
+  });
 
   state.favoritePhotos = [];
   state.favoriteCursor = '';
@@ -5956,15 +6114,10 @@ function bindGlobal() {
     }
     const progressTrack = e.target.closest('.lightbox-video-progress-track');
     if (progressTrack) {
-      const photo = state.lightboxPhotos[state.lightboxIndex];
-      const video = $('#lb-video');
-      if (video && !video.classList.contains('hidden') && Number.isFinite(video.duration) && video.duration > 0) {
-        const rect = progressTrack.getBoundingClientRect();
-        const ratio = rect.width > 0 ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0;
-        video.currentTime = video.duration * ratio;
-        updateVideoBookmarkProgress(video, photo);
-      }
+      seekVideoFromProgressClientX(progressTrack, e.clientX);
+      return;
     }
+    if (handleLightboxVideoSurfaceClick(e)) return;
     if (shouldStopSlideshowFromClick(e.target)) stopSlideshow();
     if (e.target.closest('#global-search-btn, #floating-search-btn')) openGlobalSearch();
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
@@ -5981,6 +6134,21 @@ function bindGlobal() {
       if (query) runGlobalSearch(query, { reset: true });
     }
   });
+  document.addEventListener('pointerdown', e => {
+    if (!$('#lightbox').classList.contains('open')) return;
+    state.lightboxLastPointerType = e.pointerType || '';
+    const progressTrack = e.target.closest('.lightbox-video-progress-track');
+    if (progressTrack) beginVideoProgressScrub(e, progressTrack);
+  }, true);
+  document.addEventListener('pointermove', e => {
+    if (state.videoProgressScrubPointerId != null) updateVideoProgressScrub(e);
+  }, true);
+  document.addEventListener('pointerup', e => {
+    if (state.videoProgressScrubPointerId != null) endVideoProgressScrub(e);
+  }, true);
+  document.addEventListener('pointercancel', e => {
+    if (state.videoProgressScrubPointerId != null) endVideoProgressScrub(e);
+  }, true);
   document.addEventListener('pointerup', e => {
     if (!$('#lightbox').classList.contains('open')) return;
     if (e.target.closest('#lb-video')) refocusLightboxAfterVideoControl();
@@ -5989,6 +6157,7 @@ function bindGlobal() {
     const video = e.currentTarget;
     if (!video || video.classList.contains('hidden')) return;
     showVolumeOverlay(video);
+    persistVideoPlaybackPreferenceSoon(video);
   });
   document.addEventListener('input', e => {
     if (e.target.matches('input[type="range"]')) updateRangeProgress(e.target);
@@ -6087,6 +6256,12 @@ async function openLightbox(photos, index) {
 function closeLightbox() {
   stopSlideshow();
   clearLightboxUiIdleTimer();
+  clearTimeout(state.lightboxVideoProgressTimer);
+  clearTimeout(state.videoSurfaceTapTimer);
+  state.videoProgressScrubPointerId = null;
+  state.videoSurfaceLastTap = null;
+  state.lightboxLastPointerType = '';
+  $('#lb-video-progress')?.classList.remove('active', 'scrubbing', 'touching');
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
   setLightboxMediaLoading(false);
@@ -6189,6 +6364,7 @@ function lbRender() {
     video.onloadedmetadata = () => {
       applyLightboxZoom();
       restoreVideoResumePosition(video, p);
+      restoreVideoPlaybackPreference(video, p);
       updateVideoBookmarkProgress(video, p);
     };
     video.onerror = () => {
@@ -6200,6 +6376,7 @@ function lbRender() {
       handleVideoResumeTimeUpdate(video);
       updateVideoBookmarkProgress(video, p);
     };
+    restoreVideoPlaybackPreference(video, p);
     video.src = mediaFileURL(p);
     video.poster = mediaThumbURL(p);
     video.load();

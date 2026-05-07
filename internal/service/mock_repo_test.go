@@ -14,17 +14,19 @@ type mockRepo struct {
 	albums                   map[int64]*storage.Album
 	albumPhotos              map[int64][]int64 // albumID -> []photoID
 	shareLinks               map[int64]*storage.ShareLink
+	playbackPrefs            map[string]*storage.VideoPlaybackPreference
 	nextID                   int64
 	sourceRelPathLookupCount int
 }
 
 func newMockRepo() *mockRepo {
 	return &mockRepo{
-		photos:      make(map[int64]*storage.Photo),
-		albums:      make(map[int64]*storage.Album),
-		albumPhotos: make(map[int64][]int64),
-		shareLinks:  make(map[int64]*storage.ShareLink),
-		nextID:      1,
+		photos:        make(map[int64]*storage.Photo),
+		albums:        make(map[int64]*storage.Album),
+		albumPhotos:   make(map[int64][]int64),
+		shareLinks:    make(map[int64]*storage.ShareLink),
+		playbackPrefs: make(map[string]*storage.VideoPlaybackPreference),
+		nextID:        1,
 	}
 }
 
@@ -97,6 +99,25 @@ func (m *mockRepo) ListSourceMediaIndex(userID int64) (map[string]storage.Source
 		}
 	}
 	return index, nil
+}
+
+func (m *mockRepo) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
+	pref := m.playbackPrefs[fmt.Sprintf("%d:%d", photoID, userID)]
+	if pref == nil {
+		return nil, nil
+	}
+	return pref, nil
+}
+
+func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*storage.VideoPlaybackPreference, error) {
+	pref := &storage.VideoPlaybackPreference{
+		PhotoID:   photoID,
+		Volume:    volume,
+		Muted:     muted,
+		UpdatedAt: time.Now(),
+	}
+	m.playbackPrefs[fmt.Sprintf("%d:%d", photoID, userID)] = pref
+	return pref, nil
 }
 
 func (m *mockRepo) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
