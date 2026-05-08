@@ -46,6 +46,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 
 	cfg := &Config{
 		Port:          params.Port,
+		ActiveProfile: user.Username,
 		StoragePath:   params.StoragePath,
 		Libraries:     libraries,
 		ThumbnailDir:  strings.TrimSpace(params.ThumbnailDir),

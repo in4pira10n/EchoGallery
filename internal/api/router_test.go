@@ -491,6 +491,7 @@ func TestNewRouter_MediaPlaceholder(t *testing.T) {
 
 func TestSettingsEndpoint_ReturnsConfig(t *testing.T) {
 	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
 	cfg.Port = 8080
 	cfg.UseSystemPlayer = true
 	router := NewRouter(cfg, okRegistrar())
@@ -2283,6 +2284,21 @@ func TestLoginPage_Returns200(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+}
+
+func TestRegisterPage_Returns200(t *testing.T) {
+	router := NewRouter(testConfig(), okRegistrar())
+	req := httptest.NewRequest(http.MethodGet, "/register", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "/api/auth/register") {
+		t.Fatalf("注册页应包含注册接口")
 	}
 }
 

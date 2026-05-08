@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN" data-theme>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title id="register-page-title">注册 - EchoGallery</title>
+    <link rel="stylesheet" href="/pages/common.css">
+    <link rel="stylesheet" href="/pages/login.css">
+  </head>
+  <body>
+    <script>
+  (function(){
+    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+    <div class="login-wrap">
+      <div class="login-card register-card">
+        <section class="login-hero" aria-label="EchoGallery">
+          <h1 id="register-hero-title">创建账号</h1>
+          <p id="register-hero-copy">为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。</p>
+        </section>
+        <section class="login-form-panel" aria-label="注册">
+          <div class="login-form-head">
+            <span id="register-badge">新用户</span>
+            <strong id="register-form-title">注册 EchoGallery</strong>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="username" id="register-username-label">用户名</label>
+            <input class="input" id="username" type="text"
+              autocomplete="username" placeholder="请输入用户名">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="password" id="register-password-label">密码</label>
+            <input class="input" id="password" type="password"
+              autocomplete="new-password" placeholder="至少 6 位">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="confirm-password" id="register-confirm-label">确认密码</label>
+            <input class="input" id="confirm-password" type="password"
+              autocomplete="new-password" placeholder="再次输入密码">
+          </div>
+          <button class="btn btn-primary login-submit"
+            id="register-btn">创建账号</button>
+          <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
+          <div class="login-error" id="register-error"></div>
+        </section>
+      </div>
+    </div>
+<script>
+(function() {
+  var copyDefaults = {
+    pageTitle: '注册 - EchoGallery',
+    heroTitle: '创建账号',
+    heroCopy: '为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。',
+    badge: '新用户',
+    formTitle: '注册 EchoGallery',
+    usernameLabel: '用户名',
+    usernamePlaceholder: '请输入用户名',
+    passwordLabel: '密码',
+    passwordPlaceholder: '至少 6 位',
+    confirmLabel: '确认密码',
+    confirmPlaceholder: '再次输入密码',
+    submit: '创建账号',
+    loginLink: '已有账号？返回登录',
+    errors: {
+      missingFields: '请完整填写注册信息',
+      passwordMismatch: '两次输入的密码不一致',
+      network: '网络错误',
+      failed: '注册失败'
+    }
+  };
+  function applyCopy(remote) {
+    var copy = Object.assign({}, copyDefaults, remote || {});
+    if (copy.errors && copyDefaults.errors) {
+      copy.errors = Object.assign({}, copyDefaults.errors, copy.errors);
+    }
+    document.title = copy.pageTitle || copyDefaults.pageTitle;
+    var map = {
+      'register-hero-title': copy.heroTitle,
+      'register-hero-copy': copy.heroCopy,
+      'register-badge': copy.badge,
+      'register-form-title': copy.formTitle,
+      'register-username-label': copy.usernameLabel,
+      'register-password-label': copy.passwordLabel,
+      'register-confirm-label': copy.confirmLabel,
+      'register-btn': copy.submit
+    };
+    Object.keys(map).forEach(function(id) {
+      var node = document.getElementById(id);
+      if (node) node.textContent = map[id];
+    });
+    var username = document.getElementById('username');
+    if (username) username.placeholder = copy.usernamePlaceholder || copyDefaults.usernamePlaceholder;
+    var password = document.getElementById('password');
+    if (password) password.placeholder = copy.passwordPlaceholder || copyDefaults.passwordPlaceholder;
+    var confirm = document.getElementById('confirm-password');
+    if (confirm) confirm.placeholder = copy.confirmPlaceholder || copyDefaults.confirmPlaceholder;
+    var loginLink = document.querySelector('.login-secondary-link');
+    if (loginLink) loginLink.textContent = copy.loginLink || copyDefaults.loginLink;
+    return copy;
+  }
+  function bindSpotlight(selector, xVar, yVar) {
+    var el = document.querySelector(selector);
+    if (!el || !window.matchMedia('(pointer: fine)').matches) return;
+    var frame = 0;
+    function move(e) {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(function () {
+        var rect = el.getBoundingClientRect();
+        var x = Math.max(0, Math.min(100, (e.clientX - rect.left) / rect.width * 100));
+        var y = Math.max(0, Math.min(100, (e.clientY - rect.top) / rect.height * 100));
+        el.style.setProperty(xVar, x.toFixed(2) + '%');
+        el.style.setProperty(yVar, y.toFixed(2) + '%');
+      });
+    }
+    el.addEventListener('pointermove', move);
+  }
+  bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
+  var btn = document.getElementById('register-btn');
+  var errEl = document.getElementById('register-error');
+  var copy = applyCopy();
+  fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (catalog) {
+      if (catalog && catalog.pages && catalog.pages.register) {
+        copy = applyCopy(catalog.pages.register);
+      }
+    })
+    .catch(function () {});
+  async function doRegister() {
+    var u = document.getElementById('username').value.trim();
+    var p = document.getElementById('password').value;
+    var c = document.getElementById('confirm-password').value;
+    if (!u || !p || !c) { errEl.textContent = copy.errors.missingFields || copyDefaults.errors.missingFields; return; }
+    if (p !== c) { errEl.textContent = copy.errors.passwordMismatch || copyDefaults.errors.passwordMismatch; return; }
+    btn.disabled = true; btn.textContent = copy.submit + '中…';
+    try {
+      var r = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: u, password: p, confirm_password: c})
+      });
+      if (r.ok) { location.href = '/login'; return; }
+      var d = await r.json();
+      errEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
+    } catch(e) { errEl.textContent = copy.errors.network || copyDefaults.errors.network; }
+    btn.disabled = false; btn.textContent = copy.submit || copyDefaults.submit;
+  }
+  btn.addEventListener('click', doRegister);
+  document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doRegister(); });
+})();
+</script>
+  </body>
+</html>

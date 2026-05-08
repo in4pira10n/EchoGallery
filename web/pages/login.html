@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN" data-theme>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title id="login-page-title">登录 - EchoGallery</title>
+    <link rel="stylesheet" href="/pages/common.css">
+    <link rel="stylesheet" href="/pages/login.css">
+  </head>
+  <body>
+    <script>
+  (function(){
+    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+    <div class="login-wrap">
+      <div class="login-card">
+        <section class="login-hero" aria-label="EchoGallery">
+          <h1 id="login-hero-title">欢迎回来</h1>
+          <p id="login-hero-copy">进入你的本地影像资源库，继续浏览、整理与回忆。</p>
+        </section>
+        <section class="login-form-panel" aria-label="登录">
+          <div class="login-form-head">
+            <span id="login-badge">本地访问</span>
+            <strong id="login-form-title">登录 EchoGallery</strong>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="username" id="login-username-label">用户名</label>
+            <input class="input" id="username" type="text"
+              autocomplete="username" placeholder="请输入用户名">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="password" id="login-password-label">密码</label>
+            <input class="input" id="password" type="password"
+              autocomplete="current-password" placeholder="请输入密码">
+          </div>
+          <button class="btn btn-primary login-submit"
+            id="login-btn">登录</button>
+          <a class="login-secondary-link" href="/register">注册新用户</a>
+          <div class="login-error" id="login-error"></div>
+        </section>
+      </div>
+    </div>
+<script>
+(function() {
+  var copyDefaults = {
+    pageTitle: '登录 - EchoGallery',
+    heroTitle: '欢迎回来',
+    heroCopy: '进入你的本地影像资源库，继续浏览、整理与回忆。',
+    badge: '本地访问',
+    formTitle: '登录 EchoGallery',
+    usernameLabel: '用户名',
+    usernamePlaceholder: '请输入用户名',
+    passwordLabel: '密码',
+    passwordPlaceholder: '请输入密码',
+    submit: '登录',
+    registerLink: '注册新用户',
+    errors: {
+      missingFields: '请输入用户名和密码',
+      network: '网络错误',
+      failed: '登录失败'
+    }
+  };
+  function applyCopy(remote) {
+    var copy = Object.assign({}, copyDefaults, remote || {});
+    if (copy.errors && copyDefaults.errors) {
+      copy.errors = Object.assign({}, copyDefaults.errors, copy.errors);
+    }
+    document.title = copy.pageTitle || copyDefaults.pageTitle;
+    var map = {
+      'login-hero-title': copy.heroTitle,
+      'login-hero-copy': copy.heroCopy,
+      'login-badge': copy.badge,
+      'login-form-title': copy.formTitle,
+      'login-username-label': copy.usernameLabel,
+      'login-password-label': copy.passwordLabel,
+      'login-btn': copy.submit
+    };
+    Object.keys(map).forEach(function(id) {
+      var node = document.getElementById(id);
+      if (node) node.textContent = map[id];
+    });
+    var username = document.getElementById('username');
+    if (username) username.placeholder = copy.usernamePlaceholder || copyDefaults.usernamePlaceholder;
+    var password = document.getElementById('password');
+    if (password) password.placeholder = copy.passwordPlaceholder || copyDefaults.passwordPlaceholder;
+    var registerLink = document.querySelector('.login-secondary-link');
+    if (registerLink) registerLink.textContent = copy.registerLink || copyDefaults.registerLink;
+    return copy;
+  }
+  function bindSpotlight(selector, xVar, yVar) {
+    var el = document.querySelector(selector);
+    if (!el || !window.matchMedia('(pointer: fine)').matches) return;
+    var frame = 0;
+    function move(e) {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(function () {
+        var rect = el.getBoundingClientRect();
+        var x = Math.max(0, Math.min(100, (e.clientX - rect.left) / rect.width * 100));
+        var y = Math.max(0, Math.min(100, (e.clientY - rect.top) / rect.height * 100));
+        el.style.setProperty(xVar, x.toFixed(2) + '%');
+        el.style.setProperty(yVar, y.toFixed(2) + '%');
+      });
+    }
+    el.addEventListener('pointermove', move);
+  }
+  bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
+  var btn = document.getElementById('login-btn');
+  var errEl = document.getElementById('login-error');
+  var copy = applyCopy();
+  fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (catalog) {
+      if (catalog && catalog.pages && catalog.pages.login) {
+        copy = applyCopy(catalog.pages.login);
+      }
+    })
+    .catch(function () {});
+  async function doLogin() {
+    var u = document.getElementById('username').value.trim();
+    var p = document.getElementById('password').value;
+    if (!u || !p) { errEl.textContent = copy.errors.missingFields || copyDefaults.errors.missingFields; return; }
+    btn.disabled = true; btn.textContent = copy.submit + '中…';
+    try {
+      var r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: u, password: p})
+      });
+      var d = await r.json().catch(function () { return {}; });
+      if (r.ok) {
+        errEl.style.color = 'var(--accent)';
+        errEl.textContent = d.message || '';
+        var target = d.redirect || '/';
+        var delay = Math.max(0, Number(d.delay_ms) || 0);
+        setTimeout(function () { location.href = target; }, delay);
+        return;
+      }
+      errEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
+    } catch(e) { errEl.textContent = copy.errors.network || copyDefaults.errors.network; }
+    btn.disabled = false; btn.textContent = copy.submit || copyDefaults.submit;
+  }
+  btn.addEventListener('click', doLogin);
+  document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doLogin(); });
+})();
+</script>
+  </body>
+</html>

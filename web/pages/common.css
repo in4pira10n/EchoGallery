@@ -1,0 +1,163 @@
+/* Shared page shell styles for standalone pages in web/pages. */
+:root {
+  --bg: #f7f4ef;
+  --bg2: #eee8dd;
+  --card: #ffffff;
+  --border: #ddd5c8;
+  --text: #181410;
+  --text2: #4f473f;
+  --accent: #2d6a5f;
+  --accent-h: #245549;
+  --accent-soft: rgba(45, 106, 95, .14);
+  --accent-faint: rgba(45, 106, 95, .07);
+  --topbar-text: #253933;
+  --danger: #c0392b;
+  --shadow: 0 2px 12px rgba(0, 0, 0, .08);
+  --radius: 32px;
+}
+
+[data-theme="dark"] {
+  --bg: #1a1a1a;
+  --bg2: #222222;
+  --card: #2a2a2a;
+  --border: #3a3a3a;
+  --text: #e8e0d4;
+  --text2: #9a9080;
+  --accent: #4a9d8f;
+  --accent-h: #5bbdad;
+  --accent-soft: rgba(74, 157, 143, .24);
+  --accent-faint: rgba(74, 157, 143, .14);
+  --topbar-text: #f5efe6;
+  --danger: #e05c4b;
+  --shadow: 0 2px 12px rgba(0, 0, 0, .4);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 15px;
+}
+
+body {
+  font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  transition: background .18s ease, border-color .18s ease, transform .18s ease;
+}
+
+.btn:hover {
+  background: var(--bg2);
+}
+
+.btn:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-h);
+  border-color: var(--accent-h);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: .82rem;
+}
+
+.input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: .9rem;
+  transition: border-color .15s, box-shadow .15s;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent);
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-label {
+  display: block;
+  font-size: .78rem;
+  font-weight: 760;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 14% 18%, color-mix(in srgb, var(--accent) 18%, transparent) 0 22%, transparent 38%),
+    radial-gradient(circle at 84% 78%, color-mix(in srgb, var(--accent-h) 16%, transparent) 0 20%, transparent 36%),
+    linear-gradient(135deg, var(--bg), color-mix(in srgb, var(--bg2) 64%, var(--bg)));
+}
+
+.login-card {
+  background: color-mix(in srgb, var(--card) 76%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 36px;
+  box-shadow:
+    0 28px 80px rgba(0, 0, 0, .14),
+    inset 0 1px 0 rgba(255, 255, 255, .24);
+  -webkit-backdrop-filter: blur(28px) saturate(130%);
+  backdrop-filter: blur(28px) saturate(130%);
+}
+
+.login-error {
+  color: var(--danger);
+  font-size: .84rem;
+  min-height: 1.25em;
+  text-align: center;
+}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -67,6 +68,114 @@ func TestAddUser_EmptyUsername(t *testing.T) {
 func TestAddUser_ShortPassword(t *testing.T) {
 	if err := AddUser("alice", "123"); err == nil {
 		t.Error("短密码应该返回错误")
+	}
+}
+
+func TestRegisterUser_CreatesUserAndProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.ActiveProfile = "alice"
+	cfg.StoragePath = "/tmp/alice-library"
+	cfg.Libraries = []Library{{Name: "Alice", Path: "/tmp/alice-library"}}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	user, err := RegisterUser(cfg, "bob", "password123")
+	if err != nil {
+		t.Fatalf("注册用户失败: %v", err)
+	}
+	if user.Username != "bob" {
+		t.Fatalf("期望注册 bob，得到 %s", user.Username)
+	}
+	if len(cfg.Users) != 1 || cfg.Users[0].Username != "bob" {
+		t.Fatalf("期望配置中写入新用户，得到 %+v", cfg.Users)
+	}
+	loaded, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("重新读取配置失败: %v", err)
+	}
+	if len(loaded.Users) != 1 || loaded.Users[0].Username != "bob" {
+		t.Fatalf("期望新用户已落盘，得到 %+v", loaded.Users)
+	}
+	profile, err := LoadProfile(cfg, "bob")
+	if err != nil {
+		t.Fatalf("期望创建用户 Profile: %v", err)
+	}
+	if profile.StoragePath != "" {
+		t.Fatalf("新用户 Profile 不应继承旧用户资源库，得到 %s", profile.StoragePath)
+	}
+	if len(profile.Libraries) != 0 {
+		t.Fatalf("新用户 Profile 不应继承旧用户资源库列表，得到 %+v", profile.Libraries)
+	}
+}
+
+func TestRegisterUser_DuplicateUsernameCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.Users = []User{{Username: "Alice", PasswordHash: "hash"}}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	if _, err := RegisterUser(cfg, "alice", "password123"); err == nil {
+		t.Fatal("重复用户名应返回错误")
+	}
+}
+
+func TestDeleteUser_RemovesProfileAndSelectsNewActiveProfile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.ActiveProfile = "alice"
+	cfg.Users = []User{
+		{Username: "alice", PasswordHash: "hash-1"},
+		{Username: "bob", PasswordHash: "hash-2"},
+	}
+	cfg.StoragePath = "/tmp/alice-library"
+	if err := SaveProfile(cfg, "alice", &Profile{StoragePath: "/tmp/alice-library"}); err != nil {
+		t.Fatalf("保存 alice Profile 失败: %v", err)
+	}
+	if err := SaveProfile(cfg, "bob", &Profile{StoragePath: "/tmp/bob-library"}); err != nil {
+		t.Fatalf("保存 bob Profile 失败: %v", err)
+	}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	if err := DeleteUser("alice"); err != nil {
+		t.Fatalf("删除用户失败: %v", err)
+	}
+
+	loaded, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("重新读取配置失败: %v", err)
+	}
+	if len(loaded.Users) != 1 || loaded.Users[0].Username != "bob" {
+		t.Fatalf("期望仅保留 bob，得到 %+v", loaded.Users)
+	}
+	if loaded.ActiveProfile != "bob" {
+		t.Fatalf("期望 active_profile 切换到 bob，得到 %s", loaded.ActiveProfile)
+	}
+	profilePath, err := cfg.ProfilePath("alice")
+	if err != nil {
+		t.Fatalf("读取 alice Profile 路径失败: %v", err)
+	}
+	if _, err := os.Stat(profilePath); !os.IsNotExist(err) {
+		t.Fatalf("期望 alice Profile 被删除，得到 %v", err)
 	}
 }
 

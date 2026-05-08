@@ -183,6 +183,59 @@ func TestListAlbumPhotos_Pagination(t *testing.T) {
 	}
 }
 
+func TestListAlbumPhotos_SortByNameAndSize(t *testing.T) {
+	db := newTestDB(t)
+	album := &storage.Album{Name: "排序相册", CreatedBy: 1, CreatedAt: time.Now()}
+	db.CreateAlbum(album)
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	inputs := []struct {
+		name string
+		size int64
+	}{
+		{name: "C.jpg", size: 300},
+		{name: "a.jpg", size: 100},
+		{name: "B.jpg", size: 500},
+	}
+	for i, input := range inputs {
+		p := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		p.UUID = "sorted-album-photo-" + string(rune('a'+i))
+		p.OriginalName = input.name
+		p.Size = input.size
+		db.SavePhoto(p)
+		db.AddPhotoToAlbum(album.ID, p.ID, 1)
+	}
+
+	byName, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID: album.ID, UserID: 1, Limit: 2, Sort: "name",
+	})
+	if err != nil {
+		t.Fatalf("按名称查询失败: %v", err)
+	}
+	if got := []string{byName.Photos[0].OriginalName, byName.Photos[1].OriginalName}; got[0] != "a.jpg" || got[1] != "B.jpg" || !byName.HasMore {
+		t.Fatalf("按名称第一页排序不正确: %+v hasMore=%v", got, byName.HasMore)
+	}
+	byNameNext, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID: album.ID, UserID: 1, Limit: 2, Sort: "name", Cursor: byName.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("按名称第二页查询失败: %v", err)
+	}
+	if len(byNameNext.Photos) != 1 || byNameNext.Photos[0].OriginalName != "C.jpg" {
+		t.Fatalf("按名称第二页排序不正确: %+v", byNameNext.Photos)
+	}
+
+	bySize, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID: album.ID, UserID: 1, Limit: 3, Sort: "size",
+	})
+	if err != nil {
+		t.Fatalf("按大小查询失败: %v", err)
+	}
+	if got := []string{bySize.Photos[0].OriginalName, bySize.Photos[1].OriginalName, bySize.Photos[2].OriginalName}; got[0] != "B.jpg" || got[1] != "C.jpg" || got[2] != "a.jpg" {
+		t.Fatalf("按大小排序不正确: %+v", got)
+	}
+}
+
 func TestAlbumPhotoCount(t *testing.T) {
 	db := newTestDB(t)
 	album := &storage.Album{Name: "计数测试", CreatedBy: 1, CreatedAt: time.Now()}

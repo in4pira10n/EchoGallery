@@ -1,0 +1,194 @@
+{
+  "pages": {
+    "login": {
+      "pageTitle": "登录 - EchoGallery",
+      "heroTitle": "欢迎回来",
+      "heroCopy": "进入你的本地影像资源库，继续浏览、整理与回忆。",
+      "badge": "本地访问",
+      "formTitle": "登录 EchoGallery",
+      "usernameLabel": "用户名",
+      "usernamePlaceholder": "请输入用户名",
+      "passwordLabel": "密码",
+      "passwordPlaceholder": "请输入密码",
+      "submit": "登录",
+      "registerLink": "注册新用户",
+      "errors": {
+        "missingFields": "请输入用户名和密码",
+        "network": "网络错误",
+        "failed": "登录失败"
+      }
+    },
+    "register": {
+      "pageTitle": "注册 - EchoGallery",
+      "heroTitle": "创建账号",
+      "heroCopy": "为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。",
+      "badge": "新用户",
+      "formTitle": "注册 EchoGallery",
+      "usernameLabel": "用户名",
+      "usernamePlaceholder": "请输入用户名",
+      "passwordLabel": "密码",
+      "passwordPlaceholder": "至少 6 位",
+      "confirmLabel": "确认密码",
+      "confirmPlaceholder": "再次输入密码",
+      "submit": "创建账号",
+      "loginLink": "已有账号？返回登录",
+      "errors": {
+        "missingFields": "请完整填写注册信息",
+        "passwordMismatch": "两次输入的密码不一致",
+        "network": "网络错误",
+        "failed": "注册失败"
+      }
+    },
+    "setup": {
+      "init": {
+        "kicker": "首次启动",
+        "title": "网页初始化",
+        "copy": "首次启动不再使用命令行向导，请在这里完成端口、资源库和管理员账号配置。",
+        "panelLabel": "网页初始化配置",
+        "serviceTitle": "服务配置",
+        "serviceHint": "启动后即可访问",
+        "portLabel": "服务端口",
+        "usernameLabel": "管理员用户名",
+        "passwordLabel": "管理员密码",
+        "passwordPlaceholder": "至少 6 位",
+        "libraryTitle": "资源库",
+        "libraryHint": "可添加多个路径",
+        "addLibrary": "添加资源库",
+        "advanced": "高级路径设置",
+        "thumbLabel": "缩略图目录（可选）",
+        "thumbPlaceholder": "默认使用应用数据目录下的 thumbnails",
+        "trashLabel": "回收站目录（可选）",
+        "trashPlaceholder": "默认使用应用数据目录下的 Trash",
+        "save": "保存并重启",
+        "saving": "保存中…",
+        "restarting": "正在重启…",
+        "switchUser": "切换用户",
+        "namePlaceholder": "资源库名称",
+        "pathPlaceholder": "资源库路径",
+        "remove": "删除",
+        "missingLibrary": "请至少填写一个资源库路径",
+        "libraryName": "资源库 {index}"
+      },
+      "recovery": {
+        "status": "需要选择资源库",
+        "title": "资源库恢复",
+        "message": "当前资源库不可用，请选择其他资源库后重启。",
+        "currentPath": "当前路径",
+        "unknownPath": "未记录",
+        "existingTitle": "选择已有资源库",
+        "existingCount": "{count} 个记录",
+        "currentInvalid": "当前不可用",
+        "empty": "config.json 中还没有可切换的资源库记录。",
+        "createTitle": "新建资源库",
+        "createHint": "自动创建目录",
+        "newNameLabel": "资源库名称",
+        "newNamePlaceholder": "例如：新资源库",
+        "newPathLabel": "资源库路径",
+        "newPathPlaceholder": "输入新路径后会自动创建目录",
+        "select": "切换资源库并重启",
+        "switching": "切换中…",
+        "restarting": "正在重启…",
+        "missingTarget": "请先选择一个资源库，或填写新的资源库路径",
+        "libraryName": "资源库 {index}"
+      }
+    }
+  },
+  "app": {
+    "search": {
+      "ariaLabel": "全局搜索",
+      "placeholder": "搜索文件名、类型、UUID",
+      "close": "关闭",
+      "downloadAll": "打包下载全部",
+      "loadMore": "加载更多",
+      "emptyPrompt": "输入关键词开始搜索",
+      "emptyResults": "没有匹配结果"
+    },
+    "libraryBuild": {
+      "title": "扫描与构建资源库",
+      "preparing": "正在准备资源库",
+      "runningDescription": "EchoGallery 正在建立媒体索引，完成后会自动进入资源库。",
+      "pausedDescription": "资源库构建需要处理后才能继续。",
+      "runningBadge": "运行中",
+      "pausedBadge": "需要处理",
+      "discovering": "发现媒体中",
+      "progressLabel": "处理进度",
+      "percentLabel": "完成度",
+      "elapsedLabel": "已用时间",
+      "etaLabel": "预计剩余",
+      "etaPending": "计算中",
+      "prunedLabel": "已清理失效媒体",
+      "exitAfterComplete": "构建完成后自动退出应用"
+    },
+    "randomAlbum": {
+      "blockingTitle": "正在加载全部乱序相册媒体",
+      "blockingBatch": "正在读取第 {batch} 批…",
+      "cancelOrganizing": "取消整理",
+      "cancelling": "已读取 {count} 条媒体，正在取消…",
+      "organizing": "已读取 {count} 条媒体，正在整理乱序相册…",
+      "collecting": "正在收集全部媒体… 已读取 {count} 条",
+      "finalizing": "已读取 {count} 条媒体，正在完成整理…",
+      "modalTitle": "立即加载全部乱序相册媒体",
+      "modalCopy": "会先确保乱序相册已收集完整媒体列表，再批量预加载缩略图。加载期间会暂时锁定 App，减少后续浏览时被缩略图加载打断。",
+      "modalReady": "准备加载…",
+      "modalCancel": "取消",
+      "modalStart": "开始加载",
+      "modalPrepare": "准备加载全部乱序相册媒体…",
+      "collectingToast": "乱序相册正在收集媒体，请稍候"
+    },
+    "empty": {
+      "favorites": "还没有加入个人收藏的媒体",
+      "albums": "还没有相册，点击左上角新建",
+      "albumMedia": "相册里还没有媒体",
+      "trash": "回收站是空的"
+    },
+    "upload": {
+      "title": "上传媒体",
+      "hint": "拖拽图片或视频到这里，或点击选择文件",
+      "support": "支持 JPG、PNG、GIF、WebP、BMP、TIFF、MP4、MOV、M4V、WebM、MKV、AVI、WMV、WMA、MPEG、TS、3GP、OGV",
+      "retryFailed": "重传失败项",
+      "close": "关闭",
+      "waiting": "等待中",
+      "uploading": "上传中",
+      "networkError": "网络错误",
+      "done": "完成",
+      "failed": "失败",
+      "retryWaiting": "等待重传"
+    },
+    "createAlbum": {
+      "title": "新建相册",
+      "nameLabel": "相册名称",
+      "namePlaceholder": "输入相册名称",
+      "descLabel": "描述（可选）",
+      "descPlaceholder": "输入描述",
+      "cancel": "取消",
+      "confirm": "创建",
+      "emptyNameAlert": "请输入相册名称"
+    },
+    "share": {
+      "title": "创建分享链接",
+      "expireLabel": "过期时间",
+      "never": "永不过期",
+      "day7": "7 天",
+      "day30": "30 天",
+      "day90": "90 天",
+      "linkLabel": "分享链接",
+      "copyHint": "点击链接复制",
+      "close": "关闭",
+      "confirm": "生成链接",
+      "manageTitle": "管理分享链接",
+      "addNew": "新建分享…",
+      "copiedToast": "已复制分享链接"
+    },
+    "logoCrop": {
+      "title": "裁剪资源库头像",
+      "copy": "拖动画面并调整缩放，保存后将按这个 1:1 构图作为资源库头像。",
+      "alt": "资源库头像预览",
+      "zoom": "缩放",
+      "reselect": "重新选择",
+      "confirm": "使用裁剪结果"
+    },
+    "logout": {
+      "closed": "EchoGallery 已退出，可以关闭此页面。"
+    }
+  }
+}

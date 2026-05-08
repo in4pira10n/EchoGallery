@@ -43,6 +43,10 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `topbar-timeline-order.svg`: Topbar timeline order toggle.
 - `album-view-grid.svg`: Album view toggle for grid mode.
 - `album-view-list.svg`: Album view toggle for list mode.
+- `album-sort-timeline-desc.svg`: Album detail sort control for newest/timeline descending order.
+- `album-sort-timeline-asc.svg`: Album detail sort control for oldest/timeline ascending order.
+- `album-sort-name.svg`: Album detail sort control for sorting by media name.
+- `album-sort-size.svg`: Album detail sort control for sorting by file size.
 - `album-card-folder.svg`: Placeholder icon slot for folder-import album cards.
 - `album-card-user.svg`: Placeholder icon slot for manually-created album cards.
 - `album-card-count.svg`: Placeholder icon slot shown before the item count on album cards.

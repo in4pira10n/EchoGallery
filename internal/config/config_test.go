@@ -107,8 +107,8 @@ func TestValidate_InvalidPort(t *testing.T) {
 func TestValidate_EmptyStoragePath(t *testing.T) {
 	cfg := validConfig()
 	cfg.StoragePath = ""
-	if err := cfg.validate(); err == nil {
-		t.Error("空 StoragePath 应该校验失败")
+	if err := cfg.validate(); err != nil {
+		t.Errorf("无资源库时空 StoragePath 应允许进入初始化流程，得到错误: %v", err)
 	}
 }
 
@@ -161,6 +161,35 @@ func TestSaveToPath_Success(t *testing.T) {
 	}
 	if loaded.Libraries[0].AccentColor != "#3366ff" {
 		t.Errorf("AccentColor 未正确保存: %s", loaded.Libraries[0].AccentColor)
+	}
+}
+
+func TestSaveToPath_OmitsProfileFieldsFromConfigJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.ActiveProfile = "alice"
+	cfg.Libraries = []Library{{Name: "家庭相册", Path: "/tmp/photos", AccentColor: "#3366ff"}}
+	cfg.ThumbnailDir = filepath.Join(cfg.AppDataDir, "thumbs")
+	cfg.TrashDir = filepath.Join(cfg.AppDataDir, "trash")
+	cfg.ThumbnailSize = 512
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("解析配置失败: %v", err)
+	}
+	for _, key := range []string{"storage_path", "libraries", "thumbnail_dir", "thumbnail_size", "trash_dir", "preferences", "use_system_player"} {
+		if _, ok := decoded[key]; ok {
+			t.Fatalf("config.json 不应再保存 Profile 字段 %q", key)
+		}
 	}
 }
 

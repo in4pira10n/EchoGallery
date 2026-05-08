@@ -45,6 +45,8 @@ type Preferences struct {
 	SlideshowInterval             int    `json:"slideshow_interval"`
 	LightboxZoom                  int    `json:"lightbox_zoom"`
 	ExperimentalAutoplayVideo     bool   `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool   `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int    `json:"video_section_min_minutes"`
 	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
@@ -63,6 +65,8 @@ type configDefaultsProbe struct {
 		SlideshowInterval             *int    `json:"slideshow_interval"`
 		LightboxZoom                  *int    `json:"lightbox_zoom"`
 		ExperimentalAutoplayVideo     *bool   `json:"experimental_autoplay_video"`
+		VideoAutoplayNext             *bool   `json:"video_autoplay_next"`
+		VideoSectionMinMinutes        *int    `json:"video_section_min_minutes"`
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
@@ -77,9 +81,25 @@ type Library struct {
 	AccentColor string `json:"accent_color,omitempty"`
 }
 
+type persistedConfig struct {
+	Port            int          `json:"port"`
+	ActiveProfile   string       `json:"active_profile,omitempty"`
+	StoragePath     string       `json:"storage_path,omitempty"`
+	Libraries       []Library    `json:"libraries,omitempty"`
+	ThumbnailDir    string       `json:"thumbnail_dir,omitempty"`
+	ThumbnailSize   int          `json:"thumbnail_size,omitempty"`
+	TrashDir        string       `json:"trash_dir,omitempty"`
+	JWTSecret       string       `json:"jwt_secret"`
+	UseSystemPlayer bool         `json:"use_system_player,omitempty"`
+	Users           []User       `json:"users"`
+	Preferences     *Preferences `json:"preferences,omitempty"`
+	Workshop        Workshop     `json:"workshop"`
+}
+
 // Config 应用配置
 type Config struct {
 	Port            int         `json:"port"`
+	ActiveProfile   string      `json:"active_profile,omitempty"`
 	StoragePath     string      `json:"storage_path"`
 	Libraries       []Library   `json:"libraries,omitempty"`
 	ThumbnailDir    string      `json:"thumbnail_dir"`
@@ -134,14 +154,36 @@ func loadFromPath(path string) (*Config, error) {
 	}
 	cfg.applyMissingDefaults(probe)
 
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validateGlobal(); err != nil {
 		return nil, err
 	}
 	if err := cfg.prepareRuntimePaths(); err != nil {
 		return nil, err
 	}
+	if err := cfg.applyActiveProfile(); err != nil {
+		return nil, err
+	}
+	if err := cfg.validateRuntime(); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+func (c *Config) applyActiveProfile() error {
+	active := strings.TrimSpace(c.ActiveProfile)
+	if active == "" {
+		return nil
+	}
+	profile, err := LoadProfile(c, active)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("加载活动 Profile 失败: %w", err)
+	}
+	c.ApplyProfile(profile)
+	return nil
 }
 
 // Save 将配置保存到文件
@@ -158,7 +200,14 @@ func (c *Config) saveToPath(path string) error {
 	if err := c.prepareRuntimePaths(); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	if err := c.validateGlobal(); err != nil {
+		return err
+	}
+	c.ensureActiveProfileAssigned()
+	if err := c.ensureActiveProfilePersisted(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c.persisted(), "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
@@ -170,6 +219,13 @@ func (c *Config) saveToPath(path string) error {
 
 // validate 校验配置合法性
 func (c *Config) validate() error {
+	if err := c.validateGlobal(); err != nil {
+		return err
+	}
+	return c.validateRuntime()
+}
+
+func (c *Config) validateGlobal() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("无效的端口号: %d", c.Port)
 	}
@@ -178,11 +234,18 @@ func (c *Config) validate() error {
 	if c.ThumbnailSize < 96 || c.ThumbnailSize > 1024 {
 		c.ThumbnailSize = 512
 	}
-	if c.StoragePath == "" {
-		return fmt.Errorf("storage_path 不能为空")
-	}
 	if c.JWTSecret == "" {
 		return fmt.Errorf("jwt_secret 不能为空")
+	}
+	return nil
+}
+
+func (c *Config) validateRuntime() error {
+	if strings.TrimSpace(c.StoragePath) == "" && len(c.Libraries) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(c.StoragePath) == "" {
+		return fmt.Errorf("storage_path 不能为空")
 	}
 	return nil
 }
@@ -219,10 +282,10 @@ func (c *Config) applyDefaults() {
 		c.Preferences.GridSize = 180
 	}
 	if c.Preferences.GridGap == 0 {
-		c.Preferences.GridGap = 8
+		c.Preferences.GridGap = 2
 	}
 	if c.Preferences.ThumbRadius == 0 {
-		c.Preferences.ThumbRadius = 8
+		c.Preferences.ThumbRadius = 2
 	}
 	if c.Preferences.SlideshowMode == "" {
 		c.Preferences.SlideshowMode = "random"
@@ -233,6 +296,64 @@ func (c *Config) applyDefaults() {
 	if c.Preferences.LightboxZoom == 0 {
 		c.Preferences.LightboxZoom = 100
 	}
+	if c.Preferences.VideoSectionMinMinutes == 0 {
+		c.Preferences.VideoSectionMinMinutes = 10
+	}
+}
+
+func (c *Config) ensureActiveProfileAssigned() {
+	if strings.TrimSpace(c.ActiveProfile) != "" {
+		return
+	}
+	for _, user := range c.Users {
+		username := strings.TrimSpace(user.Username)
+		if username != "" {
+			c.ActiveProfile = username
+			return
+		}
+	}
+}
+
+func (c *Config) ensureActiveProfilePersisted() error {
+	active := strings.TrimSpace(c.ActiveProfile)
+	if active == "" {
+		return nil
+	}
+	path, err := c.ProfilePath(active)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("检查活动 Profile 失败: %w", err)
+	}
+	if strings.TrimSpace(c.StoragePath) == "" {
+		return nil
+	}
+	profile := DefaultProfileFromConfig(c)
+	return SaveProfile(c, active, profile)
+}
+
+func (c *Config) persisted() persistedConfig {
+	cfg := persistedConfig{
+		Port:          c.Port,
+		ActiveProfile: strings.TrimSpace(c.ActiveProfile),
+		JWTSecret:     c.JWTSecret,
+		Users:         append([]User(nil), c.Users...),
+		Workshop:      c.Workshop,
+	}
+	if cfg.ActiveProfile == "" {
+		cfg.StoragePath = c.StoragePath
+		cfg.Libraries = append([]Library(nil), c.Libraries...)
+		cfg.ThumbnailDir = c.ThumbnailDir
+		cfg.ThumbnailSize = c.ThumbnailSize
+		cfg.TrashDir = c.TrashDir
+		cfg.UseSystemPlayer = c.UseSystemPlayer
+		preferences := c.Preferences
+		cfg.Preferences = &preferences
+	}
+	return cfg
 }
 
 func (c *Config) normalizeLibraries() {

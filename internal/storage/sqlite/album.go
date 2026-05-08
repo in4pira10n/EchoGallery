@@ -2,11 +2,59 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"echogallery/internal/storage"
 )
+
+type albumPhotoCursor struct {
+	Sort string    `json:"s"`
+	Time time.Time `json:"t,omitempty"`
+	Name string    `json:"n,omitempty"`
+	Size int64     `json:"z,omitempty"`
+	ID   int64     `json:"i"`
+}
+
+func normalizeAlbumPhotoSort(sort string) string {
+	switch strings.TrimSpace(strings.ToLower(sort)) {
+	case "name":
+		return "name"
+	case "size":
+		return "size"
+	case "timeline_asc":
+		return "timeline_asc"
+	default:
+		return "timeline_desc"
+	}
+}
+
+func encodeAlbumPhotoCursor(c albumPhotoCursor) string {
+	b, _ := json.Marshal(c)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+func decodeAlbumPhotoCursor(value string, sort string) (*albumPhotoCursor, error) {
+	b, err := base64.URLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("无效的相册游标: %w", err)
+	}
+	var c albumPhotoCursor
+	if err := json.Unmarshal(b, &c); err == nil && c.ID > 0 {
+		if c.Sort == "" {
+			c.Sort = normalizeAlbumPhotoSort(sort)
+		}
+		return &c, nil
+	}
+	legacy, err := decodeCursor(value)
+	if err != nil {
+		return nil, fmt.Errorf("无效的相册游标: %w", err)
+	}
+	return &albumPhotoCursor{Sort: normalizeAlbumPhotoSort(sort), Time: legacy.TakenAt, ID: legacy.ID}, nil
+}
 
 // CreateAlbum 创建相册
 func (s *DB) CreateAlbum(album *storage.Album) error {
@@ -188,12 +236,13 @@ func (s *DB) RemovePhotoFromAlbum(albumID int64, photoID int64, userID int64) er
 	return err
 }
 
-// ListAlbumPhotos 查询相册内图片（游标分页，按拍摄时间排序）
+// ListAlbumPhotos 查询相册内图片（游标分页，支持相册详情页排序）。
 func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error) {
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 30
 	}
+	sort := normalizeAlbumPhotoSort(params.Sort)
 	where := "ap.album_id = ? AND p.uploaded_by = ? AND p.deleted_at IS NULL"
 	args := []interface{}{params.AlbumID, params.UserID}
 	if params.MediaKind != "" {
@@ -201,47 +250,77 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 		args = append(args, params.MediaKind)
 	}
 
-	var rows *sql.Rows
-	var err error
-
-	if params.Cursor == "" {
-		queryArgs := append([]interface{}{}, args...)
-		queryArgs = append(queryArgs, limit+1)
-		rows, err = s.db.Query(`
-			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
-			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
-			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
-			FROM photos p
-			JOIN album_photos ap ON ap.photo_id = p.id
-			WHERE `+where+`
-			ORDER BY p.taken_at DESC, p.id DESC
-			LIMIT ?`, queryArgs...)
-	} else {
-		c, err2 := decodeCursor(params.Cursor)
-		if err2 != nil {
-			return nil, err2
+	orderBy := "p.taken_at DESC, p.id DESC"
+	if params.Cursor != "" {
+		c, err := decodeAlbumPhotoCursor(params.Cursor, sort)
+		if err != nil {
+			return nil, err
 		}
-		queryArgs := append([]interface{}{}, args...)
-		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
-		rows, err = s.db.Query(`
+		switch sort {
+		case "timeline_asc":
+			where += " AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))"
+			args = append(args, c.Time, c.Time, c.ID)
+		case "name":
+			where += " AND (lower(p.original_name) > ? OR (lower(p.original_name) = ? AND p.id > ?))"
+			args = append(args, c.Name, c.Name, c.ID)
+		case "size":
+			where += " AND (p.size < ? OR (p.size = ? AND p.id < ?))"
+			args = append(args, c.Size, c.Size, c.ID)
+		default:
+			where += " AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))"
+			args = append(args, c.Time, c.Time, c.ID)
+		}
+	}
+	switch sort {
+	case "timeline_asc":
+		orderBy = "p.taken_at ASC, p.id ASC"
+	case "name":
+		orderBy = "lower(p.original_name) ASC, p.id ASC"
+	case "size":
+		orderBy = "p.size DESC, p.id DESC"
+	}
+
+	queryArgs := append([]interface{}{}, args...)
+	queryArgs = append(queryArgs, limit+1)
+	rows, err := s.db.Query(`
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
 			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
 			FROM photos p
 			JOIN album_photos ap ON ap.photo_id = p.id
 			WHERE `+where+`
-			  AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))
-			ORDER BY p.taken_at DESC, p.id DESC
+			ORDER BY `+orderBy+`
 			LIMIT ?`, queryArgs...)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("查询相册图片失败: %w", err)
 	}
 	defer rows.Close()
 
-	return collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
-		return p.TakenAt
-	})
+	return collectAlbumPhotoPage(rows, limit, sort)
+}
+
+func collectAlbumPhotoPage(rows *sql.Rows, limit int, sort string) (*storage.PhotoPage, error) {
+	var photos []*storage.Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows)
+		if err != nil {
+			return nil, err
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	page := &storage.PhotoPage{}
+	if len(photos) > limit {
+		page.HasMore = true
+		photos = photos[:limit]
+		last := photos[len(photos)-1]
+		cursor := albumPhotoCursor{Sort: sort, Time: last.TakenAt, Name: strings.ToLower(last.OriginalName), Size: last.Size, ID: last.ID}
+		page.NextCursor = encodeAlbumPhotoCursor(cursor)
+	}
+	page.Photos = photos
+	return page, nil
 }
 
 // IsPhotoInAlbum 检查图片是否在相册中

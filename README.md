@@ -2,7 +2,7 @@
 
 The next generation local photo gallery managing app.
 
-<img width="2880" height="1800" alt="1" src="https://github.com/user-attachments/assets/dae16cf6-55c7-4c46-be5c-136dfb5ebd53" />
+<img src="https://github.com/user-attachments/assets/dae16cf6-55c7-4c46-be5c-136dfb5ebd53" />
 
 ## Intro
 
@@ -118,16 +118,27 @@ http://127.0.0.1:8080
 
 ## TO-DOs
 
-- [x] `Doc` 示例项目和截图
-- [ ] `Doc` 视频演示
-- [ ] `ICON` App Icon
-- [ ] `Future Plan` 多用户 / 访客用户支持
-- [ ] `Future Plan` `AI` 人脸识别
-- [ ] `Future Plan` `AI` 相似照片识别
-- [ ] `UI` UI Redesign : Compact & Glass → v2.0.0
-   - [ ] `Sidebar` 左侧侧边栏「减负」：移「项目仓库」「模式切换」「退出登录」「退出程序」至设置页；删除「折叠侧边栏」，将侧边栏默认折叠
-   - [ ] `Menubar` 顶栏 Redesign：移除「搜索框」；在页面右下角新增 44px 圆形玻璃「搜索」按钮
-   - [ ] `Core Elements` 整体采用更强调「沉浸感」的悬浮设计：将侧边栏 #main-nav、顶栏 .topbar 采用悬浮设计，圆角 999px，背景模糊；头像单独以圆形放置
+- [x]  `Doc` 示例项目和截图
+- [ ]  `Future Plan` `Doc` 视频演示
+- [ ]  `ICON` App Icon
+- [x]  `New Feature` 「相册」详情页现支持按：媒体名称 / 文件大小 / 时间线 / 时间线倒序排序
+- [x]  `New Feature` `Video Playback` 视频播放：若视频时长不少于 10 分钟（在「设置」中新建项，可由用户修改），则将视频时常等分为 10「小节」；每一个「小节」要在进度条有一个小小点（比「书签」的圆点小，要与主色呼应）；按 `左右方向键` ：`←` 可前往上一「小节」；`→` 可前往下一「小节」
+- [x]  `New Feature` `Video Playback` 在「设置」中新增：视频播放自动播放下一个
+- [x]  `Enhancement` 将非相册、设置页的 content 左右 padding 改为 0，并默认照片圆角 2px、图像间距 2px
+- [x]  `Enhancement` 删除「保存并重启」；检测用户动了哪些设置，若需要重启则点击「保存」自动重启
+- [ ]  `New Feature` 多用户 / 访客用户支持
+    - [ ]  `Guest` 访客用户支持
+    - [ ]  `Customization` 每个用户应有自己的头像；在注册时应让用户选择头像，并保存在 echogallery-data 里
+    - [x]  `Config` 每个用户使用独立 Profile（`echogallery-data/profiles/{user}/profile.json`），包含单独的资源库、缩略图、回收站和应用偏好；用户名仍作为唯一标识
+- [ ]  `AI` `Future Plan` 机器学习相关
+    - [ ]  `Person` 「人物」相册：内置到「相册」Tab，作为下方 filter 的一项（注意新建空白 SVG）
+        - [ ] `Core Service` 初次点击时，应显示需要扫描并发现人物；可参考「相册空白页」或「照片空白页」等等，注意新建空白 SVG；留下按钮让用户「开始扫描」「取消」，显示进度，可随时取消；扫描过程中 App 不可用（参考“构建资源库”页面）；应使用 GPU / MPS 等方式加速
+        - [ ] `Core Service` `UI` 扫描完成后展示人物相册，样式参考相册页；其本质也按照「相册」来划分，只是划分相册的标准按照「人物」
+    - [ ]  `Future Plan` `AI` 相似照片识别
+- [x] `UI` UI Redesign : Compact & Glass → v2.0.0
+   - [x] `Sidebar` 左侧侧边栏「减负」：移「项目仓库」「模式切换」「退出登录」「退出程序」至设置页；删除「折叠侧边栏」，将侧边栏默认折叠
+   - [x] `Menubar` 顶栏 Redesign：移除「搜索框」；在页面右下角新增 44px 圆形玻璃「搜索」按钮
+   - [x] `Core Elements` 整体采用更强调「沉浸感」的悬浮设计：将侧边栏 #main-nav、顶栏 .topbar 采用悬浮设计，圆角 999px，背景模糊；头像单独以圆形放置
 - [x]  `Fix` `UI` 隐藏滚动条；播放视频时不显示系统播放控制
 - [x]  `Bug` `Performance` 停止一个操作时并不是「真正停止」：比如点击加载全部时间线后，点击取消，相关线程还在运行，点击图片还需要加载；如果刷新则可解决问题；改为停止操作后立刻终止相关线程
 - [x] `Doc` 更新介绍图像

@@ -36,6 +36,8 @@ type settingsResponse struct {
 	SlideshowInterval             int               `json:"slideshow_interval"`
 	LightboxZoom                  int               `json:"lightbox_zoom"`
 	ExperimentalAutoplayVideo     bool              `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool              `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int               `json:"video_section_min_minutes"`
 	ExperimentalPrefetchNeighbors bool              `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
@@ -60,6 +62,8 @@ type settingsUpdateRequest struct {
 	SlideshowInterval             int              `json:"slideshow_interval"`
 	LightboxZoom                  int              `json:"lightbox_zoom"`
 	ExperimentalAutoplayVideo     bool             `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool             `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int              `json:"video_section_min_minutes"`
 	ExperimentalPrefetchNeighbors bool             `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
@@ -87,7 +91,10 @@ type libraryResponse struct {
 	AccentColor  string `json:"accent_color,omitempty"`
 }
 
-func buildSettingsResponse(cfg *config.Config) settingsResponse {
+func buildSettingsResponse(cfg *config.Config, profile *config.Profile) settingsResponse {
+	if profile == nil {
+		profile = config.DefaultProfileFromConfig(cfg)
+	}
 	users := make([]string, 0, len(cfg.Users))
 	for _, user := range cfg.Users {
 		users = append(users, user.Username)
@@ -102,34 +109,36 @@ func buildSettingsResponse(cfg *config.Config) settingsResponse {
 	}
 	return settingsResponse{
 		Port:                          cfg.Port,
-		StoragePath:                   cfg.StoragePath,
-		Libraries:                     buildLibraryResponses(cfg),
-		ThumbnailDir:                  cfg.ThumbnailDir,
-		ThumbnailSize:                 cfg.ThumbnailSize,
-		TrashDir:                      cfg.TrashDir,
-		UseSystemPlayer:               cfg.UseSystemPlayer,
+		StoragePath:                   profile.StoragePath,
+		Libraries:                     buildLibraryResponses(profile),
+		ThumbnailDir:                  profile.ThumbnailDir,
+		ThumbnailSize:                 profile.ThumbnailSize,
+		TrashDir:                      profile.TrashDir,
+		UseSystemPlayer:               profile.UseSystemPlayer,
 		JWTSecretMasked:               masked,
 		Users:                         users,
-		Theme:                         cfg.Preferences.Theme,
-		GridSize:                      cfg.Preferences.GridSize,
-		GridGap:                       cfg.Preferences.GridGap,
-		ThumbRadius:                   cfg.Preferences.ThumbRadius,
-		SidebarAutoHide:               cfg.Preferences.SidebarAutoHide,
-		SlideshowMode:                 cfg.Preferences.SlideshowMode,
-		SlideshowLoop:                 cfg.Preferences.SlideshowLoop,
-		SlideshowInterval:             cfg.Preferences.SlideshowInterval,
-		LightboxZoom:                  cfg.Preferences.LightboxZoom,
-		ExperimentalAutoplayVideo:     cfg.Preferences.ExperimentalAutoplayVideo,
-		ExperimentalPrefetchNeighbors: cfg.Preferences.ExperimentalPrefetchNeighbors,
-		ExperimentalRestoreLastView:   cfg.Preferences.ExperimentalRestoreLastView,
-		ContinueLastVideoPosition:     cfg.Preferences.ContinueLastVideoPosition,
-		PlayerKeymap:                  cfg.Preferences.PlayerKeymap,
+		Theme:                         profile.Preferences.Theme,
+		GridSize:                      profile.Preferences.GridSize,
+		GridGap:                       profile.Preferences.GridGap,
+		ThumbRadius:                   profile.Preferences.ThumbRadius,
+		SidebarAutoHide:               profile.Preferences.SidebarAutoHide,
+		SlideshowMode:                 profile.Preferences.SlideshowMode,
+		SlideshowLoop:                 profile.Preferences.SlideshowLoop,
+		SlideshowInterval:             profile.Preferences.SlideshowInterval,
+		LightboxZoom:                  profile.Preferences.LightboxZoom,
+		ExperimentalAutoplayVideo:     profile.Preferences.ExperimentalAutoplayVideo,
+		VideoAutoplayNext:             profile.Preferences.VideoAutoplayNext,
+		VideoSectionMinMinutes:        profile.Preferences.VideoSectionMinMinutes,
+		ExperimentalPrefetchNeighbors: profile.Preferences.ExperimentalPrefetchNeighbors,
+		ExperimentalRestoreLastView:   profile.Preferences.ExperimentalRestoreLastView,
+		ContinueLastVideoPosition:     profile.Preferences.ContinueLastVideoPosition,
+		PlayerKeymap:                  profile.Preferences.PlayerKeymap,
 	}
 }
 
-func buildLibraryResponses(cfg *config.Config) []libraryResponse {
-	resp := make([]libraryResponse, 0, len(cfg.Libraries))
-	for index, library := range cfg.Libraries {
+func buildLibraryResponses(profile *config.Profile) []libraryResponse {
+	resp := make([]libraryResponse, 0, len(profile.Libraries))
+	for index, library := range profile.Libraries {
 		item := libraryResponse{
 			Index:       index,
 			Name:        library.Name,
@@ -147,7 +156,11 @@ func buildLibraryResponses(cfg *config.Config) []libraryResponse {
 
 func handleGetSettings(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, buildSettingsResponse(cfg))
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, buildSettingsResponse(cfg, profile))
 	}
 }
 
@@ -159,56 +172,94 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		prevThumbnailDir := strings.TrimSpace(cfg.ThumbnailDir)
-		prevThumbnailSize := cfg.ThumbnailSize
-		next := *cfg
-		next.Port = req.Port
-		next.StoragePath = req.StoragePath
-		next.Libraries = append([]config.Library(nil), req.Libraries...)
-		next.ThumbnailDir = req.ThumbnailDir
-		next.ThumbnailSize = req.ThumbnailSize
-		next.TrashDir = req.TrashDir
-		next.UseSystemPlayer = req.UseSystemPlayer
-		next.Preferences.Theme = req.Theme
-		next.Preferences.GridSize = req.GridSize
-		next.Preferences.GridGap = req.GridGap
-		next.Preferences.ThumbRadius = req.ThumbRadius
-		next.Preferences.SidebarAutoHide = req.SidebarAutoHide
-		next.Preferences.SlideshowMode = req.SlideshowMode
-		next.Preferences.SlideshowLoop = req.SlideshowLoop
-		next.Preferences.SlideshowInterval = req.SlideshowInterval
-		next.Preferences.LightboxZoom = req.LightboxZoom
-		next.Preferences.ExperimentalAutoplayVideo = req.ExperimentalAutoplayVideo
-		next.Preferences.ExperimentalPrefetchNeighbors = req.ExperimentalPrefetchNeighbors
-		next.Preferences.ExperimentalRestoreLastView = req.ExperimentalRestoreLastView
-		next.Preferences.ContinueLastVideoPosition = req.ContinueLastVideoPosition
-		next.Preferences.PlayerKeymap = req.PlayerKeymap
-		if err := next.Save(); err != nil {
+		username := currentUsername(c)
+		prevProfile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		prevThumbnailDir := strings.TrimSpace(prevProfile.ThumbnailDir)
+		prevThumbnailSize := prevProfile.ThumbnailSize
+		nextProfile := &config.Profile{
+			StoragePath:     req.StoragePath,
+			Libraries:       append([]config.Library(nil), req.Libraries...),
+			ThumbnailDir:    req.ThumbnailDir,
+			ThumbnailSize:   req.ThumbnailSize,
+			TrashDir:        req.TrashDir,
+			UseSystemPlayer: req.UseSystemPlayer,
+			Preferences: config.Preferences{
+				Theme:                         req.Theme,
+				GridSize:                      req.GridSize,
+				GridGap:                       req.GridGap,
+				ThumbRadius:                   req.ThumbRadius,
+				SidebarAutoHide:               req.SidebarAutoHide,
+				SlideshowMode:                 req.SlideshowMode,
+				SlideshowLoop:                 req.SlideshowLoop,
+				SlideshowInterval:             req.SlideshowInterval,
+				LightboxZoom:                  req.LightboxZoom,
+				ExperimentalAutoplayVideo:     req.ExperimentalAutoplayVideo,
+				VideoAutoplayNext:             req.VideoAutoplayNext,
+				VideoSectionMinMinutes:        req.VideoSectionMinMinutes,
+				ExperimentalPrefetchNeighbors: req.ExperimentalPrefetchNeighbors,
+				ExperimentalRestoreLastView:   req.ExperimentalRestoreLastView,
+				ContinueLastVideoPosition:     req.ContinueLastVideoPosition,
+				PlayerKeymap:                  req.PlayerKeymap,
+			},
+		}
+		if err := config.SaveProfile(cfg, username, nextProfile); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		nextGlobal := *cfg
+		nextGlobal.Port = req.Port
+		nextGlobal.ActiveProfile = username
+		nextGlobal.ApplyProfile(nextProfile)
+		if err := nextGlobal.Save(); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		cfg.Port = next.Port
-		cfg.StoragePath = next.StoragePath
-		cfg.Libraries = append([]config.Library(nil), next.Libraries...)
-		cfg.ThumbnailDir = next.ThumbnailDir
-		cfg.ThumbnailSize = next.ThumbnailSize
-		cfg.TrashDir = next.TrashDir
-		cfg.UseSystemPlayer = next.UseSystemPlayer
-		cfg.Preferences = next.Preferences
-		if prevThumbnailSize != cfg.ThumbnailSize && prevThumbnailDir != "" {
+		cfg.Port = nextGlobal.Port
+		cfg.ActiveProfile = nextGlobal.ActiveProfile
+		cfg.ApplyProfile(nextProfile)
+		if prevThumbnailSize != nextProfile.ThumbnailSize && prevThumbnailDir != "" {
 			_ = os.RemoveAll(prevThumbnailDir)
 			_ = os.MkdirAll(prevThumbnailDir, 0755)
 		}
 		message := "设置已保存，涉及服务端行为的变更在重启后完全生效"
-		if prevThumbnailSize != cfg.ThumbnailSize {
+		if prevThumbnailSize != nextProfile.ThumbnailSize {
 			message = "设置已保存，缩略图缓存已重置，后续浏览会按新尺寸重新生成"
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"message": message,
-			"data":    buildSettingsResponse(cfg),
+			"data":    buildSettingsResponse(cfg, nextProfile),
 		})
 	}
+}
+
+func requestProfile(c *gin.Context, cfg *config.Config) (*config.Profile, bool) {
+	username := currentUsername(c)
+	if strings.TrimSpace(username) == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return nil, false
+	}
+	profile, err := config.EnsureProfile(cfg, username)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return nil, false
+	}
+	return profile, true
+}
+
+func saveRequestProfile(c *gin.Context, cfg *config.Config, profile *config.Profile) bool {
+	username := currentUsername(c)
+	if err := config.SaveProfile(cfg, username, profile); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return false
+	}
+	if cfg.ActiveProfile == username || cfg.ActiveProfile == "" {
+		cfg.ApplyProfile(profile)
+	}
+	return true
 }
 
 func handleRestartApp(restart func() error) gin.HandlerFunc {
@@ -241,7 +292,11 @@ func handleShutdownApp(shutdown func() error) gin.HandlerFunc {
 
 func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		index, err := parseLibraryIndex(c.Param("index"), len(cfg.Libraries))
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		index, err := parseLibraryIndex(c.Param("index"), len(profile.Libraries))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -269,8 +324,8 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		next := *cfg
-		next.Libraries = append([]config.Library(nil), cfg.Libraries...)
+		next := *profile
+		next.Libraries = append([]config.Library(nil), profile.Libraries...)
 		fileName := fmt.Sprintf("library-%d-%d.png", index, time.Now().UnixNano())
 		destPath := filepath.Join(assetDir, fileName)
 		src, err := file.Open()
@@ -286,26 +341,28 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 
 		previous := next.Libraries[index].LogoAsset
 		next.Libraries[index].LogoAsset = fileName
-		if err := next.Save(); err != nil {
+		if !saveRequestProfile(c, cfg, &next) {
 			_ = os.Remove(destPath)
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		cfg.Libraries = next.Libraries
 		if previous != "" && previous != fileName {
 			_ = os.Remove(filepath.Join(assetDir, previous))
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"message": "资源库头像已上传",
-			"data":    buildSettingsResponse(cfg),
+			"data":    buildSettingsResponse(cfg, &next),
 		})
 	}
 }
 
 func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		index, err := parseLibraryIndex(c.Param("index"), len(cfg.Libraries))
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		index, err := parseLibraryIndex(c.Param("index"), len(profile.Libraries))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -316,22 +373,20 @@ func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		next := *cfg
-		next.Libraries = append([]config.Library(nil), cfg.Libraries...)
+		next := *profile
+		next.Libraries = append([]config.Library(nil), profile.Libraries...)
 		previous := next.Libraries[index].LogoAsset
 		next.Libraries[index].LogoAsset = ""
-		if err := next.Save(); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if !saveRequestProfile(c, cfg, &next) {
 			return
 		}
 
-		cfg.Libraries = next.Libraries
 		if previous != "" {
 			_ = os.Remove(filepath.Join(assetDir, previous))
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"message": "资源库图像已移除",
-			"data":    buildSettingsResponse(cfg),
+			"data":    buildSettingsResponse(cfg, &next),
 		})
 	}
 }
@@ -341,12 +396,16 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 		var req refreshLibraryLogosRequest
 		_ = c.ShouldBindJSON(&req)
 
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
 		result := refreshLibraryLogosResult{}
-		if len(cfg.Libraries) == 0 {
+		if len(profile.Libraries) == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"message": "没有可更新的资源库头像",
 				"result":  result,
-				"data":    buildSettingsResponse(cfg),
+				"data":    buildSettingsResponse(cfg, profile),
 			})
 			return
 		}
@@ -361,8 +420,8 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		next := *cfg
-		next.Libraries = append([]config.Library(nil), cfg.Libraries...)
+		next := *profile
+		next.Libraries = append([]config.Library(nil), profile.Libraries...)
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 		previousAssets := make([]string, len(next.Libraries))
 		for index, library := range next.Libraries {
@@ -403,11 +462,9 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 		}
 
 		if result.Updated > 0 {
-			if err := next.Save(); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			if !saveRequestProfile(c, cfg, &next) {
 				return
 			}
-			cfg.Libraries = append([]config.Library(nil), next.Libraries...)
 			for _, previous := range previousAssets {
 				if previous != "" {
 					_ = os.Remove(filepath.Join(assetDir, previous))
@@ -419,7 +476,7 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"message": message,
 			"result":  result,
-			"data":    buildSettingsResponse(cfg),
+			"data":    buildSettingsResponse(cfg, &next),
 		})
 	}
 }
@@ -467,12 +524,16 @@ func isLibraryLogoCandidate(path string) bool {
 
 func handleServeLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		index, err := parseLibraryIndex(c.Param("index"), len(cfg.Libraries))
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		index, err := parseLibraryIndex(c.Param("index"), len(profile.Libraries))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		fileName := strings.TrimSpace(cfg.Libraries[index].LogoAsset)
+		fileName := strings.TrimSpace(profile.Libraries[index].LogoAsset)
 		if fileName == "" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 			return

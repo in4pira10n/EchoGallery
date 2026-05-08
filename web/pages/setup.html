@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EchoGallery 设置</title>
+  <link rel="stylesheet" href="/pages/common.css">
+  <link rel="stylesheet" href="/pages/setup.css">
+</head>
+<body>
+<script>
+  (function(){
+    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+    window.__SETUP__ = __SETUP_PAYLOAD__;
+  })();
+</script>
+<div class="login-wrap">
+  <div class="login-card setup-card" id="setup-root"></div>
+</div>
+<script>
+(function () {
+  var state = window.__SETUP__ || {};
+  var root = document.getElementById('setup-root');
+  var copyDefaults = {
+    init: {
+      kicker: '首次启动',
+      title: '网页初始化',
+      copy: '首次启动不再使用命令行向导，请在这里完成端口、资源库和管理员账号配置。',
+      panelLabel: '网页初始化配置',
+      serviceTitle: '服务配置',
+      serviceHint: '启动后即可访问',
+      portLabel: '服务端口',
+      usernameLabel: '管理员用户名',
+      passwordLabel: '管理员密码',
+      passwordPlaceholder: '至少 6 位',
+      libraryTitle: '资源库',
+      libraryHint: '可添加多个路径',
+      addLibrary: '添加资源库',
+      advanced: '高级路径设置',
+      thumbLabel: '缩略图目录（可选）',
+      thumbPlaceholder: '默认使用应用数据目录下的 thumbnails',
+      trashLabel: '回收站目录（可选）',
+      trashPlaceholder: '默认使用应用数据目录下的 Trash',
+      save: '保存并重启',
+      saving: '保存中…',
+      restarting: '正在重启…',
+      switchUser: '切换用户',
+      namePlaceholder: '资源库名称',
+      pathPlaceholder: '资源库路径',
+      remove: '删除',
+      missingLibrary: '请至少填写一个资源库路径',
+      libraryName: '资源库 {index}'
+    },
+    recovery: {
+      status: '需要选择资源库',
+      title: '资源库恢复',
+      message: '当前资源库不可用，请选择其他资源库后重启。',
+      currentPath: '当前路径',
+      unknownPath: '未记录',
+      existingTitle: '选择已有资源库',
+      existingCount: '{count} 个记录',
+      currentInvalid: '当前不可用',
+      empty: 'config.json 中还没有可切换的资源库记录。',
+      createTitle: '新建资源库',
+      createHint: '自动创建目录',
+      newNameLabel: '资源库名称',
+      newNamePlaceholder: '例如：新资源库',
+      newPathLabel: '资源库路径',
+      newPathPlaceholder: '输入新路径后会自动创建目录',
+      select: '切换资源库并重启',
+      switching: '切换中…',
+      restarting: '正在重启…',
+      missingTarget: '请先选择一个资源库，或填写新的资源库路径',
+      libraryName: '资源库 {index}'
+    }
+  };
+  var copy = JSON.parse(JSON.stringify(copyDefaults));
+
+  function esc(text) {
+    return String(text || '').replace(/[&<>"]/g, function (m) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m];
+    });
+  }
+
+  function bindSpotlight(selector, xVar, yVar) {
+    var el = document.querySelector(selector);
+    if (!el || !window.matchMedia('(pointer: fine)').matches) return;
+    var frame = 0;
+    function move(e) {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(function () {
+        var rect = el.getBoundingClientRect();
+        var x = Math.max(0, Math.min(100, (e.clientX - rect.left) / rect.width * 100));
+        var y = Math.max(0, Math.min(100, (e.clientY - rect.top) / rect.height * 100));
+        el.style.setProperty(xVar, x.toFixed(2) + '%');
+        el.style.setProperty(yVar, y.toFixed(2) + '%');
+      });
+    }
+    el.addEventListener('pointermove', move);
+  }
+
+  function mergeCopy(target, source) {
+    if (!source || typeof source !== 'object') return target;
+    Object.keys(source).forEach(function (key) {
+      var value = source[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) {
+          target[key] = {};
+        }
+        mergeCopy(target[key], value);
+        return;
+      }
+      target[key] = value;
+    });
+    return target;
+  }
+
+  function text(path, fallback, params) {
+    var current = copy;
+    String(path || '').split('.').forEach(function (segment) {
+      if (current && typeof current === 'object' && segment in current) current = current[segment];
+      else current = undefined;
+    });
+    var value = typeof current === 'string' ? current : fallback;
+    return String(value || '').replace(/\{(\w+)\}/g, function (_, key) {
+      return params && key in params ? String(params[key]) : '{' + key + '}';
+    });
+  }
+
+  function renderInit() {
+    root.className = 'login-card setup-card setup-init-card';
+    var libraries = (state.libraries || []).length ? state.libraries : [{name:text('init.libraryName', '资源库 {index}', { index: 1 }), path:''}];
+    root.innerHTML =
+      '<section class="setup-init-hero">' +
+        '<div class="setup-init-copy">' +
+          '<span class="setup-init-kicker">' + esc(text('init.kicker', '首次启动')) + '</span>' +
+          '<h1>' + esc(text('init.title', '网页初始化')) + '</h1>' +
+          '<p>' + esc(text('init.copy', '首次启动不再使用命令行向导，请在这里完成端口、资源库和管理员账号配置。')) + '</p>' +
+        '</div>' +
+      '</section>' +
+      '<section class="setup-init-panel" aria-label="' + esc(text('init.panelLabel', '网页初始化配置')) + '">' +
+        '<div class="setup-init-section">' +
+          '<div class="setup-init-section-head"><strong>' + esc(text('init.serviceTitle', '服务配置')) + '</strong><span>' + esc(text('init.serviceHint', '启动后即可访问')) + '</span></div>' +
+          '<div class="setup-init-two-col">' +
+            '<div class="form-group"><label class="form-label" for="setup-port">' + esc(text('init.portLabel', '服务端口')) + '</label><input class="input" id="setup-port" type="number" min="1" max="65535" value="' + (state.port || 8080) + '"></div>' +
+            '<div class="form-group"><label class="form-label" for="setup-username">' + esc(text('init.usernameLabel', '管理员用户名')) + '</label><input class="input" id="setup-username" type="text" value="admin"></div>' +
+          '</div>' +
+          '<div class="form-group"><label class="form-label" for="setup-password">' + esc(text('init.passwordLabel', '管理员密码')) + '</label><input class="input" id="setup-password" type="password" placeholder="' + esc(text('init.passwordPlaceholder', '至少 6 位')) + '"></div>' +
+        '</div>' +
+        '<div class="setup-init-section">' +
+          '<div class="setup-init-section-head"><strong>' + esc(text('init.libraryTitle', '资源库')) + '</strong><span>' + esc(text('init.libraryHint', '可添加多个路径')) + '</span></div>' +
+          '<div id="setup-libraries" class="setup-init-libraries"></div>' +
+          '<button class="btn setup-add-library-btn" id="setup-add-library" type="button">' + esc(text('init.addLibrary', '添加资源库')) + '</button>' +
+        '</div>' +
+        '<details class="setup-init-advanced">' +
+          '<summary>' + esc(text('init.advanced', '高级路径设置')) + '</summary>' +
+          '<div class="setup-init-two-col">' +
+            '<div class="form-group"><label class="form-label" for="setup-thumbnail-dir">' + esc(text('init.thumbLabel', '缩略图目录（可选）')) + '</label><input class="input" id="setup-thumbnail-dir" type="text" placeholder="' + esc(text('init.thumbPlaceholder', '默认使用应用数据目录下的 thumbnails')) + '"></div>' +
+            '<div class="form-group"><label class="form-label" for="setup-trash-dir">' + esc(text('init.trashLabel', '回收站目录（可选）')) + '</label><input class="input" id="setup-trash-dir" type="text" placeholder="' + esc(text('init.trashPlaceholder', '默认使用应用数据目录下的 Trash')) + '"></div>' +
+          '</div>' +
+        '</details>' +
+        '<button class="btn btn-primary setup-init-submit" id="setup-submit">' + esc(text('init.save', '保存并重启')) + '</button>' +
+        '<a class="setup-secondary-link" href="/login" id="setup-switch-user">' + esc(text('init.switchUser', '切换用户')) + '</a>' +
+        '<div class="login-error" id="setup-error"></div>' +
+      '</section>';
+    bindSpotlight('.setup-init-hero', '--hero-spot-x', '--hero-spot-y');
+    var list = document.getElementById('setup-libraries');
+
+    function renderLibraries(items) {
+      list.innerHTML = items.map(function (library, index) {
+        return '<div class="settings-library-row setup-library-row">' +
+          '<span class="setup-library-index">' + (index + 1) + '</span>' +
+          '<input class="input setup-library-name" type="text" maxlength="32" placeholder="' + esc(text('init.namePlaceholder', '资源库名称')) + '" value="' + esc(library.name || text('init.libraryName', '资源库 {index}', { index: index + 1 })) + '">' +
+          '<input class="input setup-library-path" type="text" placeholder="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" value="' + esc(library.path || '') + '">' +
+          '<button class="btn btn-danger btn-sm setup-library-remove" type="button">' + esc(text('init.remove', '删除')) + '</button>' +
+        '</div>';
+      }).join('');
+      Array.prototype.forEach.call(list.querySelectorAll('.setup-library-remove'), function (btn) {
+        btn.addEventListener('click', function () {
+          if (list.children.length <= 1) return;
+          btn.parentNode.remove();
+        });
+      });
+    }
+
+    renderLibraries(libraries);
+    document.getElementById('setup-add-library').addEventListener('click', function () {
+      libraries.push({name:text('init.libraryName', '资源库 {index}', { index: list.children.length + 1 }), path:''});
+      renderLibraries(Array.prototype.map.call(list.children, function (row, index) {
+        return {
+          name: row.querySelector('.setup-library-name').value || text('init.libraryName', '资源库 {index}', { index: index + 1 }),
+          path: row.querySelector('.setup-library-path').value || ''
+        };
+      }).concat([{name:text('init.libraryName', '资源库 {index}', { index: list.children.length + 1 }), path:''}]));
+    });
+
+    document.getElementById('setup-submit').addEventListener('click', async function () {
+      var errorEl = document.getElementById('setup-error');
+      errorEl.textContent = '';
+      var rows = Array.prototype.map.call(list.querySelectorAll('.setup-library-row'), function (row, index) {
+        return {
+          name: row.querySelector('.setup-library-name').value.trim() || text('init.libraryName', '资源库 {index}', { index: index + 1 }),
+          path: row.querySelector('.setup-library-path').value.trim()
+        };
+      }).filter(function (item) { return item.path; });
+      if (!rows.length) {
+        errorEl.textContent = text('init.missingLibrary', '请至少填写一个资源库路径');
+        return;
+      }
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = text('init.saving', '保存中…');
+      try {
+        var resp = await fetch('/api/setup/init', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            port: parseInt(document.getElementById('setup-port').value, 10) || 8080,
+            thumbnail_dir: document.getElementById('setup-thumbnail-dir').value.trim(),
+            trash_dir: document.getElementById('setup-trash-dir').value.trim(),
+            libraries: rows,
+            storage_path: rows[0].path,
+            username: document.getElementById('setup-username').value.trim(),
+            password: document.getElementById('setup-password').value
+          })
+        });
+        var data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '初始化失败');
+        btn.textContent = text('init.restarting', '正在重启…');
+        errorEl.style.color = 'var(--accent)';
+        errorEl.textContent = data.message || text('init.restarting', '正在重启…');
+        setTimeout(function () { location.reload(); }, 2000);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = text('init.save', '保存并重启');
+        errorEl.style.color = 'var(--danger)';
+        errorEl.textContent = e.message || '初始化失败';
+      }
+    });
+    document.getElementById('setup-switch-user').addEventListener('click', async function (event) {
+      event.preventDefault();
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      location.href = '/login';
+    });
+  }
+
+  function renderRecovery() {
+    root.className = 'login-card setup-card setup-recovery-card';
+    var libraries = state.libraries || [];
+    root.innerHTML =
+      '<div class="setup-recovery-hero">' +
+        '<div class="setup-recovery-brand"><span class="setup-recovery-mark">E</span><span>EchoGallery</span></div>' +
+        '<span class="setup-recovery-status">' + esc(text('recovery.status', '需要选择资源库')) + '</span>' +
+        '<h1>' + esc(text('recovery.title', '资源库恢复')) + '</h1>' +
+        '<p>' + esc(state.message || text('recovery.message', '当前资源库不可用，请选择其他资源库后重启。')) + '</p>' +
+        '<div class="setup-recovery-current"><span>' + esc(text('recovery.currentPath', '当前路径')) + '</span><strong>' + esc(state.current_storage_path || text('recovery.unknownPath', '未记录')) + '</strong></div>' +
+      '</div>' +
+      '<div class="setup-recovery-grid">' +
+        '<section class="setup-recovery-section">' +
+          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.existingTitle', '选择已有资源库')) + '</strong><span>' + esc(text('recovery.existingCount', '{count} 个记录', { count: libraries.length })) + '</span></div>' +
+          '<div class="setup-library-chooser" id="setup-library-chooser">' + (libraries.length ? libraries.map(function (library, index) {
+            var currentClass = library.path === state.current_storage_path ? ' current' : '';
+            var current = library.path === state.current_storage_path ? '<em>' + esc(text('recovery.currentInvalid', '当前不可用')) + '</em>' : '';
+            return '<button class="setup-library-option' + currentClass + '" type="button" data-path="' + esc(library.path) + '">' +
+              '<span class="setup-library-option-dot">' + (index + 1) + '</span>' +
+              '<span class="setup-library-option-main">' +
+                '<strong>' + esc(library.name || library.path) + '</strong>' +
+                '<small>' + esc(library.path) + '</small>' +
+              '</span>' +
+              current +
+            '</button>';
+          }).join('') : '<div class="setup-recovery-empty">' + esc(text('recovery.empty', 'config.json 中还没有可切换的资源库记录。')) + '</div>') + '</div>' +
+        '</section>' +
+        '<section class="setup-recovery-section setup-recovery-create">' +
+          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.createTitle', '新建资源库')) + '</strong><span>' + esc(text('recovery.createHint', '自动创建目录')) + '</span></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-new-library-name">' + esc(text('recovery.newNameLabel', '资源库名称')) + '</label><input class="input" id="setup-new-library-name" type="text" placeholder="' + esc(text('recovery.newNamePlaceholder', '例如：新资源库')) + '"></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-new-library-path">' + esc(text('recovery.newPathLabel', '资源库路径')) + '</label><input class="input" id="setup-new-library-path" type="text" placeholder="' + esc(text('recovery.newPathPlaceholder', '输入新路径后会自动创建目录')) + '"></div>' +
+        '</section>' +
+      '</div>' +
+      '<div class="setup-recovery-footer">' +
+        '<button class="btn btn-primary" id="setup-select-library">' + esc(text('recovery.select', '切换资源库并重启')) + '</button>' +
+        '<div class="login-error" id="setup-error"></div>' +
+      '</div>';
+
+    var selectedPath = '';
+    Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (btn) {
+      btn.addEventListener('click', function () {
+        selectedPath = btn.getAttribute('data-path') || '';
+        Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (item) {
+          item.classList.toggle('active', item === btn);
+        });
+      });
+    });
+
+    document.getElementById('setup-select-library').addEventListener('click', async function () {
+      var errorEl = document.getElementById('setup-error');
+      errorEl.textContent = '';
+      var newName = document.getElementById('setup-new-library-name').value.trim();
+      var newPath = document.getElementById('setup-new-library-path').value.trim();
+      var targetPath = newPath || selectedPath;
+      if (!targetPath) {
+        errorEl.textContent = text('recovery.missingTarget', '请先选择一个资源库，或填写新的资源库路径');
+        return;
+      }
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = text('recovery.switching', '切换中…');
+      try {
+        var resp = await fetch('/api/setup/select-library', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: newName, storage_path: targetPath})
+        });
+        var data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '切换失败');
+        btn.textContent = text('recovery.restarting', '正在重启…');
+        errorEl.style.color = 'var(--accent)';
+        errorEl.textContent = data.message || '服务正在重启';
+        setTimeout(function () { location.reload(); }, 2000);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = text('recovery.select', '切换资源库并重启');
+        errorEl.style.color = 'var(--danger)';
+        errorEl.textContent = e.message || '切换失败';
+      }
+    });
+  }
+
+  fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
+    .then(function (response) { return response.ok ? response.json() : null; })
+    .then(function (catalog) {
+      if (catalog && catalog.pages && catalog.pages.setup) {
+        mergeCopy(copy, catalog.pages.setup);
+      }
+    })
+    .catch(function () {})
+    .finally(function () {
+      if (state.mode === 'library_recovery') renderRecovery();
+      else renderInit();
+    });
+})();
+</script>
+</body>
+</html>

@@ -174,6 +174,16 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "deluser":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "用法: Echogallery deluser <username>")
+				os.Exit(1)
+			}
+			if err := config.RunDeleteUserWizard(os.Args[2]); err != nil {
+				fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		default:
 			fmt.Fprintf(os.Stderr, "未知命令: %s\n", os.Args[1])
 			os.Exit(1)
@@ -196,6 +206,15 @@ func main() {
 
 	fmt.Printf("配置加载成功，服务将运行在端口 %d\n", cfg.Port)
 	fmt.Printf("图片存储路径: %s\n", cfg.StoragePath)
+
+	if strings.TrimSpace(cfg.StoragePath) == "" && len(cfg.Libraries) == 0 {
+		startSetupServer(api.SetupState{
+			Mode:    api.SetupModeInit,
+			Message: "当前尚未配置资源库，请先完成网页初始化。",
+			Port:    cfg.Port,
+		})
+		return
+	}
 
 	dbPath, err := cfg.DatabasePath()
 	if err != nil {

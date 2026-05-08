@@ -83,6 +83,16 @@ type videoPlaybackPreferenceRequest struct {
 	Muted  *bool    `json:"muted"`
 }
 
+type loginHeroMediaItem struct {
+	Kind string `json:"kind"`
+	URL  string `json:"url"`
+}
+
+type loginHeroResponse struct {
+	Avatar loginHeroMediaItem   `json:"avatar"`
+	Photos []loginHeroMediaItem `json:"photos"`
+}
+
 type albumRequest struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
@@ -106,6 +116,12 @@ type shareDetailResponse struct {
 type authLoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type authRegisterRequest struct {
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	ConfirmPassword string `json:"confirm_password"`
 }
 
 type contextKey string
@@ -142,13 +158,18 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.Use(gin.Logger(), gin.Recovery())
 
 	r.GET("/static/*filepath", gin.WrapH(buildStaticHandler(staticFS)))
+	r.GET("/pages/*filepath", gin.WrapH(buildPagesHandler(staticFS)))
 
-	r.GET("/", pageAuthMiddleware(cfg), handleAppPage())
-	r.GET("/albums", pageAuthMiddleware(cfg), handleAppPage())
-	r.GET("/albums/:id", pageAuthMiddleware(cfg), handleAppPage())
-	r.GET("/trash", pageAuthMiddleware(cfg), handleAppPage())
-	r.GET("/login", handleLoginPage())
+	r.GET("/", pageAuthMiddleware(cfg), handleAppPage(staticFS))
+	r.GET("/albums", pageAuthMiddleware(cfg), handleAppPage(staticFS))
+	r.GET("/albums/:id", pageAuthMiddleware(cfg), handleAppPage(staticFS))
+	r.GET("/trash", pageAuthMiddleware(cfg), handleAppPage(staticFS))
+	r.GET("/login", handleLoginPage(staticFS))
+	r.GET("/register", handleRegisterPage(staticFS))
+	r.GET("/api/login/hero", handleLoginHero(cfg, registrar))
+	r.GET("/api/login/hero/:kind/:name", handleServeLoginHeroAsset(cfg, registrar))
 	r.POST("/api/auth/login", handleLogin(cfg))
+	r.POST("/api/auth/register", handleRegister(cfg))
 	r.POST("/api/auth/logout", handleLogout())
 	r.GET("/api/settings", authMiddleware(cfg), handleGetSettings(cfg))
 	r.PUT("/api/settings", authMiddleware(cfg), handleUpdateSettings(cfg))
@@ -229,6 +250,16 @@ func buildStaticHandler(staticFS fs.FS) http.Handler {
 	return http.StripPrefix("/static/", http.FileServer(http.Dir("web/static")))
 }
 
+func buildPagesHandler(staticFS fs.FS) http.Handler {
+	if staticFS != nil {
+		sub, err := fs.Sub(staticFS, "web/pages")
+		if err == nil {
+			return http.StripPrefix("/pages/", http.FileServer(http.FS(sub)))
+		}
+	}
+	return http.StripPrefix("/pages/", http.FileServer(http.Dir("web/pages")))
+}
+
 func handleLogin(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req authLoginRequest
@@ -248,6 +279,26 @@ func handleLogin(cfg *config.Config) gin.HandlerFunc {
 		}
 		http.SetCookie(c.Writer, &http.Cookie{Name: authCookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(7 * 24 * time.Hour)})
 		c.JSON(http.StatusOK, gin.H{"message": "登录成功"})
+	}
+}
+
+func handleRegister(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req authRegisterRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		req.Username = strings.TrimSpace(req.Username)
+		if req.Password != req.ConfirmPassword {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "两次输入的密码不一致"})
+			return
+		}
+		if _, err := config.RegisterUser(cfg, req.Username, req.Password); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "注册成功，请登录后继续"})
 	}
 }
 
@@ -602,12 +653,29 @@ func handleListAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			Cursor:    c.Query("cursor"),
 			Limit:     mediaPageLimit(c),
 			MediaKind: mediaSearchKind(c),
+			Sort:      albumMediaSort(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, page)
+	}
+}
+
+func albumMediaSort(c *gin.Context) string {
+	raw := strings.TrimSpace(strings.ToLower(c.Query("sort")))
+	switch raw {
+	case "name", "media_name", "filename":
+		return "name"
+	case "size", "file_size":
+		return "size"
+	case "timeline", "time_desc", "date_desc", "desc":
+		return "timeline_desc"
+	case "timeline_asc", "time_asc", "date_asc", "asc":
+		return "timeline_asc"
+	default:
+		return "timeline_desc"
 	}
 }
 
@@ -1270,6 +1338,123 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 			return
 		}
 		c.JSON(http.StatusOK, page)
+	}
+}
+
+func activeLibraryIndex(cfg *config.Config) int {
+	active := config.NormalizeStoragePath(cfg.StoragePath)
+	for index, library := range cfg.Libraries {
+		if config.NormalizeStoragePath(library.Path) == active {
+			return index
+		}
+	}
+	return 0
+}
+
+func loginHeroUserID(cfg *config.Config) int64 {
+	if len(cfg.Users) == 0 {
+		return 0
+	}
+	return 1
+}
+
+func handleLoginHero(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		resp := loginHeroResponse{}
+		index := activeLibraryIndex(cfg)
+		if index >= 0 && index < len(cfg.Libraries) && strings.TrimSpace(cfg.Libraries[index].LogoAsset) != "" {
+			resp.Avatar = loginHeroMediaItem{
+				Kind: "avatar",
+				URL:  fmt.Sprintf("/api/login/hero/avatar/%d?v=%s", index, url.QueryEscape(cfg.Libraries[index].LogoAsset)),
+			}
+		}
+
+		if registrar != nil {
+			userID := loginHeroUserID(cfg)
+			if userID > 0 {
+				page, err := registrar.GetRandomMedia(storage.RandomPhotosParams{
+					UserID:    userID,
+					Seed:      time.Now().UnixNano(),
+					Limit:     2,
+					SkipTotal: true,
+					MediaKind: storage.MediaKindImage,
+				})
+				if err == nil && page != nil {
+					resp.Photos = make([]loginHeroMediaItem, 0, len(page.Photos))
+					for _, photo := range page.Photos {
+						if photo == nil || strings.TrimSpace(photo.UUID) == "" {
+							continue
+						}
+						resp.Photos = append(resp.Photos, loginHeroMediaItem{
+							Kind: "photo",
+							URL:  fmt.Sprintf("/api/login/hero/photo/%s", url.PathEscape(photo.UUID)),
+						})
+						if len(resp.Photos) == 2 {
+							break
+						}
+					}
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, resp)
+	}
+}
+
+func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Param("kind") {
+		case "avatar":
+			index, err := strconv.Atoi(strings.TrimSuffix(c.Param("name"), filepath.Ext(c.Param("name"))))
+			if err != nil || index < 0 || index >= len(cfg.Libraries) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
+				return
+			}
+			fileName := strings.TrimSpace(cfg.Libraries[index].LogoAsset)
+			if fileName == "" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
+				return
+			}
+			assetDir, err := cfg.LibraryAssetsDir()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.File(filepath.Join(assetDir, filepath.Base(fileName)))
+		case "photo":
+			if registrar == nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+				return
+			}
+			userID := loginHeroUserID(cfg)
+			if userID <= 0 {
+				c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
+				return
+			}
+			uuid := strings.TrimSuffix(c.Param("name"), filepath.Ext(c.Param("name")))
+			photo, err := registrar.GetPhotoByUUIDAny(uuid, userID)
+			if err != nil || photo == nil || photo.MediaKind != storage.MediaKindImage {
+				c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
+				return
+			}
+			thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+			if thumbPath == "" {
+				file, openErr := os.Open(registrar.MediaPath(photo))
+				if openErr == nil {
+					defer file.Close()
+					if genErr := image.GenerateThumbnail(file, photo.MimeType, registrar.ThumbnailPath(photo), cfg.ThumbnailSize); genErr == nil {
+						thumbPath = resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+					}
+				}
+			}
+			if thumbPath != "" {
+				c.File(thumbPath)
+				return
+			}
+			c.File(registrar.MediaPath(photo))
+		default:
+			c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
+		}
 	}
 }
 

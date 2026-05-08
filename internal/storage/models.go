@@ -149,4 +149,5 @@ type ListAlbumPhotosParams struct {
 	Cursor    string
 	Limit     int
 	MediaKind string
+	Sort      string
 }
