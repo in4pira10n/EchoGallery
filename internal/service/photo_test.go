@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -313,6 +314,41 @@ func TestPermanentlyDeletePhoto_MovesManagedFilesToTrashDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(trashDir, thumbRel)); err != nil {
 		t.Fatalf("缩略图文件应移动到回收站目录: %v", err)
+	}
+}
+
+func TestMoveFileToTrash_FallsBackWhenRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.jpg")
+	dest := filepath.Join(dir, "trash", "source.jpg")
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		t.Fatalf("创建目标目录失败: %v", err)
+	}
+	content := []byte("echo-gallery")
+	if err := os.WriteFile(src, content, 0644); err != nil {
+		t.Fatalf("写入源文件失败: %v", err)
+	}
+
+	prevRename := moveFileRename
+	moveFileRename = func(oldpath, newpath string) error {
+		return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV}
+	}
+	t.Cleanup(func() {
+		moveFileRename = prevRename
+	})
+
+	if err := moveFileToTrash(src, dest); err != nil {
+		t.Fatalf("跨卷回退移动失败: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("源文件应已移除，stat err=%v", err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("读取目标文件失败: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("目标文件内容不匹配: got=%q want=%q", string(got), string(content))
 	}
 }
 

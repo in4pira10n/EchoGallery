@@ -436,6 +436,14 @@ const icons = {
   topbarBackAlbums: '',
   topbarDownloadAlbum: '',
   topbarDeleteAlbum: '',
+  albumDetailEdit: '',
+  albumDetailDelete: '',
+  albumDetailAdd: '',
+  albumDetailDownload: '',
+  albumContextEdit: '',
+  albumContextDelete: '',
+  albumContextAdd: '',
+  albumContextDownload: '',
   topbarEmptyTrash: '',
   topbarClearMemories: '',
   libraryCardEdit: '',
@@ -540,6 +548,14 @@ const svgIconFiles = {
   topbarBackAlbums: 'topbar-back-albums.svg',
   topbarDownloadAlbum: 'topbar-download-album.svg',
   topbarDeleteAlbum: 'topbar-delete-album.svg',
+  albumDetailEdit: 'album-detail-edit.svg',
+  albumDetailDelete: 'album-detail-delete.svg',
+  albumDetailAdd: 'album-detail-add.svg',
+  albumDetailDownload: 'album-detail-download.svg',
+  albumContextEdit: 'album-context-edit.svg',
+  albumContextDelete: 'album-context-delete.svg',
+  albumContextAdd: 'album-context-add.svg',
+  albumContextDownload: 'album-context-download.svg',
   topbarEmptyTrash: 'topbar-empty-trash.svg',
   topbarRestoreAll: 'topbar-restore-all.svg',
   topbarClearMemories: 'topbar-clear-memories-action.svg',
@@ -775,6 +791,17 @@ function renderTopbarGlassButton({ id = '', icon = '', label = '', className = '
   if (variant) classes.push(`topbar-glass-btn-${variant}`);
   if (className) classes.push(className);
   return `<button class="${classes.join(' ')}" ${id ? `id="${id}"` : ''} type="button" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}" ${disabled ? 'disabled' : ''} ${extraAttrs}>${icon}</button>`;
+}
+function currentAccentButtonStyle() {
+  const accent = resolveLibraryAccentColor(currentLibraryBrand() || {});
+  const accentText = readableTextColorForBackground(accent);
+  return `--highlight-bg:${accent};--highlight-text:${accentText}`;
+}
+function renderAlbumDetailActionButton({ id = '', icon = '', label = '', title = '', danger = false } = {}) {
+  const buttonStyle = danger ? '--highlight-bg:var(--danger);--highlight-text:#ffffff' : currentAccentButtonStyle();
+  const classes = ['btn', 'btn-primary', 'settings-floating-add-library', 'album-detail-action-btn'];
+  if (danger) classes.push('album-detail-action-btn-danger');
+  return `<button class="${classes.join(' ')}" id="${id}" type="button" title="${escapeHTML(title || label)}" aria-label="${escapeHTML(title || label)}" style="${buttonStyle}">${icon || ''}<span>${escapeHTML(label)}</span></button>`;
 }
 function renderTopbarLeadingGroup(buttons = []) {
   const items = (buttons || []).filter(Boolean);
@@ -1776,19 +1803,11 @@ async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
   state.libraryRandomLogoTried[key] = true;
   state.libraryRandomLogoLoading = true;
   try {
-    const seed = Date.now() + Math.floor(Math.random() * 100000);
-    const page = await api.get(`/api/media/random?limit=1&seed=${seed}`);
-    const photo = page.photos && page.photos[0];
-    if (photo && photo.uuid) {
-      const thumbURL = mediaThumbURL(photo);
-      state.libraryRandomLogos[key] = thumbURL;
-      const res = await fetch(thumbURL);
-      if (!res.ok) throw new Error('随机缩略图读取失败');
-      const blob = await res.blob();
-      const mime = blob.type || 'image/webp';
-      const ext = mime.includes('png') ? 'png' : mime.includes('jpeg') ? 'jpg' : mime.includes('gif') ? 'gif' : 'webp';
-      const file = new File([blob], `library-random-logo-${photo.uuid}.${ext}`, { type: mime });
-      await uploadLibraryLogo(index, file);
+    const resp = await refreshLibraryLogos(false);
+    const refreshedLibrary = resolveActiveLibrary((resp && resp.data && resp.data.libraries) || state.serverSettings.libraries || [], libraryPath);
+    const logoURL = resolveLibraryLogoURL(refreshedLibrary || {});
+    if (logoURL) {
+      state.libraryRandomLogos[key] = logoURL;
       if (state.view === 'settings') renderSettings().catch(e => console.warn('刷新资源库头像失败', e));
     }
   } catch (e) {
@@ -1863,6 +1882,15 @@ async function refreshVideoThumbnails() {
 }
 async function backfillPhotoEXIF() {
   return api.post('/api/settings/exif/backfill', {});
+}
+async function fetchThumbnailBuildStatus() {
+  return api.get('/api/settings/thumbnails/build');
+}
+async function startThumbnailBuild() {
+  return api.post('/api/settings/thumbnails/build', {});
+}
+async function cancelThumbnailBuild() {
+  return api.del('/api/settings/thumbnails/build');
 }
 function renderNavLogo() {
   const current = currentLibraryBrand();
@@ -2159,6 +2187,10 @@ function shouldIgnoreGlobalShortcut(target) {
   const tag = target.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
+function isMacPlatform() {
+  const platform = String(navigator.userAgentData?.platform || navigator.platform || '').toLowerCase();
+  return platform.includes('mac') || platform.includes('iphone') || platform.includes('ipad');
+}
 function handleViewNumberShortcut(e) {
   if (state.blockingInteraction) {
     e.preventDefault();
@@ -2209,6 +2241,28 @@ function handleSearchShortcut(e) {
     return true;
   }
   return false;
+}
+function handleDeleteShortcut(e) {
+  if (state.blockingInteraction) return false;
+  if ($('#lightbox')?.classList.contains('open')) return false;
+  if (document.querySelector('.modal-overlay.open')) return false;
+  if (shouldIgnoreGlobalShortcut(e.target)) return false;
+  const isBackspace = e.key === 'Backspace' || e.code === 'Backspace';
+  if (!isBackspace || e.ctrlKey || e.shiftKey) return false;
+  const matches = isMacPlatform()
+    ? (e.metaKey && !e.altKey)
+    : (e.altKey && !e.metaKey);
+  if (!matches) return false;
+  if (state.view === 'trash') return false;
+  if (!state.selected.size && !state.focusedPhotoID) return false;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (state.selected.size > 0) {
+    deleteSelected();
+    return true;
+  }
+  deleteSinglePhoto(state.focusedPhotoID);
+  return true;
 }
 function normalizeKeyToken(token) {
   const upper = token.toUpperCase();
@@ -2707,6 +2761,12 @@ function renderAlbumDetailSortControl() {
     ${items.map(item => `<button class="media-filter-btn album-detail-sort-btn ${active === item.key ? 'active' : ''}" type="button" data-album-detail-sort="${item.key}" title="${item.label}" aria-label="${item.label}" aria-pressed="${active === item.key ? 'true' : 'false'}">${item.icon || ''}</button>`).join('')}
   </div>`;
 }
+function renderAlbumDetailBottomActionControls() {
+  return `<div class="album-detail-bottom-center">
+    ${renderAlbumDetailSortControl()}
+    ${renderMediaKindFilterControl('album-detail-filter')}
+  </div>`;
+}
 async function revealInFinder(photoId) {
   try {
     await api.post(`/api/media/${photoId}/reveal`, {});
@@ -2750,6 +2810,7 @@ const state = {
   pendingAlbumPhotoID: null,
   lastAlbumDetailID: null,
   selected: new Set(),
+  selectionAnchorID: null,
   lightboxPhotos: [],
   lightboxIndex: 0,
   lightboxReturnView: '',
@@ -2877,6 +2938,9 @@ const state = {
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
+  thumbnailBuildStatus: { status: 'idle', message: '当前没有缩略图任务' },
+  thumbnailBuildPollTimer: null,
+  thumbnailBuildCancelPending: false,
   blockingInteraction: false,
   timelineBulkLoading: false,
   timelineBulkCancelRequested: false,
@@ -2941,7 +3005,7 @@ function rememberPrefetchedMedia(key) {
   if (!key || state.prefetchedMediaSet.has(key)) return false;
   state.prefetchedMediaSet.add(key);
   state.prefetchedMediaKeys.push(key);
-  while (state.prefetchedMediaKeys.length > 24) {
+  while (state.prefetchedMediaKeys.length > 72) {
     const expired = state.prefetchedMediaKeys.shift();
     if (expired) state.prefetchedMediaSet.delete(expired);
   }
@@ -2982,6 +3046,103 @@ function hideBlockingProgress() {
   state.blockingInteraction = false;
   const overlay = $('#blocking-progress');
   if (overlay) overlay.classList.remove('show');
+}
+
+function stopThumbnailBuildPolling() {
+  if (state.thumbnailBuildPollTimer) {
+    clearTimeout(state.thumbnailBuildPollTimer);
+    state.thumbnailBuildPollTimer = null;
+  }
+}
+
+function isThumbnailBuildActive(status = state.thumbnailBuildStatus) {
+  const value = String(status && status.status || '');
+  return value === 'running' || value === 'cancelling';
+}
+
+function formatThumbnailBuildDetail(status = state.thumbnailBuildStatus) {
+  const done = Math.max(0, Number(status && status.done) || 0);
+  const total = Math.max(0, Number(status && status.total) || 0);
+  const generated = Math.max(0, Number(status && status.generated) || 0);
+  const skipped = Math.max(0, Number(status && status.skipped) || 0);
+  const failed = Math.max(0, Number(status && status.failed) || 0);
+  const countText = total > 0 ? `${done} / ${total}` : `${done}`;
+  const parts = [
+    status && status.message ? status.message : '正在生成缩略图…',
+    `已处理 ${countText}`,
+    `新生成 ${generated}`,
+  ];
+  if (skipped > 0) parts.push(`已存在 ${skipped}`);
+  if (failed > 0) parts.push(`失败 ${failed}`);
+  if (Number(status && status.eta_seconds) > 0) parts.push(`ETA ${formatDuration((Number(status.eta_seconds) || 0) * 1000)}`);
+  return parts.join(' · ');
+}
+
+function syncThumbnailBuildOverlay(status = state.thumbnailBuildStatus) {
+  if (!isThumbnailBuildActive(status)) {
+    hideBlockingProgress();
+    return;
+  }
+  showBlockingProgress('正在加载全部缩略图', formatThumbnailBuildDetail(status), {
+    cancelText: state.thumbnailBuildCancelPending ? '正在取消…' : '取消',
+    onCancel: () => {
+      if (state.thumbnailBuildCancelPending) return;
+      state.thumbnailBuildCancelPending = true;
+      updateBlockingProgress('正在发送取消请求…');
+      void cancelThumbnailBuild().catch(e => {
+        state.thumbnailBuildCancelPending = false;
+        updateBlockingProgress('取消失败，请稍后重试');
+        console.error('取消缩略图任务失败', e);
+      });
+    },
+  });
+}
+
+async function pollThumbnailBuildStatus() {
+  stopThumbnailBuildPolling();
+  try {
+    const status = await fetchThumbnailBuildStatus();
+    const previous = state.thumbnailBuildStatus || {};
+    state.thumbnailBuildStatus = status || { status: 'idle', message: '当前没有缩略图任务' };
+    if (state.thumbnailBuildStatus.status !== 'cancelling') {
+      state.thumbnailBuildCancelPending = false;
+    }
+    syncThumbnailBuildOverlay(state.thumbnailBuildStatus);
+    if (isThumbnailBuildActive(state.thumbnailBuildStatus)) {
+      state.thumbnailBuildPollTimer = setTimeout(pollThumbnailBuildStatus, 450);
+      return;
+    }
+    if (previous.status === 'running' || previous.status === 'cancelling') {
+      if (state.thumbnailBuildStatus.status === 'completed') {
+        showToast(`全部缩略图已就绪：新生成 ${state.thumbnailBuildStatus.generated || 0} 项`, 3200);
+      } else if (state.thumbnailBuildStatus.status === 'cancelled') {
+        showToast('已取消加载全部缩略图');
+      } else if (state.thumbnailBuildStatus.status === 'failed') {
+        showToast('加载全部缩略图失败');
+      }
+    }
+  } catch (e) {
+    console.error('获取缩略图任务状态失败', e);
+    hideBlockingProgress();
+    state.thumbnailBuildCancelPending = false;
+  }
+}
+
+async function openThumbnailBuildWorkflow() {
+  try {
+    const status = await startThumbnailBuild();
+    state.thumbnailBuildStatus = status || { status: 'idle', message: '当前没有缩略图任务' };
+    state.thumbnailBuildCancelPending = false;
+    syncThumbnailBuildOverlay(state.thumbnailBuildStatus);
+    if (isThumbnailBuildActive(state.thumbnailBuildStatus)) {
+      stopThumbnailBuildPolling();
+      state.thumbnailBuildPollTimer = setTimeout(pollThumbnailBuildStatus, 300);
+    } else if (state.thumbnailBuildStatus.status === 'completed') {
+      showToast('全部缩略图已经加载完成');
+    }
+  } catch (e) {
+    alert('加载全部缩略图失败: ' + ((e && e.error) || e));
+  }
 }
 
 function cancelActivePreloads() {
@@ -3097,6 +3258,7 @@ ${renderLightbox()}
 ${renderSearchOverlay()}
 ${renderUploadModal()}
 ${renderCreateAlbumModal()}
+${renderEditAlbumModal()}
 ${renderShareModal()}
 ${renderAlbumPickerModal()}
 ${renderShareListModal()}
@@ -3235,6 +3397,7 @@ function switchView(view) {
   }
   state.view = view;
   state.selected.clear();
+  state.selectionAnchorID = null;
   if (view !== 'album-detail') state.pendingAlbumPhotoID = null;
   if (view !== 'album-detail') {
     if (view !== 'albums') state.currentAlbumID = null;
@@ -3346,7 +3509,19 @@ function shuffleRandomAlbumBatch(items, seed = state.randomAlbumSeed) {
   return [...items].sort((a, b) => randomAlbumScore(a, seed) - randomAlbumScore(b, seed));
 }
 
-function appendRandomAlbumGrid(photos) {
+function randomAlbumPageLimit() {
+  return window.innerWidth <= 900 ? 28 : 40;
+}
+
+function randomAlbumRenderChunkSize() {
+  return window.innerWidth <= 900 ? 8 : 12;
+}
+
+function randomAlbumWarmCandidates(photos) {
+  return (photos || []).slice(0, 24);
+}
+
+async function appendRandomAlbumGrid(photos, { progressive = false } = {}) {
   const wrap = $('#random-album-wrap');
   if (!wrap) return;
   let grid = $('#random-album-grid');
@@ -3357,9 +3532,24 @@ function appendRandomAlbumGrid(photos) {
     if (loadMore) wrap.insertBefore(grid, loadMore);
     else wrap.appendChild(grid);
   }
-  const fragment = document.createDocumentFragment();
-  photos.forEach(photo => fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos)));
-  grid.appendChild(fragment);
+  if (!progressive || photos.length <= randomAlbumRenderChunkSize()) {
+    const fragment = document.createDocumentFragment();
+    photos.forEach(photo => fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos)));
+    grid.appendChild(fragment);
+    return;
+  }
+  const chunkSize = randomAlbumRenderChunkSize();
+  for (let index = 0; index < photos.length; index += chunkSize) {
+    if (!document.body.contains(grid)) return;
+    const fragment = document.createDocumentFragment();
+    photos.slice(index, index + chunkSize).forEach(photo => {
+      fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos));
+    });
+    grid.appendChild(fragment);
+    if (index + chunkSize < photos.length) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+  }
 }
 
 async function fetchAllRandomAlbumPhotos() {
@@ -3509,7 +3699,7 @@ function preloadThumbnail(photo, shouldCancel) {
 }
 
 async function preloadThumbnailsInBatches(photos, onProgress, shouldCancel) {
-  const batchSize = 24;
+  const batchSize = 10;
   let loaded = 0;
   for (let i = 0; i < photos.length; i += batchSize) {
     if (shouldCancel && shouldCancel()) break;
@@ -3520,6 +3710,24 @@ async function preloadThumbnailsInBatches(photos, onProgress, shouldCancel) {
     if (onProgress) onProgress(Math.min(loaded, photos.length), photos.length);
     await new Promise(resolve => requestAnimationFrame(resolve));
   }
+}
+
+const visibleThumbnailWarmTimers = new Map();
+
+function requestVisibleThumbnailWarmup(viewKey, photos) {
+  const uuids = (photos || [])
+    .map(photo => photo && photo.uuid || '')
+    .filter(Boolean)
+    .slice(0, 48);
+  if (!uuids.length) return;
+  if (visibleThumbnailWarmTimers.has(viewKey)) {
+    clearTimeout(visibleThumbnailWarmTimers.get(viewKey));
+  }
+  const timer = window.setTimeout(() => {
+    visibleThumbnailWarmTimers.delete(viewKey);
+    void api.post('/api/media/thumbnails/warm', { uuids }).catch(() => {});
+  }, 120);
+  visibleThumbnailWarmTimers.set(viewKey, timer);
 }
 
 async function loadAllRandomAlbumPhotos() {
@@ -3569,7 +3777,7 @@ async function loadAllRandomAlbumPhotos() {
       state.randomAlbumHasMore = false;
       state.randomAlbumLoaded = true;
       state.randomAlbumLoading = false;
-      if (state.view === 'random-album') renderRandomAlbumGrid();
+      if (state.view === 'random-album') await renderRandomAlbumGrid();
     }
 
     updateRandomAlbumLoadAllProgress(0, photos.length, '正在预加载缩略图…');
@@ -3619,14 +3827,15 @@ async function loadMoreRandomAlbum() {
   state.randomAlbumLoading = true;
   try {
     state.randomAlbumAbortController = new AbortController();
-    const page = await fetchRandomAlbumPage(state.randomAlbumCursor, 60, state.randomAlbumAbortController.signal);
+    const page = await fetchRandomAlbumPage(state.randomAlbumCursor, randomAlbumPageLimit(), state.randomAlbumAbortController.signal);
     const photos = page.photos || [];
     state.randomAlbumTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.randomAlbumTotal;
     state.randomAlbumPhotos.push(...photos);
     state.randomAlbumCursor = page.next_cursor || '';
     state.randomAlbumHasMore = page.has_more || false;
     state.randomAlbumLoaded = !state.randomAlbumHasMore;
-    appendRandomAlbumGrid(photos);
+    await appendRandomAlbumGrid(photos, { progressive: true });
+    requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(photos));
   } catch (e) {
     if (!e || e.name !== 'AbortError') {
       console.error(e);
@@ -3660,21 +3869,22 @@ async function renderRandomAlbum() {
     state.randomAlbumLoaded = false;
     state.randomAlbumTotal = 0;
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
-    renderRandomAlbumGrid();
+    await renderRandomAlbumGrid();
     await loadMoreRandomAlbum();
     restoreViewScroll('random-album');
   });
 
   if (state.randomAlbumPhotos.length) {
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
-    renderRandomAlbumGrid();
+    await renderRandomAlbumGrid();
+    requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(state.randomAlbumPhotos));
     observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
     restoreViewScroll('random-album');
     return;
   }
 
   $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
-  renderRandomAlbumGrid();
+  await renderRandomAlbumGrid();
   try {
     state.randomAlbumPhotos = [];
     state.randomAlbumCursor = '';
@@ -3690,7 +3900,7 @@ async function renderRandomAlbum() {
   }
 }
 
-function renderRandomAlbumGrid() {
+async function renderRandomAlbumGrid() {
   const wrap = $('#random-album-wrap');
   if (!wrap) return;
   if (!state.randomAlbumPhotos.length && !state.randomAlbumHasMore && !state.randomAlbumLoading) {
@@ -3698,7 +3908,9 @@ function renderRandomAlbumGrid() {
     return;
   }
   wrap.innerHTML = '';
-  if (state.randomAlbumPhotos.length) appendRandomAlbumGrid(state.randomAlbumPhotos);
+  if (state.randomAlbumPhotos.length) {
+    await appendRandomAlbumGrid(state.randomAlbumPhotos, { progressive: state.randomAlbumPhotos.length > randomAlbumRenderChunkSize() });
+  }
   const loadMore = el('div', 'load-more');
   loadMore.id = 'load-more';
   wrap.appendChild(loadMore);
@@ -4289,6 +4501,9 @@ function renderSettingsContent() {
         <div class="settings-library-list" id="settings-library-list">${renderLibrarySettingsRows()}</div>
       </div>
     </div>
+    <div class="settings-actions settings-actions-fill">
+      <button class="btn" id="settings-build-all-thumbs-btn" type="button">加载全部缩略图</button>
+    </div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
   </section>
 
@@ -4443,6 +4658,7 @@ function renderSettingsContent() {
   syncRangeProgress($('#content'));
 
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
+  $('#settings-build-all-thumbs-btn')?.addEventListener('click', openThumbnailBuildWorkflow);
 
   function bindLibraryRow(row) {
     row.addEventListener('dragstart', e => {
@@ -4642,6 +4858,7 @@ function renderSettingsContent() {
     showToast(state.autoUpdateEnabled ? '已开启自动更新提示' : '已关闭自动更新');
   });
   $('#theme-btn')?.addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
+  void pollThumbnailBuildStatus();
   $('#shutdown-btn')?.addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
   $('#logout-btn')?.addEventListener('click', e => { e.preventDefault(); logout(); });
   refreshShareManagementUI();
@@ -4722,6 +4939,7 @@ async function renderTimeline() {
   if (state.photos.length && !hasPendingFocus) {
     await loadShareMap();
     renderTimelineGrid();
+    requestVisibleThumbnailWarmup('timeline', state.photos);
     observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
     restoreViewScroll('timeline');
     return;
@@ -4945,6 +5163,7 @@ async function loadMoreTimeline() {
     state.timelineCursor = page.next_cursor || '';
     state.timelineHasMore = page.has_more || false;
     appendTimelineGrid(page.photos || []);
+    requestVisibleThumbnailWarmup('timeline', page.photos || []);
   } catch (e) {
     if (!e || e.name !== 'AbortError') console.error(e);
   }
@@ -5250,10 +5469,59 @@ function buildExifInfoItems(photo) {
 }
 
 // ── 缩略图 ────────────────────────────────────────────
+function retryThumbnailLoad(imageEl, photo) {
+  if (!imageEl || !photo) return;
+  const attempt = Number(imageEl.dataset.thumbRetryAttempt || 0);
+  const delays = [450, 1200, 2600];
+  if (attempt >= delays.length) {
+    imageEl.dataset.thumbFailed = '1';
+    imageEl.closest('.photo-thumb')?.classList.add('thumb-load-failed');
+    return;
+  }
+  imageEl.dataset.thumbRetryAttempt = String(attempt + 1);
+  const nextURL = `${mediaThumbURL(photo)}?r=${Date.now()}`;
+  imageEl.closest('.photo-thumb')?.classList.add('thumb-loading');
+  window.setTimeout(() => {
+    if (!document.body.contains(imageEl)) return;
+    imageEl.src = nextURL;
+  }, delays[attempt]);
+}
+
+function prefetchPhotosForLightboxIntent(listRef, index) {
+  const source = Array.isArray(listRef) ? listRef : [];
+  if (!source.length || !Number.isFinite(index)) return;
+  const candidates = [index, index - 1, index + 1, index - 2, index + 2]
+    .filter(i => i >= 0 && i < source.length)
+    .map(i => source[i])
+    .filter(Boolean);
+  candidates.forEach(photo => {
+    const keyBase = photo.uuid || photo.id || photo.original_name || '';
+    if (!keyBase) return;
+    if (isVideoMedia(photo)) {
+      const posterKey = `video-poster:${keyBase}`;
+      if (rememberPrefetchedMedia(posterKey)) {
+        const link = document.createElement('link');
+        link.rel = 'prefetch';
+        link.as = 'image';
+        link.href = mediaThumbURL(photo);
+        document.head.appendChild(link);
+        setTimeout(() => link.remove(), 1500);
+      }
+      return;
+    }
+    const imageKey = `image-full:${keyBase}`;
+    if (!rememberPrefetchedMedia(imageKey)) return;
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = mediaFileURL(photo);
+  });
+}
+
 function makePhotoThumb(photo, listRef, opts = {}) {
   const div = el('div', 'photo-thumb');
   div.dataset.id = photo.id;
   div.dataset.kind = photo.media_kind || 'image';
+  div.classList.add('thumb-loading');
 
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteToggle = opts.trashMode
@@ -5272,11 +5540,15 @@ function makePhotoThumb(photo, listRef, opts = {}) {
 
   div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${videoBookmarkBadge}${shareBadge}${mediaBadge}`;
   const imageEl = div.querySelector('img');
+  if (imageEl) {
+    imageEl.addEventListener('load', () => {
+      requestAnimationFrame(() => div.classList.remove('thumb-loading', 'thumb-load-failed'));
+      delete imageEl.dataset.thumbFailed;
+    });
+  }
   if (imageEl && !isVideoMedia(photo)) {
     imageEl.addEventListener('error', () => {
-      if (imageEl.dataset.fallbackApplied === '1') return;
-      imageEl.dataset.fallbackApplied = '1';
-      imageEl.src = mediaFileURL(photo);
+      retryThumbnailLoad(imageEl, photo);
     });
   }
 
@@ -5284,7 +5556,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const checkEl = div.querySelector('.check');
   checkEl.addEventListener('click', e => {
     e.stopPropagation();
-    toggleSelect(photo.id, div);
+    toggleSelect(photo.id, div, { event: e, listRef });
   });
   const favoriteEl = div.querySelector('.favorite-toggle');
   if (favoriteEl) {
@@ -5293,16 +5565,22 @@ function makePhotoThumb(photo, listRef, opts = {}) {
       await toggleFavorite(photo);
     });
   }
+  const photoIndex = Array.isArray(listRef) ? listRef.indexOf(photo) : -1;
+  const warmIntent = () => {
+    if (photoIndex >= 0) prefetchPhotosForLightboxIntent(listRef, photoIndex);
+  };
+  div.addEventListener('pointerenter', warmIntent, { passive: true });
+  div.addEventListener('focusin', warmIntent);
 
   // 图片主体点击
-  div.addEventListener('click', () => {
+  div.addEventListener('click', e => {
     setFocusedPhoto(photo.id, { scroll: false });
     if (opts.trashMode) {
       openLightbox(listRef, listRef.indexOf(photo));
       return;
     }
     if (state.selected.size > 0) {
-      toggleSelect(photo.id, div);
+      toggleSelect(photo.id, div, { event: e, listRef });
     } else {
       openLightbox(listRef, listRef.indexOf(photo));
     }
@@ -5388,7 +5666,7 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteLabel = photo.is_favorite ? '取消收藏' : '加入个人收藏';
   const items = [
-    { icon: icons.contextSelect, label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl) },
+    { icon: icons.contextSelect, label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl, { listRef }) },
     { icon: icons.contextView, label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
     { icon: icons.contextTimeline, label: '在时间线中查看', action: () => openInTimeline(photo.id) },
     { icon: icons.contextFavorite, label: favoriteLabel, action: () => toggleFavorite(photo) },
@@ -5498,6 +5776,48 @@ function showTrashContextMenu(x, y, photo) {
     { icon: icons.contextRestore, label: '恢复到时间线', action: () => restorePhoto(photo.id) },
     { icon: icons.contextDelete, label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) },
   ]);
+}
+
+async function addSelectedMediaToAlbum(album) {
+  if (!album || !album.id) return;
+  const ids = [...state.selected];
+  if (!ids.length) {
+    showToast('请先选择要添加的媒体');
+    return;
+  }
+  let ok = 0;
+  let fail = 0;
+  for (const id of ids) {
+    try {
+      await api.post(`/api/media/albums/${album.id}`, { media_id: id });
+      ok += 1;
+    } catch (_) {
+      fail += 1;
+    }
+  }
+  if (ok > 0) clearSelection();
+  showToast(`已添加 ${ok} 条到「${album.name}」${fail ? `，${fail} 条失败` : ''}`);
+}
+
+function albumContextMenuItems(album, { includeView = true } = {}) {
+  const items = [];
+  if (includeView) {
+    items.push({ icon: icons.contextView, label: '查看', action: () => openAlbumDetail(album) });
+    items.push('-');
+  }
+  items.push(
+    { icon: icons.albumContextEdit, label: '编辑', action: () => openEditAlbumModal(album) },
+    { icon: icons.albumContextAdd, label: '添加', action: () => addSelectedMediaToAlbum(album) },
+    { icon: icons.albumContextDownload, label: '下载', action: () => triggerDownload(`/api/media/albums/${album.id}/download`) },
+    '-',
+    { icon: icons.albumContextDelete, label: '删除', danger: true, action: () => deleteAlbum(album) },
+  );
+  return items;
+}
+
+function showAlbumContextMenu(x, y, album, options = {}) {
+  if (!album || !album.id) return;
+  showContextMenu(x, y, albumContextMenuItems(album, options));
 }
 
 async function addSinglePhotoToAlbum(photoId) {
@@ -5612,8 +5932,11 @@ async function unfavoriteSelected() {
 }
 
 async function deleteSinglePhoto(photoId) {
-  if (!confirm('确定要将这条照片/视频移入回收站吗？')) return;
-  try { await api.del(`/api/media/${photoId}`); switchView('timeline'); }
+  try {
+    await api.del(`/api/media/${photoId}`);
+    removeDeletedPhotosFromUI([photoId]);
+    showToast('已移入回收站');
+  }
   catch(e) { alert('删除失败: ' + (e.error || e)); }
 }
 
@@ -5624,22 +5947,63 @@ async function hardDeleteSinglePhoto(photoId) {
 }
 
 // ── 选择 ─────────────────────────────────────────────
-function toggleSelect(id, thumbEl) {
-  const target = thumbEl || findPhotoThumb(id);
-  if (state.selected.has(id)) {
-    state.selected.delete(id);
-    if (target) target.classList.remove('selected');
+function selectionOrderedIDs(listRef) {
+  const source = Array.isArray(listRef) && listRef.length ? listRef : currentViewPhotos();
+  const ids = [];
+  const seen = new Set();
+  source.forEach(photo => {
+    const id = Number(photo && photo.id);
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  });
+  return ids;
+}
+function setThumbSelectedState(id, selected) {
+  document.querySelectorAll(`.photo-thumb[data-id="${id}"]`).forEach(thumb => {
+    thumb.classList.toggle('selected', selected);
+  });
+}
+function selectRangeBetween(anchorID, targetID, listRef) {
+  const ordered = selectionOrderedIDs(listRef);
+  const anchorIndex = ordered.indexOf(Number(anchorID));
+  const targetIndex = ordered.indexOf(Number(targetID));
+  if (anchorIndex < 0 || targetIndex < 0) return false;
+  const [from, to] = anchorIndex <= targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+  ordered.slice(from, to + 1).forEach(id => {
+    state.selected.add(id);
+    setThumbSelectedState(id, true);
+  });
+  return true;
+}
+function toggleSelect(id, thumbEl, options = {}) {
+  const numericID = Number(id);
+  if (!numericID) return;
+  const { event = null, listRef = null } = options;
+  if (event?.shiftKey && state.selectionAnchorID && state.selectionAnchorID !== numericID) {
+    if (selectRangeBetween(state.selectionAnchorID, numericID, listRef)) {
+      updateSelectionModeUI();
+      updateSelectionBar();
+      updateTrashSelBar();
+      return;
+    }
+  }
+  if (state.selected.has(numericID)) {
+    state.selected.delete(numericID);
+    setThumbSelectedState(numericID, false);
   }
   else {
-    state.selected.add(id);
-    if (target) target.classList.add('selected');
+    state.selected.add(numericID);
+    setThumbSelectedState(numericID, true);
   }
+  state.selectionAnchorID = numericID;
   updateSelectionModeUI();
   updateSelectionBar();
   updateTrashSelBar();
 }
 function clearSelection() {
   state.selected.clear();
+  state.selectionAnchorID = null;
   $$('.photo-thumb.selected').forEach(t => t.classList.remove('selected'));
   updateSelectionModeUI();
   updateSelectionBar();
@@ -5664,18 +6028,130 @@ function selectAllInGroup(groupEl) {
       thumb.classList.add('selected');
     }
   });
+  if (thumbs.length) state.selectionAnchorID = Number(thumbs[0].dataset.id) || state.selectionAnchorID;
   updateSelectionModeUI();
   updateSelectionBar();
   updateTrashSelBar();
 }
 async function deleteSelected() {
   if (!state.selected.size) return;
-  if (!confirm(`确定要删除选中的 ${state.selected.size} 条照片/视频吗？`)) return;
-  for (const id of state.selected) {
-    try { await api.del(`/api/media/${id}`); } catch (e) { console.error(e); }
+  const ids = [...state.selected];
+  const deleted = [];
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await api.del(`/api/media/${id}`);
+      deleted.push(id);
+    } catch (e) {
+      failed.push(id);
+      console.error(e);
+    }
   }
-  clearSelection();
-  switchView('timeline');
+  removeDeletedPhotosFromUI(deleted);
+  if (failed.length) {
+    showToast(`已删除 ${deleted.length} 条，${failed.length} 条失败`);
+  } else if (deleted.length) {
+    showToast(`已删除 ${deleted.length} 条媒体`);
+  }
+}
+
+function removePhotoIDsFromList(list, ids) {
+  if (!Array.isArray(list) || !list.length || !ids.size) return 0;
+  let writeIndex = 0;
+  let removed = 0;
+  for (let readIndex = 0; readIndex < list.length; readIndex += 1) {
+    const item = list[readIndex];
+    const itemID = Number(item && item.id);
+    if (itemID && ids.has(itemID)) {
+      removed += 1;
+      continue;
+    }
+    list[writeIndex] = item;
+    writeIndex += 1;
+  }
+  list.length = writeIndex;
+  return removed;
+}
+function ensureCurrentViewEmptyState() {
+  switch (state.view) {
+    case 'timeline': {
+      const container = $('#timeline-wrap');
+      if (container && !container.querySelector('.photo-thumb') && state.photos.length === 0 && !state.timelineHasMore && !state.timelineLoading) {
+        container.innerHTML = `<div class="empty">${icons.photo}<p>还没有媒体，点击右上角上传吧</p></div>`;
+      }
+      updateLoadMoreUI('load-more', state.timelineHasMore);
+      break;
+    }
+    case 'favorites': {
+      renderFavoritesEmptyStateIfNeeded();
+      updateFavoriteTotalHint();
+      updateLoadMoreUI('load-more', state.favoriteHasMore);
+      break;
+    }
+    case 'memories': {
+      const container = $('#memory-groups');
+      if (container && !container.querySelector('.photo-thumb')) {
+        container.innerHTML = `<div class="empty">${icons.photo}<p>还没有回忆，浏览一些照片或视频后会出现在这里</p></div>`;
+      }
+      break;
+    }
+    case 'random-album': {
+      const wrap = $('#random-album-wrap');
+      if (wrap && !wrap.querySelector('.photo-thumb') && !state.randomAlbumHasMore && !state.randomAlbumLoading) {
+        wrap.innerHTML = `<div class="empty">${icons.shuffle}<p>还没有可浏览的媒体</p></div>`;
+      }
+      updateRandomAlbumLoadMoreUI();
+      break;
+    }
+    case 'album-detail': {
+      const container = $('#album-groups');
+      if (container && !container.querySelector('.photo-thumb') && state.albumPhotos.length === 0) {
+        container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.empty.albumMedia', '相册里还没有媒体'))}</p></div>`;
+      }
+      updateLoadMoreUI('load-more', state.albumHasMore);
+      break;
+    }
+    default:
+      break;
+  }
+}
+function removeDeletedPhotosFromUI(ids) {
+  if (!Array.isArray(ids) || !ids.length) return;
+  const idSet = new Set(ids.map(id => Number(id)).filter(Boolean));
+  if (!idSet.size) return;
+  removePhotoIDsFromList(state.photos, idSet);
+  const removedFavorites = removePhotoIDsFromList(state.favoritePhotos, idSet);
+  removePhotoIDsFromList(state.randomAlbumPhotos, idSet);
+  const removedAlbumPhotos = removePhotoIDsFromList(state.albumPhotos, idSet);
+  removePhotoIDsFromList(state.memoryPhotos, idSet);
+  removePhotoIDsFromList(state.lightboxPhotos, idSet);
+  state.memoryEntries = (state.memoryEntries || []).filter(entry => !idSet.has(Number(entry && entry.id)));
+  saveMemoryEntries(state.memoryEntries);
+  if (removedFavorites) {
+    state.favoriteTotal = Math.max(0, (state.favoriteTotal || 0) - removedFavorites);
+  }
+  if (removedAlbumPhotos && state.currentAlbum) {
+    state.currentAlbum.photo_count = Math.max(0, Number(state.currentAlbum.photo_count || 0) - removedAlbumPhotos);
+    const cachedAlbum = (state.albums || []).find(album => Number(album && album.id) === Number(state.currentAlbum.id));
+    if (cachedAlbum) cachedAlbum.photo_count = Math.max(0, Number(cachedAlbum.photo_count || 0) - removedAlbumPhotos);
+  }
+  if (state.timelineTotal) state.timelineTotal = Math.max(0, state.timelineTotal - idSet.size);
+  if (state.randomAlbumTotal) state.randomAlbumTotal = Math.max(0, state.randomAlbumTotal - idSet.size);
+  idSet.forEach(id => {
+    state.selected.delete(id);
+    delete state.shareMap[`photo:${id}`];
+    if (state.focusedPhotoID === id) state.focusedPhotoID = null;
+    if (state.selectionAnchorID === id) state.selectionAnchorID = null;
+    document.querySelectorAll(`.photo-thumb[data-id="${id}"]`).forEach(node => node.remove());
+  });
+  if (!state.focusedPhotoID) {
+    const nextThumb = visiblePhotoThumbs()[0];
+    if (nextThumb) setFocusedPhoto(Number(nextThumb.dataset.id), { scroll: false });
+  }
+  updateSelectionModeUI();
+  updateSelectionBar();
+  updateTrashSelBar();
+  ensureCurrentViewEmptyState();
 }
 
 function openInTimeline(photoId) {
@@ -5802,6 +6278,14 @@ function makeAlbumCard(album) {
   kind.setAttribute('aria-label', albumKindLabel);
   $('.album-info', card)?.appendChild(kind);
   card.addEventListener('click', () => openAlbumDetail(album));
+  card.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    showAlbumContextMenu(e.clientX, e.clientY, album);
+  });
+  addLongPress(card, e => {
+    const touch = e.changedTouches[0];
+    showAlbumContextMenu(touch.clientX, touch.clientY, album);
+  });
   return card;
 }
 
@@ -5855,24 +6339,8 @@ async function renderAlbumDetail() {
     countLabel: '条已选',
     extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
   });
-  $('#topbar-actions').innerHTML = `${renderTopbarGlassButton({ id: 'download-album-btn', icon: icons.topbarDownloadAlbum, label: '下载相册' })}${renderTopbarGlassButton({ id: 'delete-album-btn', icon: icons.topbarDeleteAlbum, label: '删除相册', variant: 'danger' })}`;
+  $('#topbar-actions').innerHTML = '';
   bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
-  $('#download-album-btn').addEventListener('click', () => {
-    withButtonBusy($('#download-album-btn'), '打包中…', async () => {
-		triggerDownload(`/api/media/albums/${album.id}/download`);
-      await new Promise(resolve => setTimeout(resolve, 600));
-    });
-  });
-  $('#delete-album-btn').addEventListener('click', async () => {
-    if (!confirm(`确定要删除相册「${album.name}」吗？照片/视频本身不会被删除。`)) return;
-    try {
-		await api.del(`/api/media/albums/${album.id}`);
-      state.currentAlbum = null;
-      switchView('albums');
-    } catch (e) {
-      alert('删除相册失败: ' + (e.error || e));
-    }
-  });
 
   $('#content').innerHTML = `
 <div class="album-detail-pill" id="album-detail-pill">
@@ -5880,8 +6348,7 @@ async function renderAlbumDetail() {
   <span class="album-detail-title" title="${escapeHTML(album.name)}">${escapeHTML(album.name)}</span>
 </div>
 <div class="album-detail-bottom-controls" id="album-detail-bottom-controls">
-  ${renderAlbumDetailSortControl()}
-  ${renderMediaKindFilterControl('album-detail-filter')}
+  ${renderAlbumDetailBottomActionControls()}
 </div>
 <div id="album-groups"></div><div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
   bindMediaKindFilterControl();
@@ -5899,12 +6366,45 @@ async function renderAlbumDetail() {
     });
   });
   $('#album-detail-back-btn')?.addEventListener('click', () => switchView('albums'));
+  $('#album-detail-pill')?.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    showAlbumContextMenu(e.clientX, e.clientY, album, { includeView: false });
+  });
+  addLongPress($('#album-detail-pill'), e => {
+    const touch = e.changedTouches[0];
+    showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false });
+  });
   state.albumPhotos = []; state.albumCursor = ''; state.albumHasMore = true;
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   await loadMoreAlbumPhotos();
   const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
   observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   if (!hasPendingAlbumFocus || !focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
+}
+function syncAlbumState(updatedAlbum) {
+  if (!updatedAlbum || !updatedAlbum.id) return;
+  const targetID = Number(updatedAlbum.id);
+  state.albums = (state.albums || []).map(album => (
+    Number(album.id) === targetID ? { ...album, ...updatedAlbum } : album
+  ));
+  if (state.currentAlbum && Number(state.currentAlbum.id) === targetID) {
+    state.currentAlbum = { ...state.currentAlbum, ...updatedAlbum };
+  }
+}
+async function deleteAlbum(album) {
+  if (!album) return;
+  if (!confirm(`确定要删除相册「${album.name}」吗？照片/视频本身不会被删除。`)) return;
+  try {
+	await api.del(`/api/media/albums/${album.id}`);
+    state.albums = (state.albums || []).filter(item => Number(item.id) !== Number(album.id));
+    state.currentAlbum = null;
+    state.currentAlbumID = null;
+    state.lastAlbumDetailID = null;
+    showToast('已删除相册');
+    switchView('albums');
+  } catch (e) {
+    alert('删除相册失败: ' + (e.error || e));
+  }
 }
 async function loadMoreAlbumPhotos() {
   if (state.albumLoading || !state.albumHasMore || !state.currentAlbum) return;
@@ -6038,12 +6538,6 @@ function renderTrashGroups(newPhotos) {
   const fragment = document.createDocumentFragment();
   newPhotos.forEach(p => {
     const thumb = makePhotoThumb(p, state.trashPhotos, { trashMode: true });
-    const ck = thumb.querySelector('.check');
-    ck.addEventListener('click', e => {
-      e.stopPropagation();
-      toggleSelect(p.id, thumb);
-      updateTrashSelBar();
-    }, { capture: true });
     fragment.appendChild(thumb);
   });
   grid.appendChild(fragment);
@@ -6311,6 +6805,7 @@ function bindGlobal() {
     if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
     if (handleAlbumSwitchShortcut(e)) return;
+    if (handleDeleteShortcut(e)) return;
     if (handlePhotoGridKeyboard(e)) return;
     if (e.key === 'Escape') {
       if (state.searchOpen) {
@@ -6690,6 +7185,7 @@ function lbRender() {
     if (state.slideshowPlaying || state.experimentalAutoplayVideo || isWindowsClient()) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
+    const renderToken = state.lightboxPlaybackToken;
     video.pause();
     video.classList.add('hidden');
     video.preload = 'metadata';
@@ -6708,15 +7204,50 @@ function lbRender() {
     video.load();
     updateVideoBookmarkProgress(video, p);
     img.classList.remove('hidden');
-    img.onload = () => {
+    const thumbURL = mediaThumbURL(p);
+    const fullURL = mediaFileURL(p);
+    let fullLoaded = false;
+    const finishPreview = () => {
+      if (state.lightboxPlaybackToken !== renderToken) return;
       setLightboxMediaLoading(false);
       applyLightboxZoom();
     };
-    img.onerror = () => setLightboxMediaLoading(false);
-    img.src = mediaFileURL(p);
-    if (img.complete) {
+    img.onload = () => {
+      if (state.lightboxPlaybackToken !== renderToken) return;
+      if (img.dataset.previewStage === 'thumb' && !fullLoaded) {
+        finishPreview();
+      } else {
+        fullLoaded = true;
+        img.dataset.previewStage = 'full';
+        finishPreview();
+      }
+    };
+    img.onerror = () => {
+      if (state.lightboxPlaybackToken !== renderToken) return;
+      if (img.dataset.previewStage === 'thumb') {
+        img.dataset.previewStage = 'full';
+        img.src = fullURL;
+        return;
+      }
       setLightboxMediaLoading(false);
-      applyLightboxZoom();
+    };
+    img.dataset.previewStage = 'thumb';
+    img.src = thumbURL;
+    if (img.complete) finishPreview();
+    if (thumbURL !== fullURL) {
+      const fullImage = new Image();
+      fullImage.decoding = 'async';
+      fullImage.onload = () => {
+        if (state.lightboxPlaybackToken !== renderToken) return;
+        fullLoaded = true;
+        img.dataset.previewStage = 'full';
+        img.src = fullURL;
+      };
+      fullImage.onerror = () => {
+        if (state.lightboxPlaybackToken !== renderToken || !img.complete) return;
+        setLightboxMediaLoading(false);
+      };
+      fullImage.src = fullURL;
     }
   }
   $('#lb-title').textContent = p.original_name;
@@ -6747,7 +7278,7 @@ async function toggleCurrentLightboxFavorite() {
   await toggleFavorite(p);
 }
 function prefetchAdjacentMedia() {
-  const neighbors = [state.lightboxIndex - 1, state.lightboxIndex + 1]
+  const neighbors = [state.lightboxIndex - 2, state.lightboxIndex - 1, state.lightboxIndex + 1, state.lightboxIndex + 2]
     .filter(i => i >= 0 && i < state.lightboxPhotos.length)
     .map(i => state.lightboxPhotos[i]);
   neighbors.forEach(photo => {
@@ -7129,12 +7660,36 @@ function renderCreateAlbumModal() {
   </div>
 </div>`;
 }
+function renderEditAlbumModal() {
+  return `<div class="modal-overlay" id="edit-album-modal">
+  <div class="modal">
+    <div class="modal-title">编辑相册</div>
+    <div class="form-group"><label class="form-label">相册名称</label><input class="input" id="edit-album-name-input" placeholder="输入相册名称" maxlength="50"></div>
+    <div class="form-group"><label class="form-label">描述（可选）</label><input class="input" id="edit-album-desc-input" placeholder="输入描述"></div>
+    <div class="modal-footer">
+      <button class="btn" id="cancel-edit-album-btn">取消</button>
+      <button class="btn btn-primary" id="confirm-edit-album-btn">保存</button>
+    </div>
+  </div>
+</div>`;
+}
 function openCreateAlbumModal() {
   $('#create-album-modal').classList.add('open');
   $('#album-name-input').value = '';
   $('#album-desc-input').value = '';
   $('#cancel-album-btn').onclick = () => $('#create-album-modal').classList.remove('open');
   $('#confirm-album-btn').onclick = createAlbum;
+}
+function openEditAlbumModal(album = state.currentAlbum) {
+  if (!album) return;
+  const modal = $('#edit-album-modal');
+  if (!modal) return;
+  modal.classList.add('open');
+  modal.dataset.albumId = String(album.id);
+  $('#edit-album-name-input').value = album.name || '';
+  $('#edit-album-desc-input').value = album.description || '';
+  $('#cancel-edit-album-btn').onclick = () => modal.classList.remove('open');
+  $('#confirm-edit-album-btn').onclick = saveEditedAlbum;
 }
 async function createAlbum() {
   const name = $('#album-name-input').value.trim();
@@ -7145,6 +7700,35 @@ async function createAlbum() {
     // 通过 switchView 而不是直接 render，确保菜单高亮和 hash 保持一致。
     switchView('albums');
   } catch(e) { alert('创建失败: ' + (e.error || e)); }
+}
+async function saveEditedAlbum() {
+  const modal = $('#edit-album-modal');
+  const albumID = Number(modal?.dataset.albumId || 0);
+  const name = $('#edit-album-name-input').value.trim();
+  if (!albumID) return;
+  if (!name) {
+    alert('请输入相册名称');
+    return;
+  }
+  try {
+    const updatedAlbum = await withButtonBusy($('#confirm-edit-album-btn'), '保存中…', () => api.put(`/api/media/albums/${albumID}`, {
+      name,
+      description: $('#edit-album-desc-input').value.trim(),
+    }));
+    syncAlbumState(updatedAlbum);
+    modal.classList.remove('open');
+    if (state.currentAlbum && Number(state.currentAlbum.id) === albumID) {
+      $('#topbar-title').textContent = state.currentAlbum.name || '';
+      const title = $('.album-detail-title');
+      if (title) {
+        title.textContent = state.currentAlbum.name || '';
+        title.title = state.currentAlbum.name || '';
+      }
+    }
+    showToast('相册已更新');
+  } catch (e) {
+    alert('更新相册失败: ' + (e.error || e));
+  }
 }
 
 // ── 相册选择弹窗 (b-3) ───────────────────────────────
@@ -7392,7 +7976,7 @@ function openLibraryLogoGuideModal(file, onConfirm, onCancel) {
   };
 }
 
-function cropLibraryLogoFile(file, crop) {
+function cropLibraryLogoFile(file, crop, options = {}) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -7405,18 +7989,30 @@ function cropLibraryLogoFile(file, crop) {
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, edge, edge);
-        const stage = $('#library-logo-crop-stage');
-        const stageSize = stage ? stage.getBoundingClientRect().width : 280;
-        const baseScale = Math.max(stageSize / img.naturalWidth, stageSize / img.naturalHeight);
-        const scale = baseScale * ((crop && crop.zoom) || 1);
-        const drawnW = img.naturalWidth * scale;
-        const drawnH = img.naturalHeight * scale;
-        const offsetX = (stageSize - drawnW) / 2 + ((crop && crop.x) || 0);
-        const offsetY = (stageSize - drawnH) / 2 + ((crop && crop.y) || 0);
-        const sourceX = Math.max(0, -offsetX / scale);
-        const sourceY = Math.max(0, -offsetY / scale);
-        const sourceW = Math.min(img.naturalWidth - sourceX, stageSize / scale);
-        const sourceH = Math.min(img.naturalHeight - sourceY, stageSize / scale);
+        let sourceX = 0;
+        let sourceY = 0;
+        let sourceW = img.naturalWidth;
+        let sourceH = img.naturalHeight;
+        if (options.autoSquare) {
+          const square = Math.min(img.naturalWidth, img.naturalHeight);
+          sourceX = Math.max(0, Math.round((img.naturalWidth - square) / 2));
+          sourceY = Math.max(0, Math.round((img.naturalHeight - square) / 2));
+          sourceW = square;
+          sourceH = square;
+        } else {
+          const stage = $('#library-logo-crop-stage');
+          const stageSize = stage ? stage.getBoundingClientRect().width : 280;
+          const baseScale = Math.max(stageSize / img.naturalWidth, stageSize / img.naturalHeight);
+          const scale = baseScale * ((crop && crop.zoom) || 1);
+          const drawnW = img.naturalWidth * scale;
+          const drawnH = img.naturalHeight * scale;
+          const offsetX = (stageSize - drawnW) / 2 + ((crop && crop.x) || 0);
+          const offsetY = (stageSize - drawnH) / 2 + ((crop && crop.y) || 0);
+          sourceX = Math.max(0, -offsetX / scale);
+          sourceY = Math.max(0, -offsetY / scale);
+          sourceW = Math.min(img.naturalWidth - sourceX, stageSize / scale);
+          sourceH = Math.min(img.naturalHeight - sourceY, stageSize / scale);
+        }
         ctx.drawImage(img, sourceX, sourceY, sourceW, sourceH, 0, 0, edge, edge);
         canvas.toBlob(blob => {
           URL.revokeObjectURL(url);

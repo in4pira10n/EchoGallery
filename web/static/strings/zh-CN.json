@@ -125,7 +125,7 @@
       "cancelOrganizing": "取消整理",
       "cancelling": "已读取 {count} 条媒体，正在取消…",
       "organizing": "已读取 {count} 条媒体，正在整理乱序相册…",
-      "collecting": "正在收集全部媒体… 已读取 {count} 条",
+      "collecting": "正在收集全部媒体 … 已读取 {count} 条",
       "finalizing": "已读取 {count} 条媒体，正在完成整理…",
       "modalTitle": "立即加载全部乱序相册媒体",
       "modalCopy": "会先确保乱序相册已收集完整媒体列表，再批量预加载缩略图。加载期间会暂时锁定 App，减少后续浏览时被缩略图加载打断。",

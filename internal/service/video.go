@@ -64,6 +64,11 @@ func (s *PhotoService) RegisterUploadedVideo(input RegisterUploadedVideoInput) (
 	if err := s.repo.SavePhoto(photo); err != nil {
 		return nil, fmt.Errorf("保存视频记录失败: %w", err)
 	}
+	if s.syncThumbnail {
+		_ = s.generateThumbnailForPhoto(photo)
+	} else {
+		go s.enqueueThumbnailGeneration(photo, true)
+	}
 	return photo, nil
 }
 

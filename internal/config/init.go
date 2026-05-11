@@ -57,8 +57,8 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 		Preferences: Preferences{
 			Theme:                         "light",
 			GridSize:                      180,
-			GridGap:                       8,
-			ThumbRadius:                   8,
+			GridGap:                       2,
+			ThumbRadius:                   2,
 			SlideshowMode:                 "sequential",
 			SlideshowLoop:                 true,
 			SlideshowInterval:             5000,

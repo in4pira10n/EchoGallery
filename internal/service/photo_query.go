@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 var (
 	execCommand = exec.Command
 	currentOS   = runtime.GOOS
+	moveFileRename = os.Rename
 )
 
 // GetTimeline 获取时间线图片（游标分页）
@@ -467,9 +469,51 @@ func (s *PhotoService) moveManagedFileToTrash(path string) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return
 	}
-	if err := os.Rename(path, uniqueTrashPath(dest)); err != nil {
-		return
+	_ = moveFileToTrash(path, uniqueTrashPath(dest))
+}
+
+func moveFileToTrash(src, dest string) error {
+	if err := moveFileRename(src, dest); err == nil {
+		return nil
 	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := os.Chmod(dest, info.Mode()); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := os.Chtimes(dest, info.ModTime(), info.ModTime()); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := os.Remove(src); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	return nil
 }
 
 func (s *PhotoService) trashRelPath(path string) string {

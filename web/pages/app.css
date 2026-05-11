@@ -255,11 +255,14 @@ img {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
+  border-radius: 50%;
 }
 
 .nav-logo-image {
-  width: 52px;
-  height: 52px;
+  display: block;
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   object-position: center;
   border-radius: 50%;
@@ -896,17 +899,84 @@ body:has(#album-grid-wrap) .content {
 }
 
 .album-detail-bottom-controls {
+  --album-detail-bottom-gap: 16px;
+  --album-detail-side-inset: calc(32px + 52px + 20px);
   position: fixed;
   left: 50%;
   bottom: 32px;
   transform: translateX(-50%);
   z-index: 39;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--album-detail-bottom-gap);
+  width: fit-content;
+  max-width: calc(100vw - 64px);
+}
+
+.album-detail-bottom-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--album-detail-bottom-gap);
+  min-width: 0;
+}
+
+.album-detail-action-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--album-detail-bottom-gap);
+  width: 100%;
+  min-width: 0;
+}
+
+.album-detail-action-group-start {
+  justify-self: stretch;
+}
+
+.album-detail-action-group-end {
+  justify-self: stretch;
+}
+
+.album-detail-action-btn {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  box-sizing: border-box;
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 0;
+  height: 52px;
+  min-height: 52px;
+  padding: 0 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  width: fit-content;
-  max-width: calc(100vw - 64px);
+  gap: 10px;
+  text-align: center;
+}
+
+.album-detail-action-btn svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: block;
+}
+
+.album-detail-action-btn svg:empty {
+  width: 0;
+  height: 0;
+  flex-basis: 0;
+}
+
+.album-detail-action-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .album-detail-filter,
@@ -920,7 +990,7 @@ body:has(#album-grid-wrap) .content {
 }
 
 .album-detail-sort-btn {
-  width: 44px;
+  /* width: 44px; */
   padding: 0;
   justify-content: center;
   font-size: .82rem;
@@ -1192,10 +1262,29 @@ body:has(#album-grid-wrap) .content {
   transition: outline-color .14s ease, box-shadow .14s ease, transform .14s ease;
 }
 
+.photo-thumb.thumb-loading,
+.photo-thumb.thumb-load-failed {
+  background:
+    radial-gradient(circle at center, color-mix(in srgb, var(--accent) 12%, transparent) 0, transparent 58%),
+    var(--bg2);
+}
+
 .photo-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity .22s ease, transform .3s ease;
+}
+
+.photo-thumb.thumb-loading img {
+  opacity: 0;
+  transform: scale(1.02);
+}
+
+.photo-thumb.thumb-load-failed img {
+  opacity: .18;
 }
 
 .photo-thumb .media-badge {
@@ -3420,6 +3509,15 @@ body.lightbox-page-lock {
   grid-column: 1 / -1;
 }
 
+.settings-actions-fill {
+  margin-top: 24px;
+}
+
+.settings-actions-fill .btn {
+  width: 100%;
+  justify-content: center;
+}
+
 .settings-app-actions {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -3732,6 +3830,7 @@ body.lightbox-page-lock {
 }
 
 .settings-library-logo-preview img {
+  display: block;
   width: 100%;
   height: 100%;
   border-radius: 50%;
@@ -3873,6 +3972,10 @@ body.lightbox-page-lock {
   right: calc(32px + 52px + 20px);
   bottom: 32px;
   z-index: 39;
+}
+
+.settings-floating-add-library,
+.album-detail-action-btn {
   box-sizing: border-box;
   height: 52px;
   min-height: 52px;
@@ -3899,13 +4002,15 @@ body.lightbox-page-lock {
   white-space: nowrap;
 }
 
-.settings-floating-add-library:hover {
+.settings-floating-add-library:hover,
+.album-detail-action-btn:hover {
   border-color: color-mix(in srgb, var(--highlight-bg, var(--accent)) 58%, rgba(255, 255, 255, .62));
   background: color-mix(in srgb, var(--highlight-bg, var(--accent)) 34%, rgba(255, 255, 255, .22));
   color: var(--highlight-text, #fff);
 }
 
-.settings-floating-add-library svg {
+.settings-floating-add-library svg,
+.album-detail-action-btn svg {
   width: 19px;
   height: 19px;
   flex: 0 0 19px;
@@ -4129,8 +4234,21 @@ body.lightbox-page-lock {
   }
 
   .album-detail-bottom-controls {
-    width: fit-content;
-    max-width: calc(100vw - 24px);
+    display: flex;
+    justify-content: center;
+    width: calc(100vw - 64px);
+    max-width: calc(100vw - 64px);
+  }
+
+  .album-detail-action-group {
+    display: none;
+  }
+
+  .album-detail-bottom-center {
+    width: max-content;
+    max-width: 100%;
+    margin: 0 auto;
+    justify-self: auto;
   }
 
   .album-detail-filter,
@@ -4195,8 +4313,8 @@ body.lightbox-page-lock {
   }
 
   .album-detail-bottom-controls {
-    width: fit-content;
-    max-width: calc(100vw - 20px);
+    width: calc(100vw - 64px);
+    max-width: calc(100vw - 64px);
   }
 
   .album-detail-filter {

@@ -5,12 +5,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
 	imgpkg "echogallery/internal/image"
+	"echogallery/internal/media"
 	"echogallery/internal/storage"
 )
 
@@ -23,18 +27,29 @@ type PhotoService struct {
 	thumbnailSize int
 	trashPath     string
 	syncThumbnail bool // 测试用：同步生成缩略图
+	thumbPriority chan *storage.Photo
+	thumbJobs     chan *storage.Photo
+	thumbJobsMu   sync.Mutex
+	thumbPending  map[string]struct{}
+	thumbUrgent   map[string]struct{}
+	thumbBuildMu  sync.Mutex
+	thumbBuild    *thumbnailBuildTask
 }
 
 // NewPhotoService 创建图片服务
 func NewPhotoService(repo storage.Repository, sourcePath string, dataPath string, trashPath string) *PhotoService {
-	return &PhotoService{
+	svc := &PhotoService{
 		repo:          repo,
 		sourcePath:    sourcePath,
 		dataPath:      dataPath,
 		thumbnailPath: dataPath,
 		thumbnailSize: imgpkg.DefaultThumbnailLongEdge,
 		trashPath:     trashPath,
+		thumbPending:  make(map[string]struct{}),
+		thumbUrgent:   make(map[string]struct{}),
 	}
+	svc.startThumbnailWorkers()
+	return svc
 }
 
 // newPhotoServiceSync 创建同步模式图片服务（仅用于测试）
@@ -47,7 +62,177 @@ func newPhotoServiceSync(repo storage.Repository, sourcePath string, dataPath st
 		thumbnailSize: imgpkg.DefaultThumbnailLongEdge,
 		trashPath:     trashPath,
 		syncThumbnail: true,
+		thumbPending:  make(map[string]struct{}),
+		thumbUrgent:   make(map[string]struct{}),
 	}
+}
+
+func thumbnailWarmupWorkerCount() int {
+	n := runtime.GOMAXPROCS(0) / 3
+	if n < 1 {
+		return 1
+	}
+	if n > 3 {
+		return 3
+	}
+	return n
+}
+
+func (s *PhotoService) startThumbnailWorkers() {
+	if s == nil || s.syncThumbnail || s.thumbJobs != nil {
+		return
+	}
+	s.thumbPriority = make(chan *storage.Photo, 192)
+	s.thumbJobs = make(chan *storage.Photo, 512)
+	for i := 0; i < thumbnailWarmupWorkerCount(); i++ {
+		go func() {
+			for {
+				photo, ok := s.nextThumbnailJob()
+				if !ok {
+					return
+				}
+				s.generateThumbnailForPhoto(photo) //nolint:errcheck
+				if photo == nil {
+					continue
+				}
+				s.thumbJobsMu.Lock()
+				delete(s.thumbPending, photo.UUID)
+				delete(s.thumbUrgent, photo.UUID)
+				s.thumbJobsMu.Unlock()
+			}
+		}()
+	}
+}
+
+func (s *PhotoService) nextThumbnailJob() (*storage.Photo, bool) {
+	if s == nil {
+		return nil, false
+	}
+	select {
+	case photo, ok := <-s.thumbPriority:
+		return photo, ok
+	default:
+	}
+	select {
+	case photo, ok := <-s.thumbPriority:
+		return photo, ok
+	case photo, ok := <-s.thumbJobs:
+		return photo, ok
+	}
+}
+
+func (s *PhotoService) enqueueThumbnailGeneration(photo *storage.Photo, priority bool) {
+	if s == nil || photo == nil || photo.UUID == "" {
+		return
+	}
+	if s.syncThumbnail {
+		s.generateThumbnailForPhoto(photo) //nolint:errcheck
+		return
+	}
+	if s.thumbJobs == nil {
+		return
+	}
+	if s.thumbnailAlreadyExists(photo) {
+		return
+	}
+	s.thumbJobsMu.Lock()
+	if priority {
+		if _, exists := s.thumbUrgent[photo.UUID]; exists {
+			s.thumbJobsMu.Unlock()
+			return
+		}
+		s.thumbUrgent[photo.UUID] = struct{}{}
+		s.thumbPending[photo.UUID] = struct{}{}
+		s.thumbJobsMu.Unlock()
+		s.thumbPriority <- photo
+		return
+	}
+	if _, exists := s.thumbPending[photo.UUID]; exists {
+		s.thumbJobsMu.Unlock()
+		return
+	}
+	s.thumbPending[photo.UUID] = struct{}{}
+	s.thumbJobsMu.Unlock()
+	s.thumbJobs <- photo
+}
+
+func (s *PhotoService) warmImportedThumbnails(photos []*storage.Photo) {
+	if s == nil || s.syncThumbnail || len(photos) == 0 {
+		return
+	}
+	sort.SliceStable(photos, func(i, j int) bool {
+		ti := photos[i].TakenAt
+		tj := photos[j].TakenAt
+		if ti.Equal(tj) {
+			return photos[i].UUID > photos[j].UUID
+		}
+		return ti.After(tj)
+	})
+	const firstScreenWarmCount = 180
+	go func() {
+		for index, photo := range photos {
+			s.enqueueThumbnailGeneration(photo, index < firstScreenWarmCount)
+		}
+	}()
+}
+
+func (s *PhotoService) WarmThumbnailsByUUIDs(uuids []string, userID int64) (int, error) {
+	if s == nil || len(uuids) == 0 {
+		return 0, nil
+	}
+	seen := make(map[string]struct{}, len(uuids))
+	warmed := 0
+	for _, raw := range uuids {
+		uuid := strings.TrimSpace(raw)
+		if uuid == "" {
+			continue
+		}
+		if _, exists := seen[uuid]; exists {
+			continue
+		}
+		seen[uuid] = struct{}{}
+		photo, err := s.repo.GetPhotoByUUIDAny(uuid, userID)
+		if err != nil || photo == nil {
+			continue
+		}
+		s.enqueueThumbnailGeneration(photo, true)
+		warmed++
+		if warmed >= 160 {
+			break
+		}
+	}
+	return warmed, nil
+}
+
+func (s *PhotoService) thumbnailAlreadyExists(photo *storage.Photo) bool {
+	for _, candidate := range s.ThumbnailCandidates(photo) {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *PhotoService) generateThumbnailForPhoto(photo *storage.Photo) error {
+	if photo == nil {
+		return nil
+	}
+	if s.thumbnailAlreadyExists(photo) {
+		return nil
+	}
+	if photo.MediaKind == storage.MediaKindVideo {
+		return media.GeneratePoster(s.resolveFinderPath(photo), s.PosterPath(photo), s.thumbnailSize)
+	}
+	srcPath := s.resolveFinderPath(photo)
+	file, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return imgpkg.GenerateThumbnail(file, photo.MimeType, s.ThumbnailPath(photo), s.thumbnailSize)
 }
 
 func (s *PhotoService) SetThumbnailRoot(path string) {
@@ -138,7 +323,7 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 	if s.syncThumbnail {
 		s.generateThumbnail(photo, destPath, meta.MimeType)
 	} else {
-		go s.generateThumbnail(photo, destPath, meta.MimeType)
+		go s.enqueueThumbnailGeneration(photo, true)
 	}
 
 	return &UploadResult{Photo: photo}, nil

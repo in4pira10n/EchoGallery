@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,6 +27,58 @@ import (
 )
 
 const authCookieName = "echogallery_token"
+
+type thumbnailRequestTask struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
+type thumbnailRequestCoordinator struct {
+	sem   chan struct{}
+	mu    sync.Mutex
+	tasks map[string]*thumbnailRequestTask
+}
+
+func newThumbnailRequestCoordinator() *thumbnailRequestCoordinator {
+	limit := runtime.GOMAXPROCS(0) / 3
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 3 {
+		limit = 3
+	}
+	return &thumbnailRequestCoordinator{
+		sem:   make(chan struct{}, limit),
+		tasks: make(map[string]*thumbnailRequestTask),
+	}
+}
+
+func (c *thumbnailRequestCoordinator) Do(key string, fn func() (string, error)) (string, error) {
+	c.mu.Lock()
+	if task, ok := c.tasks[key]; ok {
+		c.mu.Unlock()
+		<-task.done
+		return task.path, task.err
+	}
+	task := &thumbnailRequestTask{done: make(chan struct{})}
+	c.tasks[key] = task
+	c.mu.Unlock()
+
+	c.sem <- struct{}{}
+	path, err := fn()
+	<-c.sem
+
+	c.mu.Lock()
+	task.path = path
+	task.err = err
+	close(task.done)
+	delete(c.tasks, key)
+	c.mu.Unlock()
+	return path, err
+}
+
+var onDemandThumbnailCoordinator = newThumbnailRequestCoordinator()
 
 type videoRegistrar interface {
 	AddPhoto(albumID int64, photoID int64, userID int64) error
@@ -83,6 +137,10 @@ type videoPlaybackPreferenceRequest struct {
 	Muted  *bool    `json:"muted"`
 }
 
+type thumbnailWarmRequest struct {
+	UUIDs []string `json:"uuids"`
+}
+
 type loginHeroMediaItem struct {
 	Kind string `json:"kind"`
 	URL  string `json:"url"`
@@ -111,6 +169,10 @@ type shareDetailResponse struct {
 	TargetOriginalName string `json:"target_original_name,omitempty"`
 	TargetMediaKind    string `json:"target_media_kind,omitempty"`
 	TargetMimeType     string `json:"target_mime_type,omitempty"`
+}
+
+type thumbnailWarmer interface {
+	WarmThumbnailsByUUIDs(uuids []string, userID int64) (int, error)
 }
 
 type authLoginRequest struct {
@@ -181,6 +243,9 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleServeLibraryLogo(cfg))
+	r.GET("/api/settings/thumbnails/build", authMiddleware(cfg), handleGetThumbnailBuildStatus(cfg, registrar))
+	r.POST("/api/settings/thumbnails/build", authMiddleware(cfg), handleStartThumbnailBuild(cfg, registrar))
+	r.DELETE("/api/settings/thumbnails/build", authMiddleware(cfg), handleCancelThumbnailBuild(cfg, registrar))
 	r.POST("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleRefreshVideoThumbnails(cfg, registrar))
 	r.POST("/api/settings/exif/backfill", authMiddleware(cfg), handleBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authMiddleware(cfg), handleGetPlayerKeymap(cfg))
@@ -202,6 +267,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("", authMiddleware(cfg), handleListMedia(cfg, registrar))
 		media.GET("/search", authMiddleware(cfg), handleSearchMedia(cfg, registrar))
 		media.GET("/random", authMiddleware(cfg), handleListRandomMedia(cfg, registrar))
+		media.POST("/thumbnails/warm", authMiddleware(cfg), handleWarmVisibleThumbnails(cfg, registrar))
 		media.GET("/favorites", authMiddleware(cfg), handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", authMiddleware(cfg), handleListTrashMedia(cfg, registrar))
 		media.GET("/:id/albums", authMiddleware(cfg), handleListMediaAlbums(cfg, registrar))
@@ -1051,6 +1117,59 @@ func resolveExistingThumbnailPath(preferredPath string) string {
 	return ""
 }
 
+func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo) (string, error) {
+	if photo == nil {
+		return "", fmt.Errorf("媒体不存在")
+	}
+	thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+	if thumbPath != "" {
+		return thumbPath, nil
+	}
+	if photo.MediaKind == storage.MediaKindVideo {
+		preferredPosterPath := registrar.PosterPath(photo)
+		if err := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, cfg.ThumbnailSize); err != nil {
+			return "", err
+		}
+		return resolveExistingThumbnailPath(preferredPosterPath), nil
+	}
+	preferredThumbPath := registrar.ThumbnailPath(photo)
+	file, err := os.Open(registrar.MediaPath(photo))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if err := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, cfg.ThumbnailSize); err != nil {
+		return "", err
+	}
+	return resolveExistingThumbnailPath(preferredThumbPath), nil
+}
+
+func handleWarmVisibleThumbnails(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		warmer, ok := registrar.(thumbnailWarmer)
+		if !ok {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "缩略图预热不可用"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		var req thumbnailWarmRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		queued, err := warmer.WarmThumbnailsByUUIDs(req.UUIDs, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"queued": queued})
+	}
+}
+
 func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if registrar == nil {
@@ -1070,21 +1189,9 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 		}
 		thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
 		if thumbPath == "" {
-			if photo.MediaKind == storage.MediaKindVideo {
-				preferredPosterPath := registrar.PosterPath(photo)
-				if genErr := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, cfg.ThumbnailSize); genErr == nil {
-					thumbPath = resolveExistingThumbnailPath(preferredPosterPath)
-				}
-			} else {
-				preferredThumbPath := registrar.ThumbnailPath(photo)
-				file, openErr := os.Open(registrar.MediaPath(photo))
-				if openErr == nil {
-					defer file.Close()
-					if genErr := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, cfg.ThumbnailSize); genErr == nil {
-						thumbPath = resolveExistingThumbnailPath(preferredThumbPath)
-					}
-				}
-			}
+			thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
+				return generateThumbnailOnDemand(cfg, registrar, photo)
+			})
 		}
 		if thumbPath == "" {
 			if photo.MediaKind == storage.MediaKindImage {
@@ -1439,13 +1546,9 @@ func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin
 			}
 			thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
 			if thumbPath == "" {
-				file, openErr := os.Open(registrar.MediaPath(photo))
-				if openErr == nil {
-					defer file.Close()
-					if genErr := image.GenerateThumbnail(file, photo.MimeType, registrar.ThumbnailPath(photo), cfg.ThumbnailSize); genErr == nil {
-						thumbPath = resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
-					}
-				}
+				thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
+					return generateThumbnailOnDemand(cfg, registrar, photo)
+				})
 			}
 			if thumbPath != "" {
 				c.File(thumbPath)

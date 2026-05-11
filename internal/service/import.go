@@ -151,6 +151,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		importedCount  int64
 		skippedCount   int64
 		processedCount int64
+		importedPhotos []*storage.Photo
 		cacheMu        sync.Mutex
 		progressMu     sync.Mutex
 		errCh          = make(chan error, 1)
@@ -196,6 +197,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 				}
 				if imported {
 					atomic.AddInt64(&importedCount, 1)
+					cacheMu.Lock()
+					importedPhotos = append(importedPhotos, photo)
+					cacheMu.Unlock()
 				} else {
 					atomic.AddInt64(&skippedCount, 1)
 				}
@@ -237,6 +241,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 
 	summary.Imported += int(importedCount)
 	summary.Skipped += int(skippedCount)
+	s.warmImportedThumbnails(importedPhotos)
 	return summary, nil
 }
 
@@ -277,12 +282,12 @@ func sourceMediaUnchanged(existing storage.SourceMediaInfo, info fs.FileInfo) bo
 }
 
 func importWorkerCount() int {
-	n := runtime.GOMAXPROCS(0)
-	if n < 2 {
-		return 2
+	n := runtime.GOMAXPROCS(0) / 2
+	if n < 1 {
+		return 1
 	}
-	if n > 8 {
-		return 8
+	if n > 4 {
+		return 4
 	}
 	return n
 }
