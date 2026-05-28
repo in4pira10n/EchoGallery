@@ -119,13 +119,26 @@ http://127.0.0.1:8080
 ## TO-DOs
 
 - [x]  `Doc` 示例项目和截图
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：重构任务调度，优先保证当前首屏、可见区域与下一屏，再延后远处媒体，减少“全量抢占”带来的卡顿
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：图片 / 视频缩略图构建分离限流，避免视频抽帧与普通图像缩放争抢同一批 CPU / 内存资源
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：缩略图构建支持分级生成；先快速生成可浏览的小图，再后台补全更高质量缓存
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：减少重复解码、重复生成与重复预热，避免多个入口同时回退到原图链路
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：针对超大图像、超大资源库限制峰值并发与内存占用，避免首次构建时出现 CPU / RAM 冲高
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：针对 HDD / 外接硬盘资源库优化 IO 调度；优先顺序扫描、顺序读取与批量处理同目录媒体，减少随机读放大
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：同一张图片若同时需要多层派生图，应尽量只解码一次并复用方向修正结果，避免重复解码与重复旋转
+- [ ]  `Performance` `Enhancement` 首次构建缩略图优化：进一步区分 preview / full / large preview 等层级；首次仅保证全库进入“可浏览”状态，更高质量层按需或后台补齐，并尽量复用 echogallery-data 本地缓存而不是回退原图
+- [ ]  `Performance` `Enhancement` 原图加载优化：为灯箱大图浏览设计中间层 large preview；在保持最终原图接管的前提下，减少 HDD 原图直读造成的等待与浏览器解码压力
+- [ ]  `Performance` `Enhancement` 原图加载优化：原图 / large preview / 邻近媒体预取应采用更保守且可中断的调度策略；当前浏览优先，避免 HDD 读盘、浏览器大图解码与后台任务相互抢占
+- [ ]  `Performance` `Enhancement` 首次构建缩略图优化：图片与视频继续彻底分阶段处理；优先完成图片 preview，再按需补视频 poster 与其他更重任务
+- [x]  `Performance` `Enhancement` 首次构建缩略图优化：为“加载全部缩略图”提供极速模式，仅构建较小 preview 与较快编码参数；优先缩短 HDD 资源库的首次可浏览时间
+- [ ]  `Performance` `Future Plan` 首次构建缩略图优化：评估图片缩略图链路接入 GPU / Metal / Direct2D 等硬件加速方案，并保留 CPU 回退路径
 - [ ]  `Future Plan` `Doc` 视频演示
 - [ ]  `ICON` App Icon
 - [x] `Doc` `Enhancement` 更改切换 Tab 的快捷键 `Alt` `数字键` 为直接按 `数字键`；并随之更改 README 的快捷键指南
 - [ ]  `Fix` 手机端“快进 / 快退”（敲击两下屏幕边缘 1/4）手势会和“暂停 / 播放”（轻点屏幕一下）手势冲突
 - [ ]  `Bug` 手机端点击照片并不是直接进入大图浏览；而是先“锁定照片”（出现复选框与收藏 Tag），再点一下才进入浏览页
 - [x]  `New Feature` 「相册」详情页现支持按：媒体名称 / 文件大小 / 时间线 / 时间线倒序排序
-- [x]  `New Feature` `Video Playback` 视频播放：若视频时长不少于 10 分钟（在「设置」中新建项，可由用户修改），则将视频时常等分为 10「小节」；每一个「小节」要在进度条有一个小小点（比「书签」的圆点小，要与主色呼应）；按 `左右方向键` ：`←` 可前往上一「小节」；`→` 可前往下一「小节」
+- [x]  `New Feature` `Video Playback` 视频播放：若视频时长不少于 10 分钟（在「设置」中新建项，可由用户修改），则将视频时常等分为 10「小节」；每一个「小节」要在进度条有一个小小点（比「书签」的圆点小，要与主色呼应）；按 `Q` 可前往上一「小节」，按 `E` 可前往下一「小节」
 - [x]  `New Feature` `Video Playback` 在「设置」中新增：视频播放自动播放下一个
 - [x]  `Enhancement` 将非相册、设置页的 content 左右 padding 改为 0，并默认照片圆角 2px、图像间距 2px
 - [x]  `Enhancement` 删除「保存并重启」；检测用户动了哪些设置，若需要重启则点击「保存」自动重启

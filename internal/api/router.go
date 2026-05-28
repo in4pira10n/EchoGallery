@@ -110,12 +110,17 @@ type videoRegistrar interface {
 	RevealInFinder(id int64, userID int64) error
 	RestorePhoto(id int64, userID int64) error
 	RefreshVideoThumbnails(userID int64) (*service.VideoThumbnailRefreshResult, error)
+	StartVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error)
+	GetVideoThumbnailRefreshStatus(userID int64) service.VideoThumbnailRefreshStatus
+	CancelVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error)
 	SetPhotoFavorite(id int64, userID int64, favorite bool) error
 	GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	Upload(input service.UploadInput) (*service.UploadResult, error)
 	MediaPath(photo *storage.Photo) string
 	PosterPath(photo *storage.Photo) string
+	ThumbnailBuildPreviewPath(photo *storage.Photo) string
 	ThumbnailPath(photo *storage.Photo) string
+	ThumbnailPreviewPath(photo *storage.Photo) string
 }
 
 type mediaDownloadRequest struct {
@@ -210,10 +215,10 @@ func NewRouterWithStaticWithRestart(cfg *config.Config, staticFS fs.FS, registra
 }
 
 func NewRouterWithStaticWithLifecycle(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error) http.Handler {
-	return NewRouterWithStaticWithLifecycleAndBuild(cfg, staticFS, registrar, restart, shutdown, LibraryBuildHooks{})
+	return NewRouterWithStaticWithLifecycleAndBuild(cfg, staticFS, registrar, restart, shutdown, LibraryBuildHooks{}, LibraryBatchBuildHooks{})
 }
 
-func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error, buildHooks LibraryBuildHooks) http.Handler {
+func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error, buildHooks LibraryBuildHooks, batchBuildHooks LibraryBatchBuildHooks) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
@@ -239,6 +244,11 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/shutdown", authMiddleware(cfg), handleShutdownApp(shutdown))
 	r.GET("/api/library-build/status", authMiddleware(cfg), handleGetLibraryBuildStatus(buildHooks))
 	r.PUT("/api/library-build/exit-after-complete", authMiddleware(cfg), handleSetLibraryBuildExitAfterComplete(buildHooks))
+	r.DELETE("/api/library-build", authMiddleware(cfg), handleCancelLibraryBuild(buildHooks))
+	r.GET("/api/settings/libraries/build-all", authMiddleware(cfg), handleGetLibraryBatchBuildStatus(batchBuildHooks))
+	r.POST("/api/settings/libraries/build-all", authMiddleware(cfg), handleStartLibraryBatchBuild(cfg, batchBuildHooks))
+	r.DELETE("/api/settings/libraries/build-all", authMiddleware(cfg), handleCancelLibraryBatchBuild(batchBuildHooks))
+	r.PUT("/api/settings/libraries/build-all/exit-after-complete", authMiddleware(cfg), handleSetLibraryBatchBuildExitAfterComplete(batchBuildHooks))
 	r.POST("/api/settings/libraries/logos/refresh", authMiddleware(cfg), handleRefreshLibraryLogos(cfg))
 	r.POST("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))
@@ -246,7 +256,9 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/settings/thumbnails/build", authMiddleware(cfg), handleGetThumbnailBuildStatus(cfg, registrar))
 	r.POST("/api/settings/thumbnails/build", authMiddleware(cfg), handleStartThumbnailBuild(cfg, registrar))
 	r.DELETE("/api/settings/thumbnails/build", authMiddleware(cfg), handleCancelThumbnailBuild(cfg, registrar))
-	r.POST("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleRefreshVideoThumbnails(cfg, registrar))
+	r.GET("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleGetVideoThumbnailRefreshStatus(cfg, registrar))
+	r.POST("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleStartVideoThumbnailRefresh(cfg, registrar))
+	r.DELETE("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleCancelVideoThumbnailRefresh(cfg, registrar))
 	r.POST("/api/settings/exif/backfill", authMiddleware(cfg), handleBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authMiddleware(cfg), handleGetPlayerKeymap(cfg))
 
@@ -1117,17 +1129,51 @@ func resolveExistingThumbnailPath(preferredPath string) string {
 	return ""
 }
 
-func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo) (string, error) {
+func resolveExistingThumbnailCandidates(paths ...string) string {
+	for _, path := range paths {
+		if resolved := resolveExistingThumbnailPath(path); resolved != "" {
+			return resolved
+		}
+	}
+	return ""
+}
+
+func thumbnailCandidatePaths(registrar videoRegistrar, photo *storage.Photo, preferFast bool) []string {
+	if registrar == nil || photo == nil {
+		return nil
+	}
+	if preferFast {
+		return []string{
+			registrar.ThumbnailPreviewPath(photo),
+			registrar.ThumbnailBuildPreviewPath(photo),
+			registrar.ThumbnailPath(photo),
+		}
+	}
+	return []string{
+		registrar.ThumbnailPath(photo),
+		registrar.ThumbnailPreviewPath(photo),
+		registrar.ThumbnailBuildPreviewPath(photo),
+	}
+}
+
+func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo, preferFast bool) (string, error) {
 	if photo == nil {
 		return "", fmt.Errorf("媒体不存在")
 	}
-	thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+	thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo, preferFast)...)
 	if thumbPath != "" {
 		return thumbPath, nil
 	}
 	if photo.MediaKind == storage.MediaKindVideo {
-		preferredPosterPath := registrar.PosterPath(photo)
-		if err := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, cfg.ThumbnailSize); err != nil {
+		preferredPosterPath := registrar.ThumbnailPath(photo)
+		previewSize := cfg.ThumbnailSize
+		if preferFast {
+			preferredPosterPath = registrar.ThumbnailPreviewPath(photo)
+			if previewSize > 256 {
+				previewSize = 256
+			}
+		}
+		if err := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, previewSize); err != nil {
 			return "", err
 		}
 		return resolveExistingThumbnailPath(preferredPosterPath), nil
@@ -1138,7 +1184,14 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 		return "", err
 	}
 	defer file.Close()
-	if err := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, cfg.ThumbnailSize); err != nil {
+	previewSize := cfg.ThumbnailSize
+	if preferFast {
+		preferredThumbPath = registrar.ThumbnailPreviewPath(photo)
+		if previewSize > 256 {
+			previewSize = 256
+		}
+	}
+	if err := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, previewSize); err != nil {
 		return "", err
 	}
 	return resolveExistingThumbnailPath(preferredThumbPath), nil
@@ -1187,11 +1240,19 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 			return
 		}
-		thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		preferFast := profile.Preferences.FastThumbnailBuild
+		thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo, preferFast)...)
 		if thumbPath == "" {
 			thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
-				return generateThumbnailOnDemand(cfg, registrar, photo)
+				return generateThumbnailOnDemand(cfg, registrar, photo, preferFast)
 			})
+		}
+		if warmer, ok := registrar.(thumbnailWarmer); ok {
+			_, _ = warmer.WarmThumbnailsByUUIDs([]string{photo.UUID}, userID)
 		}
 		if thumbPath == "" {
 			if photo.MediaKind == storage.MediaKindImage {
@@ -1547,7 +1608,7 @@ func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin
 			thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
 			if thumbPath == "" {
 				thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
-					return generateThumbnailOnDemand(cfg, registrar, photo)
+					return generateThumbnailOnDemand(cfg, registrar, photo, true)
 				})
 			}
 			if thumbPath != "" {

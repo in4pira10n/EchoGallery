@@ -19,11 +19,22 @@ import (
 
 const DefaultThumbnailLongEdge = 512
 
+type ThumbnailVariant struct {
+	DestPath string
+	MaxEdge  int
+	Quality  int
+	Method   int
+}
+
 // GenerateThumbnail 从 src 读取原图，生成缩略图写入 destPath。
 // 长边缩放到 maxEdge，保持比例，使用近似双线性插值以提升性能。
 func GenerateThumbnail(src io.ReadSeeker, mimeType string, destPath string, maxEdge int) error {
-	if maxEdge <= 0 {
-		maxEdge = DefaultThumbnailLongEdge
+	return GenerateThumbnailVariants(src, mimeType, []ThumbnailVariant{{DestPath: destPath, MaxEdge: maxEdge}})
+}
+
+func GenerateThumbnailVariants(src io.ReadSeeker, mimeType string, variants []ThumbnailVariant) error {
+	if len(variants) == 0 {
+		return nil
 	}
 	orientation := 1
 	if mimeType == "image/jpeg" {
@@ -42,26 +53,42 @@ func GenerateThumbnail(src io.ReadSeeker, mimeType string, destPath string, maxE
 	}
 	orig = applyOrientation(orig, orientation)
 
-	// 计算缩略图尺寸
-	thumbW, thumbH := calcThumbnailSize(orig.Bounds().Dx(), orig.Bounds().Dy(), maxEdge)
+	for _, variant := range variants {
+		if variant.DestPath == "" {
+			continue
+		}
+		maxEdge := variant.MaxEdge
+		if maxEdge <= 0 {
+			maxEdge = DefaultThumbnailLongEdge
+		}
+		thumbW, thumbH := calcThumbnailSize(orig.Bounds().Dx(), orig.Bounds().Dy(), maxEdge)
+		thumb := image.NewRGBA(image.Rect(0, 0, thumbW, thumbH))
+		draw.ApproxBiLinear.Scale(thumb, thumb.Bounds(), orig, orig.Bounds(), draw.Over, nil)
+		if err := writeThumbnailVariant(variant, thumb); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	// 缩放
-	thumb := image.NewRGBA(image.Rect(0, 0, thumbW, thumbH))
-	draw.ApproxBiLinear.Scale(thumb, thumb.Bounds(), orig, orig.Bounds(), draw.Over, nil)
-
-	// 确保目标目录存在
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+func writeThumbnailVariant(variant ThumbnailVariant, img image.Image) error {
+	if err := os.MkdirAll(filepath.Dir(variant.DestPath), 0755); err != nil {
 		return fmt.Errorf("创建缩略图目录失败: %w", err)
 	}
-
-	// 写入目标文件
-	f, err := os.Create(destPath)
+	f, err := os.Create(variant.DestPath)
 	if err != nil {
 		return fmt.Errorf("创建缩略图文件失败: %w", err)
 	}
 	defer f.Close()
-
-	return encodeImage(f, thumb)
+	quality := variant.Quality
+	if quality <= 0 {
+		quality = 72
+	}
+	method := variant.Method
+	if method <= 0 {
+		method = 4
+	}
+	return encodeImage(f, img, quality, method)
 }
 
 func applyOrientation(src image.Image, orientation int) image.Image {
@@ -173,9 +200,9 @@ func decodeImage(r io.Reader, mimeType string) (image.Image, error) {
 }
 
 // encodeImage 根据 mimeType 编码图片到 writer
-func encodeImage(w io.Writer, img image.Image) error {
+func encodeImage(w io.Writer, img image.Image, quality int, method int) error {
 	return webpenc.Encode(w, img, webpenc.Options{
-		Quality: 72,
-		Method:  4,
+		Quality: quality,
+		Method:  method,
 	})
 }

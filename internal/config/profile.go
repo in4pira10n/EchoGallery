@@ -27,6 +27,13 @@ type Profile struct {
 	Preferences     Preferences `json:"preferences"`
 }
 
+type profileDefaultsProbe struct {
+	Preferences struct {
+		FastThumbnailBuild *bool `json:"fast_thumbnail_build"`
+		LowResourceMode    *bool `json:"low_resource_mode"`
+	} `json:"preferences"`
+}
+
 // ProfileSlug 将用户名转换为稳定且不可越权的目录名。
 func ProfileSlug(username string) string {
 	trimmed := strings.TrimSpace(username)
@@ -91,6 +98,8 @@ func NewUserProfileTemplate(cfg *Config) *Profile {
 		template.AppDataDir = cfg.AppDataDir
 	}
 	profile.applyDefaults(template)
+	profile.Preferences.FastThumbnailBuild = false
+	profile.Preferences.LowResourceMode = false
 	return profile
 }
 
@@ -106,6 +115,16 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	var profile Profile
 	if err := json.Unmarshal(data, &profile); err != nil {
 		return nil, fmt.Errorf("解析 Profile 失败: %w", err)
+	}
+	var probe profileDefaultsProbe
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil, fmt.Errorf("解析 Profile 默认值失败: %w", err)
+	}
+	if probe.Preferences.FastThumbnailBuild == nil {
+		profile.Preferences.FastThumbnailBuild = false
+	}
+	if probe.Preferences.LowResourceMode == nil {
+		profile.Preferences.LowResourceMode = false
 	}
 	if err := profile.validate(cfg); err != nil {
 		return nil, err

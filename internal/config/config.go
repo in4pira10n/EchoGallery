@@ -50,6 +50,8 @@ type Preferences struct {
 	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
+	FastThumbnailBuild            bool   `json:"fast_thumbnail_build"`
+	LowResourceMode               bool   `json:"low_resource_mode"`
 	PlayerKeymap                  string `json:"player_keymap"`
 }
 
@@ -70,6 +72,8 @@ type configDefaultsProbe struct {
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
+		FastThumbnailBuild            *bool   `json:"fast_thumbnail_build"`
+		LowResourceMode               *bool   `json:"low_resource_mode"`
 		PlayerKeymap                  *string `json:"player_keymap"`
 	} `json:"preferences"`
 }
@@ -422,6 +426,12 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	if probe.Preferences.ContinueLastVideoPosition == nil {
 		c.Preferences.ContinueLastVideoPosition = true
 	}
+	if probe.Preferences.FastThumbnailBuild == nil {
+		c.Preferences.FastThumbnailBuild = false
+	}
+	if probe.Preferences.LowResourceMode == nil {
+		c.Preferences.LowResourceMode = false
+	}
 }
 
 func defaultAppDataDir() (string, error) {
@@ -460,6 +470,13 @@ func (c *Config) DatabasePath() (string, error) {
 		return "", err
 	}
 	return databasePathForPrefix(c.AppDataDir, c.StoragePath), nil
+}
+
+func (c *Config) DatabasePathForStorage(storagePath string) (string, error) {
+	if err := c.prepareRuntimePaths(); err != nil {
+		return "", err
+	}
+	return databasePathForPrefix(c.AppDataDir, storagePath), nil
 }
 
 func databasePathForPrefix(appDataDir, storagePath string) string {

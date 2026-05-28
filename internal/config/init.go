@@ -64,6 +64,8 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 			SlideshowInterval:             5000,
 			LightboxZoom:                  100,
 			ExperimentalPrefetchNeighbors: true,
+			FastThumbnailBuild:            false,
+			LowResourceMode:               false,
 		},
 	}
 	if err := cfg.prepareRuntimePaths(); err != nil {

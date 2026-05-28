@@ -1,0 +1,32 @@
+{
+  "storage_path": "/var/folders/qk/03q0f7jd2bz8g7yzt5vwyrww0000gn/T/TestServeThumbnailFile_Success1323925839/001",
+  "libraries": [
+    {
+      "name": "资源库 1",
+      "path": "/var/folders/qk/03q0f7jd2bz8g7yzt5vwyrww0000gn/T/TestServeThumbnailFile_Success1323925839/001"
+    }
+  ],
+  "thumbnail_dir": "thumbnails",
+  "thumbnail_size": 512,
+  "trash_dir": "Trash",
+  "use_system_player": false,
+  "preferences": {
+    "theme": "light",
+    "grid_size": 180,
+    "grid_gap": 2,
+    "thumb_radius": 2,
+    "sidebar_auto_hide": false,
+    "slideshow_mode": "random",
+    "slideshow_loop": false,
+    "slideshow_interval": 5000,
+    "lightbox_zoom": 100,
+    "experimental_autoplay_video": false,
+    "video_autoplay_next": false,
+    "video_section_min_minutes": 10,
+    "experimental_prefetch_neighbors": false,
+    "experimental_restore_last_view": false,
+    "continue_last_video_position": false,
+    "fast_thumbnail_build": false,
+    "player_keymap": ""
+  }
+}

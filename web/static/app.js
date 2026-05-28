@@ -54,6 +54,7 @@ const timelineOrderStorageKey = 'echogallery_timeline_order_v1';
 const albumDetailSortStorageKey = 'echogallery_album_detail_sort_v1';
 const videoBookmarksStorageKey = 'echogallery_video_bookmarks_v2';
 const legacyVideoBookmarksStorageKey = 'echogallery_video_bookmarks_v1';
+const globalVideoVolumeStorageKey = 'echogallery_global_video_volume_v1';
 const copyCatalogPath = '/static/strings/zh-CN.json';
 const COPY_DEFAULTS = {
   app: {
@@ -81,6 +82,14 @@ const COPY_DEFAULTS = {
       etaPending: '计算中',
       prunedLabel: '已清理失效媒体',
       exitAfterComplete: '构建完成后自动退出应用',
+    },
+    libraryBatchBuild: {
+      title: '正在批量构建资源库',
+      cancel: '取消批量构建',
+      cancelling: '正在取消…',
+      completed: '批量构建已完成',
+      cancelled: '已取消批量构建资源库',
+      failed: '批量构建失败',
     },
     randomAlbum: {
       blockingTitle: '正在加载全部乱序相册媒体',
@@ -827,21 +836,27 @@ function resetMediaFilteredViewState() {
   state.timelineCursor = '';
   state.timelineHasMore = true;
   state.timelineTotal = 0;
+  state.timelineLoaded = false;
   state.randomAlbumPhotos = [];
   state.randomAlbumCursor = '';
   state.randomAlbumHasMore = true;
   state.randomAlbumLoaded = false;
+  state.randomAlbumViewLoaded = false;
   state.randomAlbumTotal = 0;
   state.favoritePhotos = [];
   state.favoriteCursor = '';
   state.favoriteHasMore = true;
   state.favoriteTotal = 0;
+  state.favoriteLoaded = false;
   state.albumPhotos = [];
   state.albumCursor = '';
   state.albumHasMore = true;
+  state.albumDetailLoadedKey = '';
   state.trashPhotos = [];
   state.trashCursor = '';
   state.trashHasMore = true;
+  state.trashLoaded = false;
+  state.memoriesLoaded = false;
 }
 function videoBookmarkKey(photo) {
   if (!photo) return '';
@@ -1043,10 +1058,28 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
 function videoPlaybackPreferenceKey(photo) {
   return photo && photo.id ? String(photo.id) : '';
 }
+function normalizeVideoVolumeValue(value, fallback = 1) {
+  const volume = Number(value);
+  if (!Number.isFinite(volume)) return Math.max(0, Math.min(1, Number(fallback) || 1));
+  return Math.max(0, Math.min(1, volume));
+}
+function loadGlobalVideoVolume() {
+  try {
+    return normalizeVideoVolumeValue(localStorage.getItem(globalVideoVolumeStorageKey), 1);
+  } catch (_) {
+    return 1;
+  }
+}
+function persistGlobalVideoVolume(volume) {
+  state.globalVideoVolume = normalizeVideoVolumeValue(volume, state.globalVideoVolume);
+  try {
+    localStorage.setItem(globalVideoVolumeStorageKey, String(state.globalVideoVolume));
+  } catch (_) {}
+  return state.globalVideoVolume;
+}
 function normalizeVideoPlaybackPreference(raw) {
-  const volume = Number(raw && raw.volume);
   return {
-    volume: Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1,
+    volume: normalizeVideoVolumeValue(state.globalVideoVolume, 1),
     muted: !!(raw && raw.muted),
   };
 }
@@ -1067,7 +1100,7 @@ async function restoreVideoPlaybackPreference(video, photo) {
   const pref = await loadVideoPlaybackPreference(photo);
   if (state.lightboxPhotos[state.lightboxIndex] !== photo) return;
   video.dataset.restoringPlaybackPreference = '1';
-  video.volume = pref.volume;
+  video.volume = normalizeVideoVolumeValue(state.globalVideoVolume, 1);
   video.muted = pref.muted;
   requestAnimationFrame(() => {
     if (video) delete video.dataset.restoringPlaybackPreference;
@@ -1075,12 +1108,16 @@ async function restoreVideoPlaybackPreference(video, photo) {
 }
 function persistVideoPlaybackPreferenceSoon(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
   if (!video || !isVideoMedia(photo) || !photo.id || video.dataset.restoringPlaybackPreference === '1') return;
+  persistGlobalVideoVolume(video.volume);
   const key = videoPlaybackPreferenceKey(photo);
-  const pref = normalizeVideoPlaybackPreference({ volume: video.volume, muted: video.muted });
+  const muted = !!video.muted;
+  const previous = state.videoPlaybackPreferences[key] || normalizeVideoPlaybackPreference(null);
+  if (previous.muted === muted) return;
+  const pref = normalizeVideoPlaybackPreference({ muted });
   state.videoPlaybackPreferences[key] = pref;
   clearTimeout(state.videoPlaybackPreferenceSaveTimer);
   state.videoPlaybackPreferenceSaveTimer = setTimeout(() => {
-    api.put(`/api/media/${photo.id}/playback`, pref).catch(() => {});
+    api.put(`/api/media/${photo.id}/playback`, { muted: pref.muted }).catch(() => {});
   }, 400);
 }
 function showVideoProgressActivity(duration = 3000) {
@@ -1407,18 +1444,19 @@ function getNextSlideshowIndex() {
 
   const next = state.lightboxIndex + 1;
   if (next < total) return next;
+  if (state.slideshowMode !== 'random' && lightboxCanLoadMoreForward()) return total;
   return state.slideshowLoop ? 0 : null;
 }
 function scheduleSlideshowStep() {
   if (!state.slideshowPlaying) return;
   if (state.slideshowTimer) clearTimeout(state.slideshowTimer);
-  state.slideshowTimer = setTimeout(() => {
+  state.slideshowTimer = setTimeout(async () => {
     const nextIndex = getNextSlideshowIndex();
     if (nextIndex == null) {
       stopSlideshow();
       return;
     }
-    lbGoTo(nextIndex, { fromSlideshow: true });
+    await lbGoTo(nextIndex, { fromSlideshow: true });
   }, state.slideshowInterval);
 }
 function startSlideshow() {
@@ -1575,13 +1613,15 @@ function applyLightboxZoom() {
   const input = $('#lb-zoom');
   const body = $('#lightbox .lightbox-body');
   const fitBtn = $('#lb-fit-height');
+  const currentPhoto = state.lightboxPhotos[state.lightboxIndex] || {};
   const { width, height } = lightboxMediaNaturalSize();
   const focusPoint = state.lightboxFocusPoint || { mediaX: 0.5, mediaY: 0.5, viewportX: 0.5, viewportY: 0.5 };
   const effective = lightboxEffectiveZoomState();
   let zoomed = effective.zoom > 100;
   if (body && width > 0 && height > 0) {
     const { width: viewportWidth, height: viewportHeight } = lightboxViewportSize(body);
-    const fitScale = effective.mode === 'fit'
+    const shouldUpscaleVideoToFit = isVideoMedia(currentPhoto) && effective.mode !== 'fit';
+    const fitScale = effective.mode === 'fit' || shouldUpscaleVideoToFit
       ? Math.min(viewportWidth / width, viewportHeight / height)
       : Math.min(viewportWidth / width, viewportHeight / height, 1);
     const displayScale = fitScale * (effective.zoom / 100);
@@ -1880,6 +1920,12 @@ function applyLibraryBranding() {
 async function refreshVideoThumbnails() {
   return api.post('/api/settings/video-thumbnails/refresh', {});
 }
+async function fetchVideoThumbnailRefreshStatus() {
+  return api.get('/api/settings/video-thumbnails/refresh');
+}
+async function cancelVideoThumbnailRefresh() {
+  return api.del('/api/settings/video-thumbnails/refresh');
+}
 async function backfillPhotoEXIF() {
   return api.post('/api/settings/exif/backfill', {});
 }
@@ -2162,7 +2208,7 @@ function renderSearchResults() {
       }
       card.addEventListener('click', () => {
         closeGlobalSearch();
-        openLightbox(state.searchResults, index);
+        openLightbox(state.searchResults, index, { returnView: 'search' });
       });
       fragment.appendChild(card);
     });
@@ -2372,6 +2418,8 @@ async function loadServerSettings() {
       experimental_prefetch_neighbors: true,
       experimental_restore_last_view: false,
       continue_last_video_position: true,
+      fast_thumbnail_build: false,
+      low_resource_mode: false,
       player_keymap: '',
     };
     applyServerSettings(state.serverSettings);
@@ -2400,6 +2448,21 @@ async function fetchLibraryBuildStatus() {
 async function setLibraryBuildExitAfterComplete(enabled) {
   return api.put('/api/library-build/exit-after-complete', { enabled });
 }
+async function cancelLibraryBuild() {
+  return api.del('/api/library-build');
+}
+async function fetchLibraryBatchBuildStatus() {
+  return api.get('/api/settings/libraries/build-all');
+}
+async function startLibraryBatchBuild() {
+  return api.post('/api/settings/libraries/build-all', {});
+}
+async function cancelLibraryBatchBuild() {
+  return api.del('/api/settings/libraries/build-all');
+}
+async function setLibraryBatchBuildExitAfterComplete(enabled) {
+  return api.put('/api/settings/libraries/build-all/exit-after-complete', { enabled });
+}
 function applyServerSettings(data = {}) {
   state.serverSettings.port = Number(data.port) || 8080;
   state.serverSettings.storage_path = data.storage_path || '';
@@ -2425,6 +2488,8 @@ function applyServerSettings(data = {}) {
   state.experimentalPrefetchNeighbors = data.experimental_prefetch_neighbors !== false;
   state.experimentalRestoreLastView = !!data.experimental_restore_last_view;
   state.continueLastVideoPosition = data.continue_last_video_position !== false;
+  state.serverSettings.fast_thumbnail_build = !!data.fast_thumbnail_build;
+  state.serverSettings.low_resource_mode = !!data.low_resource_mode;
   updatePlayerKeymapSource(data.player_keymap || '');
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
   updateGridScaleProgress();
@@ -2462,6 +2527,8 @@ function buildSettingsPayload() {
     experimental_prefetch_neighbors: !!state.experimentalPrefetchNeighbors,
     experimental_restore_last_view: !!state.experimentalRestoreLastView,
     continue_last_video_position: !!state.continueLastVideoPosition,
+    fast_thumbnail_build: !!state.serverSettings.fast_thumbnail_build,
+    low_resource_mode: !!state.serverSettings.low_resource_mode,
     player_keymap: state.playerKeymapSource || '',
   };
 }
@@ -2679,10 +2746,10 @@ function handleLightboxKeydown(e) {
     return true;
   }
   if (handleVideoBookmarkShortcut(e)) return true;
-  if (isVideoMedia(state.lightboxPhotos[state.lightboxIndex]) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+  if (isVideoMedia(state.lightboxPhotos[state.lightboxIndex]) && (e.key === 'q' || e.key === 'Q' || e.key === 'e' || e.key === 'E')) {
     e.preventDefault();
     e.stopImmediatePropagation();
-    return jumpVideoSection(e.key === 'ArrowRight' ? 1 : -1);
+    return jumpVideoSection(e.key.toLowerCase() === 'e' ? 1 : -1);
   }
   if (e.key === 'Escape') {
     e.preventDefault();
@@ -2705,13 +2772,13 @@ function handleLightboxKeydown(e) {
   if (e.key === 'a' || e.key === 'A') {
     e.preventDefault();
     e.stopImmediatePropagation();
-    lbNav(-1);
+    void lbNav(-1);
     return true;
   }
   if (e.key === 'd' || e.key === 'D') {
     e.preventDefault();
     e.stopImmediatePropagation();
-    lbNav(1);
+    void lbNav(1);
     return true;
   }
   if (e.key === ' ') {
@@ -2788,6 +2855,7 @@ const state = {
   randomAlbumHasMore: true,
   randomAlbumSeed: Date.now(),
   randomAlbumLoaded: false,
+  randomAlbumViewLoaded: false,
   randomAlbumTotal: 0,
   randomAlbumAbortController: null,
   timelineOrder: normalizeTimelineOrder(localStorage.getItem(timelineOrderStorageKey)),
@@ -2795,11 +2863,14 @@ const state = {
   timelineHasMore: true,
   timelineLoading: false,
   timelineTotal: 0,
+  timelineLoaded: false,
   trashPhotos: [],
   trashCursor: '',
   trashHasMore: true,
   trashLoading: false,
+  trashLoaded: false,
   albums: [],
+  albumsLoaded: false,
   albumViewMode: 'grid',
   albumDetailSort: normalizeAlbumDetailSort(localStorage.getItem(albumDetailSortStorageKey)),
   currentAlbum: null,
@@ -2807,14 +2878,18 @@ const state = {
   albumCursor: '',
   albumHasMore: true,
   albumLoading: false,
+  albumDetailLoadedKey: '',
   pendingAlbumPhotoID: null,
   lastAlbumDetailID: null,
   selected: new Set(),
   selectionAnchorID: null,
   lightboxPhotos: [],
   lightboxIndex: 0,
+  lightboxSeedPhotoID: null,
+  lightboxSeedPreviewURL: '',
   lightboxReturnView: '',
   lightboxReturnAlbumID: null,
+  lightboxPageLoading: false,
   // b-2: 当前用户的分享链接，key=`${type}:${targetId}`
   shareMap: {},
   shareLinks: [],
@@ -2874,6 +2949,8 @@ const state = {
     experimental_prefetch_neighbors: true,
     experimental_restore_last_view: false,
     continue_last_video_position: true,
+    fast_thumbnail_build: false,
+    low_resource_mode: false,
     player_keymap: '',
   },
   savedServerSettings: null,
@@ -2890,11 +2967,13 @@ const state = {
   favoriteHasMore: true,
   favoriteLoading: false,
   favoriteTotal: 0,
+  favoriteLoaded: false,
   timelineAutoLoadPaused: false,
   randomAlbumAutoLoadPaused: false,
   memoryPhotos: [],
   memoryEntries: [],
   memoriesLoading: false,
+  memoriesLoaded: false,
   settingsDirty: false,
   settingsReady: false,
   settingsFocus: '',
@@ -2932,15 +3011,25 @@ const state = {
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
   videoBookmarks: loadVideoBookmarks(),
   videoBookmarkSaveTimer: null,
+  globalVideoVolume: loadGlobalVideoVolume(),
   videoPlaybackPreferences: {},
   videoPlaybackPreferenceSaveTimer: null,
   activePreloadJobs: new Set(),
+  visibleThumbnailWarmSignatures: {},
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
+  libraryBatchBuildStatus: { status: 'idle', message: '当前没有批量构建任务' },
+  libraryBatchBuildPollTimer: null,
+  libraryBatchBuildCancelPending: false,
   thumbnailBuildStatus: { status: 'idle', message: '当前没有缩略图任务' },
   thumbnailBuildPollTimer: null,
   thumbnailBuildCancelPending: false,
+  thumbnailBuildOverlaySuppressed: false,
+  thumbnailVisibleRefreshAt: 0,
+  videoThumbnailRefreshStatus: { status: 'idle', message: '当前没有视频缩略图任务' },
+  videoThumbnailRefreshPollTimer: null,
+  videoThumbnailRefreshCancelPending: false,
   blockingInteraction: false,
   timelineBulkLoading: false,
   timelineBulkCancelRequested: false,
@@ -3013,7 +3102,8 @@ function rememberPrefetchedMedia(key) {
 }
 
 function showBlockingProgress(title, detail = '', options = {}) {
-  state.blockingInteraction = true;
+  const nonBlocking = !!options.nonBlocking;
+  state.blockingInteraction = !nonBlocking;
   let overlay = $('#blocking-progress');
   if (!overlay) {
     overlay = document.createElement('div');
@@ -3024,6 +3114,7 @@ function showBlockingProgress(title, detail = '', options = {}) {
   }
   $('strong', overlay).textContent = title;
   $('span', overlay).textContent = detail;
+  overlay.classList.toggle('non-blocking', nonBlocking);
   const cancelBtn = $('.blocking-progress-cancel', overlay);
   if (cancelBtn) {
     if (typeof options.onCancel === 'function') {
@@ -3045,13 +3136,27 @@ function updateBlockingProgress(detail = '') {
 function hideBlockingProgress() {
   state.blockingInteraction = false;
   const overlay = $('#blocking-progress');
-  if (overlay) overlay.classList.remove('show');
+  if (overlay) overlay.classList.remove('show', 'non-blocking');
 }
 
 function stopThumbnailBuildPolling() {
   if (state.thumbnailBuildPollTimer) {
     clearTimeout(state.thumbnailBuildPollTimer);
     state.thumbnailBuildPollTimer = null;
+  }
+}
+
+function stopLibraryBatchBuildPolling() {
+  if (state.libraryBatchBuildPollTimer) {
+    clearTimeout(state.libraryBatchBuildPollTimer);
+    state.libraryBatchBuildPollTimer = null;
+  }
+}
+
+function stopVideoThumbnailRefreshPolling() {
+  if (state.videoThumbnailRefreshPollTimer) {
+    clearTimeout(state.videoThumbnailRefreshPollTimer);
+    state.videoThumbnailRefreshPollTimer = null;
   }
 }
 
@@ -3079,7 +3184,7 @@ function formatThumbnailBuildDetail(status = state.thumbnailBuildStatus) {
 }
 
 function syncThumbnailBuildOverlay(status = state.thumbnailBuildStatus) {
-  if (!isThumbnailBuildActive(status)) {
+  if (!isThumbnailBuildActive(status) || state.thumbnailBuildOverlaySuppressed) {
     hideBlockingProgress();
     return;
   }
@@ -3098,21 +3203,113 @@ function syncThumbnailBuildOverlay(status = state.thumbnailBuildStatus) {
   });
 }
 
+function isVideoThumbnailRefreshActive(status = state.videoThumbnailRefreshStatus) {
+  const value = String(status && status.status || '');
+  return value === 'running' || value === 'cancelling';
+}
+
+function formatVideoThumbnailRefreshDetail(status = state.videoThumbnailRefreshStatus) {
+  const done = Math.max(0, Number(status && status.done) || 0);
+  const total = Math.max(0, Number(status && status.total) || 0);
+  const refreshed = Math.max(0, Number(status && status.refreshed) || 0);
+  const failed = Math.max(0, Number(status && status.failed) || 0);
+  const countText = total > 0 ? `${done} / ${total}` : `${done}`;
+  const parts = [
+    status && status.message ? status.message : '正在刷新视频缩略图…',
+    `已处理 ${countText}`,
+    `已刷新 ${refreshed}`,
+  ];
+  if (failed > 0) parts.push(`失败 ${failed}`);
+  if (Number(status && status.eta_seconds) > 0) parts.push(`ETA ${formatDuration((Number(status.eta_seconds) || 0) * 1000)}`);
+  return parts.join(' · ');
+}
+
+function syncVideoThumbnailRefreshOverlay(status = state.videoThumbnailRefreshStatus) {
+  if (!isVideoThumbnailRefreshActive(status)) {
+    hideBlockingProgress();
+    return;
+  }
+  showBlockingProgress('正在刷新视频缩略图', formatVideoThumbnailRefreshDetail(status), {
+    cancelText: state.videoThumbnailRefreshCancelPending ? '正在取消…' : '取消',
+    onCancel: () => {
+      if (state.videoThumbnailRefreshCancelPending) return;
+      state.videoThumbnailRefreshCancelPending = true;
+      updateBlockingProgress('正在发送取消请求…');
+      void cancelVideoThumbnailRefresh().catch(e => {
+        state.videoThumbnailRefreshCancelPending = false;
+        updateBlockingProgress('取消失败，请稍后重试');
+        console.error('取消视频缩略图任务失败', e);
+      });
+    },
+  });
+}
+
+function isLibraryBatchBuildActive(status = state.libraryBatchBuildStatus) {
+  const value = String(status && status.status || '');
+  return value === 'running' || value === 'cancelling';
+}
+
+function formatLibraryBatchBuildDetail(status = state.libraryBatchBuildStatus) {
+  const current = Math.max(0, Number(status && status.current_library_index) || 0);
+  const totalLibraries = Math.max(0, Number(status && status.total_libraries) || 0);
+  const currentDone = Math.max(0, Number(status && status.current_done) || 0);
+  const currentTotal = Math.max(0, Number(status && status.current_total) || 0);
+  const completed = Math.max(0, Number(status && status.completed_libraries) || 0);
+  const failed = Math.max(0, Number(status && status.failed_libraries) || 0);
+  const currentLibrary = String(status && status.current_library_name || '').trim();
+  const phase = status && status.current_phase === 'thumbnails' ? '缩略图' : '扫描';
+  const parts = [
+    status && status.message ? status.message : copyText('app.libraryBatchBuild.title', '正在批量构建资源库'),
+    totalLibraries > 0 ? `资源库 ${current} / ${totalLibraries}` : '准备中',
+  ];
+  if (currentLibrary) parts.push(currentLibrary);
+  if (currentTotal > 0) parts.push(`${phase} ${currentDone} / ${currentTotal}`);
+  if (completed > 0) parts.push(`已完成 ${completed}`);
+  if (failed > 0) parts.push(`失败 ${failed}`);
+  if (status && status.low_resource_mode) parts.push('低资源模式');
+  return parts.join(' · ');
+}
+
+function syncLibraryBatchBuildOverlay(status = state.libraryBatchBuildStatus) {
+  if (!isLibraryBatchBuildActive(status)) {
+    hideBlockingProgress();
+    return;
+  }
+  showBlockingProgress(copyText('app.libraryBatchBuild.title', '正在批量构建资源库'), formatLibraryBatchBuildDetail(status), {
+    cancelText: state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchBuild.cancelling', '正在取消…') : copyText('app.libraryBatchBuild.cancel', '取消批量构建'),
+    onCancel: () => {
+      if (state.libraryBatchBuildCancelPending) return;
+      state.libraryBatchBuildCancelPending = true;
+      updateBlockingProgress('正在发送取消请求…');
+      void cancelLibraryBatchBuild().catch(e => {
+        state.libraryBatchBuildCancelPending = false;
+        updateBlockingProgress('取消失败，请稍后重试');
+        console.error('取消批量构建任务失败', e);
+      });
+    },
+  });
+}
+
 async function pollThumbnailBuildStatus() {
   stopThumbnailBuildPolling();
   try {
     const status = await fetchThumbnailBuildStatus();
     const previous = state.thumbnailBuildStatus || {};
     state.thumbnailBuildStatus = status || { status: 'idle', message: '当前没有缩略图任务' };
+    if (!isThumbnailBuildActive(state.thumbnailBuildStatus)) {
+      state.thumbnailBuildOverlaySuppressed = false;
+    }
     if (state.thumbnailBuildStatus.status !== 'cancelling') {
       state.thumbnailBuildCancelPending = false;
     }
     syncThumbnailBuildOverlay(state.thumbnailBuildStatus);
     if (isThumbnailBuildActive(state.thumbnailBuildStatus)) {
+      refreshVisiblePendingThumbnails();
       state.thumbnailBuildPollTimer = setTimeout(pollThumbnailBuildStatus, 450);
       return;
     }
     if (previous.status === 'running' || previous.status === 'cancelling') {
+      refreshVisiblePendingThumbnails(true);
       if (state.thumbnailBuildStatus.status === 'completed') {
         showToast(`全部缩略图已就绪：新生成 ${state.thumbnailBuildStatus.generated || 0} 项`, 3200);
       } else if (state.thumbnailBuildStatus.status === 'cancelled') {
@@ -3128,11 +3325,91 @@ async function pollThumbnailBuildStatus() {
   }
 }
 
+async function pollVideoThumbnailRefreshStatus() {
+  stopVideoThumbnailRefreshPolling();
+  try {
+    const status = await fetchVideoThumbnailRefreshStatus();
+    const previous = state.videoThumbnailRefreshStatus || {};
+    state.videoThumbnailRefreshStatus = status || { status: 'idle', message: '当前没有视频缩略图任务' };
+    if (state.videoThumbnailRefreshStatus.status !== 'cancelling') {
+      state.videoThumbnailRefreshCancelPending = false;
+    }
+    syncVideoThumbnailRefreshOverlay(state.videoThumbnailRefreshStatus);
+    if (isVideoThumbnailRefreshActive(state.videoThumbnailRefreshStatus)) {
+      state.videoThumbnailRefreshPollTimer = setTimeout(pollVideoThumbnailRefreshStatus, 450);
+      return;
+    }
+    if (previous.status === 'running' || previous.status === 'cancelling') {
+      if (state.videoThumbnailRefreshStatus.status === 'completed') {
+        showToast(`视频缩略图已刷新：完成 ${state.videoThumbnailRefreshStatus.refreshed || 0} 项`, 3200);
+      } else if (state.videoThumbnailRefreshStatus.status === 'cancelled') {
+        showToast('已取消刷新视频缩略图');
+      } else if (state.videoThumbnailRefreshStatus.status === 'failed') {
+        showToast('刷新视频缩略图失败');
+      }
+    }
+  } catch (e) {
+    console.error('获取视频缩略图任务状态失败', e);
+    hideBlockingProgress();
+    state.videoThumbnailRefreshCancelPending = false;
+  }
+}
+
+async function pollLibraryBatchBuildStatus() {
+  stopLibraryBatchBuildPolling();
+  try {
+    const status = await fetchLibraryBatchBuildStatus();
+    const previous = state.libraryBatchBuildStatus || {};
+    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量构建任务' };
+    if (state.libraryBatchBuildStatus.status !== 'cancelling') {
+      state.libraryBatchBuildCancelPending = false;
+    }
+    syncLibraryBatchBuildOverlay(state.libraryBatchBuildStatus);
+    if (state.view === 'settings') syncLibraryBatchBuildPanel();
+    if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
+      state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 600);
+      return;
+    }
+    if (previous.status === 'running' || previous.status === 'cancelling') {
+      if (state.libraryBatchBuildStatus.status === 'completed') {
+        showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchBuild.completed', '批量构建已完成'), 3600);
+      } else if (state.libraryBatchBuildStatus.status === 'cancelled') {
+        showToast(copyText('app.libraryBatchBuild.cancelled', '已取消批量构建资源库'), 3200);
+      } else if (state.libraryBatchBuildStatus.status === 'failed') {
+        showToast(copyText('app.libraryBatchBuild.failed', '批量构建失败'), 3200);
+      }
+      if (state.view === 'settings') renderSettingsContent();
+    }
+  } catch (e) {
+    console.error('获取批量构建任务状态失败', e);
+    hideBlockingProgress();
+    state.libraryBatchBuildCancelPending = false;
+  }
+}
+
+async function openVideoThumbnailRefreshWorkflow() {
+  try {
+    const status = await refreshVideoThumbnails();
+    state.videoThumbnailRefreshStatus = status || { status: 'idle', message: '当前没有视频缩略图任务' };
+    state.videoThumbnailRefreshCancelPending = false;
+    syncVideoThumbnailRefreshOverlay(state.videoThumbnailRefreshStatus);
+    if (isVideoThumbnailRefreshActive(state.videoThumbnailRefreshStatus)) {
+      stopVideoThumbnailRefreshPolling();
+      state.videoThumbnailRefreshPollTimer = setTimeout(pollVideoThumbnailRefreshStatus, 300);
+    } else if (state.videoThumbnailRefreshStatus.status === 'completed') {
+      showToast('视频缩略图已经刷新完成');
+    }
+  } catch (e) {
+    alert('刷新视频缩略图失败: ' + ((e && e.error) || e));
+  }
+}
+
 async function openThumbnailBuildWorkflow() {
   try {
     const status = await startThumbnailBuild();
     state.thumbnailBuildStatus = status || { status: 'idle', message: '当前没有缩略图任务' };
     state.thumbnailBuildCancelPending = false;
+    state.thumbnailBuildOverlaySuppressed = false;
     syncThumbnailBuildOverlay(state.thumbnailBuildStatus);
     if (isThumbnailBuildActive(state.thumbnailBuildStatus)) {
       stopThumbnailBuildPolling();
@@ -3145,6 +3422,24 @@ async function openThumbnailBuildWorkflow() {
   }
 }
 
+async function openLibraryBatchBuildWorkflow() {
+  try {
+    const status = await startLibraryBatchBuild();
+    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量构建任务' };
+    state.libraryBatchBuildCancelPending = false;
+    syncLibraryBatchBuildOverlay(state.libraryBatchBuildStatus);
+    if (state.view === 'settings') syncLibraryBatchBuildPanel();
+    if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
+      stopLibraryBatchBuildPolling();
+      state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 300);
+    } else if (state.libraryBatchBuildStatus.status === 'completed') {
+      showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchBuild.completed', '批量构建已完成'));
+    }
+  } catch (e) {
+    alert('批量构建资源库失败: ' + ((e && e.error) || e));
+  }
+}
+
 function cancelActivePreloads() {
   for (const job of state.activePreloadJobs) {
     if (!job || !job.img) continue;
@@ -3154,6 +3449,37 @@ function cancelActivePreloads() {
     if (typeof job.resolve === 'function') job.resolve(false);
   }
   state.activePreloadJobs.clear();
+}
+
+function cancelVisibleThumbnailWarmups() {
+  for (const timer of visibleThumbnailWarmTimers.values()) {
+    clearTimeout(timer);
+  }
+  visibleThumbnailWarmTimers.clear();
+  state.visibleThumbnailWarmSignatures = {};
+}
+
+function interruptThumbnailBuildForForegroundTask() {
+  cancelActivePreloads();
+  cancelVisibleThumbnailWarmups();
+  if (!isThumbnailBuildActive()) return;
+  state.thumbnailBuildOverlaySuppressed = true;
+  hideBlockingProgress();
+  if (state.thumbnailBuildCancelPending) return;
+  state.thumbnailBuildCancelPending = true;
+  void cancelThumbnailBuild()
+    .then(status => {
+      state.thumbnailBuildStatus = status || { status: 'idle', message: '当前没有缩略图任务' };
+      if (!isThumbnailBuildActive(state.thumbnailBuildStatus)) {
+        state.thumbnailBuildOverlaySuppressed = false;
+        state.thumbnailBuildCancelPending = false;
+      }
+    })
+    .catch(e => {
+      state.thumbnailBuildCancelPending = false;
+      state.thumbnailBuildOverlaySuppressed = false;
+      console.error('前台任务取消缩略图构建失败', e);
+    });
 }
 
 function pauseAutoLoadMore(kind = '') {
@@ -3272,6 +3598,7 @@ ${renderLibraryLogoGuideModal()}`;
   syncRangeProgress();
   ensureSettingsDataLoaded();
   startLibraryBuildPolling();
+  void pollLibraryBatchBuildStatus();
   renderView();
 }
 
@@ -3389,6 +3716,7 @@ function openLastAlbumDetail() {
 }
 
 function switchView(view) {
+  interruptThumbnailBuildForForegroundTask();
   saveViewScroll();
   disconnectLoadMoreObserver();
   closeNavPicker();
@@ -3412,7 +3740,7 @@ function switchView(view) {
   renderView();
 }
 function isLibraryBuildBlocking(status = state.libraryBuildStatus) {
-  return ['discovering', 'running', 'error'].includes(status && status.status);
+  return ['discovering', 'running', 'cancelling', 'error'].includes(status && status.status);
 }
 function formatSecondsShort(seconds) {
   const value = Math.max(0, Number(seconds) || 0);
@@ -3433,7 +3761,7 @@ async function refreshLibraryBuildStatus() {
     state.libraryBuildStatus = status || { status: 'idle' };
     const nextBlocking = isLibraryBuildBlocking();
     if (nextBlocking || previousBlocking) renderView();
-    if (['discovering', 'running'].includes(state.libraryBuildStatus.status)) {
+    if (['discovering', 'running', 'cancelling'].includes(state.libraryBuildStatus.status)) {
       clearTimeout(state.libraryBuildPollTimer);
       state.libraryBuildPollTimer = setTimeout(refreshLibraryBuildStatus, 1000);
     }
@@ -3447,7 +3775,8 @@ function startLibraryBuildPolling() {
 }
 function renderLibraryBuild() {
   const status = state.libraryBuildStatus || {};
-  const running = ['discovering', 'running'].includes(status.status);
+  const running = ['discovering', 'running', 'cancelling'].includes(status.status);
+  const cancellable = ['discovering', 'running'].includes(status.status);
   const total = Number(status.total) || 0;
   const done = Number(status.done) || 0;
   const percent = total > 0 ? Math.min(100, Math.max(0, Number(status.percent) || done / total * 100)) : (running ? 8 : 100);
@@ -3479,6 +3808,7 @@ function renderLibraryBuild() {
       <input type="checkbox" id="library-build-exit-after" ${status.exit_after_complete ? 'checked' : ''}>
       <span>${escapeHTML(copyText('app.libraryBuild.exitAfterComplete', '构建完成后自动退出应用'))}</span>
     </label>
+    <button class="btn library-build-cancel" id="library-build-cancel" type="button" ${cancellable ? '' : 'disabled'}>${escapeHTML(status.status === 'cancelling' ? copyText('app.libraryBuild.cancelling', '正在停止…') : copyText('app.libraryBuild.cancel', '停止构建'))}</button>
   </section>
 </div>`;
 }
@@ -3720,11 +4050,14 @@ function requestVisibleThumbnailWarmup(viewKey, photos) {
     .filter(Boolean)
     .slice(0, 48);
   if (!uuids.length) return;
+  const signature = uuids.join(',');
+  if (state.visibleThumbnailWarmSignatures[viewKey] === signature) return;
   if (visibleThumbnailWarmTimers.has(viewKey)) {
     clearTimeout(visibleThumbnailWarmTimers.get(viewKey));
   }
   const timer = window.setTimeout(() => {
     visibleThumbnailWarmTimers.delete(viewKey);
+    state.visibleThumbnailWarmSignatures[viewKey] = signature;
     void api.post('/api/media/thumbnails/warm', { uuids }).catch(() => {});
   }, 120);
   visibleThumbnailWarmTimers.set(viewKey, timer);
@@ -3867,6 +4200,7 @@ async function renderRandomAlbum() {
     state.randomAlbumCursor = '';
     state.randomAlbumHasMore = true;
     state.randomAlbumLoaded = false;
+    state.randomAlbumViewLoaded = false;
     state.randomAlbumTotal = 0;
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
     await renderRandomAlbumGrid();
@@ -3874,7 +4208,7 @@ async function renderRandomAlbum() {
     restoreViewScroll('random-album');
   });
 
-  if (state.randomAlbumPhotos.length) {
+  if (state.randomAlbumViewLoaded) {
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
     await renderRandomAlbumGrid();
     requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(state.randomAlbumPhotos));
@@ -3892,6 +4226,7 @@ async function renderRandomAlbum() {
     state.randomAlbumLoaded = false;
     state.randomAlbumTotal = 0;
     await loadMoreRandomAlbum();
+    state.randomAlbumViewLoaded = true;
     observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
     restoreViewScroll('random-album');
   } catch (e) {
@@ -4486,6 +4821,119 @@ function refreshVideoBookmarkThumbIndicators() {
   updateVideoBookmarkThumbIndicators();
 }
 
+function renderSettingsToggle(id, label, checked, description = '') {
+  return `<label class="settings-toggle" for="${id}">
+    <span class="settings-toggle-copy">
+      <span class="settings-toggle-title">${escapeHTML(label)}</span>
+      ${description ? `<span class="settings-toggle-description">${escapeHTML(description)}</span>` : ''}
+    </span>
+    <span class="settings-toggle-switch">
+      <input id="${id}" type="checkbox" ${checked ? 'checked' : ''}>
+      <span class="settings-toggle-slider" aria-hidden="true"></span>
+    </span>
+  </label>`;
+}
+
+function libraryBatchBuildStatusLabel(status) {
+  switch (String(status || '')) {
+    case 'pending': return '等待中';
+    case 'scanning': return '扫描中';
+    case 'building': return '缩略图';
+    case 'completed': return '已完成';
+    case 'failed': return '失败';
+    case 'cancelled': return '已取消';
+    case 'running': return '运行中';
+    case 'cancelling': return '取消中';
+    default: return '空闲';
+  }
+}
+
+function renderLibraryBatchBuildPanel() {
+  const status = state.libraryBatchBuildStatus || {};
+  const libraries = Array.isArray(status.libraries) ? status.libraries : [];
+  const active = isLibraryBatchBuildActive(status);
+  const currentName = String(status.current_library_name || '').trim();
+  const summary = [
+    `总计 ${Math.max(0, Number(status.total_libraries) || libraries.length || 0)}`,
+    `完成 ${Math.max(0, Number(status.completed_libraries) || 0)}`,
+    `失败 ${Math.max(0, Number(status.failed_libraries) || 0)}`,
+  ].join(' · ');
+  const list = libraries.length ? libraries.map((library, index) => {
+    const rowStatus = String(library.status || 'pending');
+    const current = currentName && currentName === String(library.name || '').trim();
+    const detailParts = [];
+    if (Number(library.imported) > 0) detailParts.push(`导入 ${Number(library.imported)}`);
+    if (Number(library.generated) > 0) detailParts.push(`缩略图 ${Number(library.generated)}`);
+    if (Number(library.pruned) > 0) detailParts.push(`清理 ${Number(library.pruned)}`);
+    if (Number(library.failed) > 0) detailParts.push(`失败 ${Number(library.failed)}`);
+    const meta = detailParts.length ? detailParts.join(' · ') : (library.message || library.path || '');
+    return `<div class="settings-batch-build-row ${current ? 'active' : ''} is-${escapeHTML(rowStatus)}">
+      <div class="settings-batch-build-row-main">
+        <strong>${escapeHTML(library.name || `资源库 ${index + 1}`)}</strong>
+        <span>${escapeHTML(meta)}</span>
+      </div>
+      <em>${escapeHTML(libraryBatchBuildStatusLabel(rowStatus))}</em>
+    </div>`;
+  }).join('') : '<div class="settings-batch-build-empty">当前没有批量构建记录。</div>';
+  return `<div class="settings-batch-build-panel">
+    <div class="settings-batch-build-head">
+      <div>
+        <strong>${escapeHTML(status.message || '批量构建全部资源库')}</strong>
+        <span>${escapeHTML(summary)}</span>
+      </div>
+      <span class="settings-batch-build-badge ${active ? 'active' : ''}">${escapeHTML(active ? '运行中' : libraryBatchBuildStatusLabel(status.status || 'idle'))}</span>
+    </div>
+    <div class="settings-batch-build-meta">
+      <span>${escapeHTML(currentName ? `当前：${currentName}` : '可在夜间挂机顺序处理全部资源库')}</span>
+      <span>${escapeHTML(status.low_resource_mode ? '低资源模式已开启' : '标准资源模式')}</span>
+    </div>
+    <label class="settings-batch-build-exit">
+      <input id="settings-library-batch-build-exit" type="checkbox" ${status.exit_after_complete ? 'checked' : ''}>
+      <span>全部完成后退出应用</span>
+    </label>
+    <div class="settings-batch-build-list">${list}</div>
+    <div class="settings-actions settings-actions-fill">
+      <button class="btn" id="settings-build-all-libraries-btn" type="button">${active ? '批量构建进行中' : '批量构建全部资源库'}</button>
+      <button class="btn" id="settings-cancel-all-libraries-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchBuild.cancelling', '正在取消…') : copyText('app.libraryBatchBuild.cancel', '取消批量构建')}</button>
+    </div>
+    <div class="settings-static settings-batch-build-note">
+      <strong>失败处理</strong>
+      <span>若某个资源库失败，会自动跳过并继续处理下一个资源库，适合长时间挂机。</span>
+    </div>
+  </div>`;
+}
+
+function syncLibraryBatchBuildPanel() {
+  const container = $('#settings-library-batch-build');
+  if (!container) return;
+  container.innerHTML = renderLibraryBatchBuildPanel();
+  $('#settings-build-all-libraries-btn')?.addEventListener('click', openLibraryBatchBuildWorkflow);
+  $('#settings-cancel-all-libraries-btn')?.addEventListener('click', async () => {
+    if (state.libraryBatchBuildCancelPending || !isLibraryBatchBuildActive()) return;
+    state.libraryBatchBuildCancelPending = true;
+    syncLibraryBatchBuildPanel();
+    try {
+      state.libraryBatchBuildStatus = await cancelLibraryBatchBuild();
+      stopLibraryBatchBuildPolling();
+      state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 300);
+      syncLibraryBatchBuildPanel();
+    } catch (e) {
+      state.libraryBatchBuildCancelPending = false;
+      syncLibraryBatchBuildPanel();
+      alert('取消批量构建失败: ' + ((e && e.error) || e));
+    }
+  });
+  $('#settings-library-batch-build-exit')?.addEventListener('change', async e => {
+    try {
+      state.libraryBatchBuildStatus = await setLibraryBatchBuildExitAfterComplete(e.target.checked);
+      syncLibraryBatchBuildPanel();
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      alert('设置失败: ' + ((err && err.error) || err));
+    }
+  });
+}
+
 function renderSettingsContent() {
   const users = (state.serverSettings.users || []).map(name => `<span class="settings-chip">${name}</span>`).join('');
   const activeAccent = resolveLibraryAccentColor(currentLibraryBrand() || {});
@@ -4504,6 +4952,7 @@ function renderSettingsContent() {
     <div class="settings-actions settings-actions-fill">
       <button class="btn" id="settings-build-all-thumbs-btn" type="button">加载全部缩略图</button>
     </div>
+    <div id="settings-library-batch-build">${renderLibraryBatchBuildPanel()}</div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
   </section>
 
@@ -4527,6 +4976,8 @@ function renderSettingsContent() {
         <label for="settings-thumbnail-size"><span>缩略图生成大小</span><span id="settings-thumbnail-size-value">${thumbnailBuildSize}px</span></label>
         <input class="input" id="settings-thumbnail-size" type="range" min="96" max="1024" step="32" value="${thumbnailBuildSize}">
       </div>
+      ${renderSettingsToggle('settings-fast-thumbnail-build', '极速缩略图', !!state.serverSettings.fast_thumbnail_build, '仅影响“加载全部缩略图”。关闭后改为构建标准缩略图。')}
+      ${renderSettingsToggle('settings-low-resource-mode', '低资源占用模式', !!state.serverSettings.low_resource_mode, '降低扫描与缩略图并发，更适合挂机和机械硬盘场景。')}
       <div class="settings-control">
         <label for="settings-thumbnail-dir"><span>缩略图目录</span><span>建议放到空间更充足的磁盘，重启后生效</span></label>
         <input class="input" id="settings-thumbnail-dir" type="text" value="${escapeHTML(state.serverSettings.thumbnail_dir || '')}">
@@ -4550,10 +5001,7 @@ function renderSettingsContent() {
         <label for="settings-slideshow-interval"><span>默认幻灯片间隔</span><span id="settings-slideshow-interval-value">${state.slideshowInterval / 1000} 秒</span></label>
         <input class="input" id="settings-slideshow-interval" type="range" min="1" max="30" step="1" value="${state.slideshowInterval / 1000}">
       </div>
-      <label class="settings-checkbox">
-        <input id="settings-slideshow-loop" type="checkbox" ${state.slideshowLoop ? 'checked' : ''}>
-        <span>幻灯片循环播放</span>
-      </label>
+      ${renderSettingsToggle('settings-slideshow-loop', '幻灯片循环播放', state.slideshowLoop)}
       <div class="settings-control">
         <label for="settings-slideshow-mode"><span>默认幻灯片顺序</span><span>${state.slideshowMode === 'random' ? '随机' : '顺序'}</span></label>
         <select class="input" id="settings-slideshow-mode">
@@ -4568,26 +5016,14 @@ function renderSettingsContent() {
       <div class="settings-actions">
         <button class="btn" id="settings-reset-keymap-btn">恢复默认快捷键</button>
       </div>
-      <label class="settings-checkbox">
-        <input id="settings-autoplay-video" type="checkbox" ${state.experimentalAutoplayVideo ? 'checked' : ''}>
-        <span>视频打开后自动播放</span>
-      </label>
-      <label class="settings-checkbox">
-        <input id="settings-video-autoplay-next" type="checkbox" ${state.videoAutoplayNext ? 'checked' : ''}>
-        <span>视频播放结束后自动播放下一个视频</span>
-      </label>
+      ${renderSettingsToggle('settings-autoplay-video', '视频打开后自动播放', state.experimentalAutoplayVideo)}
+      ${renderSettingsToggle('settings-video-autoplay-next', '视频播放结束后自动播放下一个视频', state.videoAutoplayNext)}
       <div class="settings-control">
         <label for="settings-video-section-min"><span>视频小节阈值</span><span id="settings-video-section-min-value">${state.videoSectionMinMinutes} 分钟</span></label>
         <input class="input" id="settings-video-section-min" type="range" min="1" max="240" step="1" value="${state.videoSectionMinMinutes}">
       </div>
-      <label class="settings-checkbox">
-        <input id="settings-continue-last-video-position" type="checkbox" ${state.continueLastVideoPosition ? 'checked' : ''}>
-        <span>继续上次播放位置</span>
-      </label>
-      <label class="settings-checkbox">
-        <input id="settings-prefetch-neighbors" type="checkbox" ${state.experimentalPrefetchNeighbors ? 'checked' : ''}>
-        <span>预加载前后相邻媒体</span>
-      </label>
+      ${renderSettingsToggle('settings-continue-last-video-position', '继续上次播放位置', state.continueLastVideoPosition)}
+      ${renderSettingsToggle('settings-prefetch-neighbors', '预加载前后相邻媒体', state.experimentalPrefetchNeighbors)}
       <div class="settings-actions">
         <button class="btn" id="settings-refresh-video-thumbs-btn">刷新视频缩略图</button>
         <button class="btn" id="settings-backfill-exif-btn" type="button">补录旧照片 EXIF</button>
@@ -4599,10 +5035,7 @@ function renderSettingsContent() {
     <h3>实验性功能</h3>
     <p>这些功能还在打磨中，可能会继续调整行为，开启状态会写入 config.json。</p>
     <div class="settings-group">
-      <label class="settings-checkbox">
-        <input id="settings-exp-restore-last-view" type="checkbox" ${state.experimentalRestoreLastView ? 'checked' : ''}>
-        <span>启动时恢复上次浏览页面</span>
-      </label>
+      ${renderSettingsToggle('settings-exp-restore-last-view', '启动时恢复上次浏览页面', state.experimentalRestoreLastView)}
       <div class="settings-static">
         <strong>快捷切页</strong>
         <span>支持 macOS Option + 1-6、Windows Alt + 1-6 切换到时间线、个人收藏、乱序相册、相册、回收站、设置。</span>
@@ -4621,10 +5054,7 @@ function renderSettingsContent() {
       <div class="settings-actions">
         <button class="btn" id="settings-check-update-btn" type="button">检查更新</button>
       </div>
-      <label class="settings-checkbox">
-        <input id="settings-auto-update" type="checkbox" ${state.autoUpdateEnabled ? 'checked' : ''}>
-        <span>自动更新</span>
-      </label>
+      ${renderSettingsToggle('settings-auto-update', '自动更新', state.autoUpdateEnabled)}
     </div>
   </section>
 
@@ -4659,6 +5089,7 @@ function renderSettingsContent() {
 
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
   $('#settings-build-all-thumbs-btn')?.addEventListener('click', openThumbnailBuildWorkflow);
+  syncLibraryBatchBuildPanel();
 
   function bindLibraryRow(row) {
     row.addEventListener('dragstart', e => {
@@ -4780,6 +5211,14 @@ function renderSettingsContent() {
     $('#settings-thumb-radius-value').textContent = `${state.thumbRadius}px`;
     setSettingsDirty();
   });
+  $('#settings-fast-thumbnail-build').addEventListener('change', e => {
+    state.serverSettings.fast_thumbnail_build = !!e.target.checked;
+    setSettingsDirty();
+  });
+  $('#settings-low-resource-mode').addEventListener('change', e => {
+    state.serverSettings.low_resource_mode = !!e.target.checked;
+    setSettingsDirty();
+  });
   $('#settings-thumbnail-size').addEventListener('input', e => {
     state.serverSettings.thumbnail_size = clampThumbnailBuildSize(e.target.value);
     $('#settings-thumbnail-size-value').textContent = `${state.serverSettings.thumbnail_size}px`;
@@ -4817,18 +5256,9 @@ function renderSettingsContent() {
   });
   $('#settings-continue-last-video-position').addEventListener('change', e => { state.continueLastVideoPosition = !!e.target.checked; setSettingsDirty(); });
   $('#settings-prefetch-neighbors').addEventListener('change', e => { setExperimentalSetting('prefetchNeighbors', e.target.checked); setSettingsDirty(); });
-  $('#settings-refresh-video-thumbs-btn').addEventListener('click', async () => {
-    const btn = $('#settings-refresh-video-thumbs-btn');
-    try {
-      const resp = await withButtonBusy(btn, '刷新中…', () => refreshVideoThumbnails());
-      const data = resp.data || {};
-      showToast(`视频缩略图刷新完成：共 ${data.total || 0} 个，成功 ${data.refreshed || 0} 个，失败 ${data.failed || 0} 个`, 3200);
-      if (data.errors && data.errors.length) {
-        alert(`以下文件刷新失败：\n${data.errors.join('\n')}`);
-      }
-    } catch (e) {
-      alert('刷新失败: ' + ((e && e.error) || e));
-    }
+  void pollVideoThumbnailRefreshStatus();
+  $('#settings-refresh-video-thumbs-btn').addEventListener('click', () => {
+    openVideoThumbnailRefreshWorkflow();
   });
   $('#settings-backfill-exif-btn').addEventListener('click', async () => {
     const btn = $('#settings-backfill-exif-btn');
@@ -4925,6 +5355,7 @@ async function renderTimeline() {
     state.timelineCursor = '';
     state.timelineHasMore = true;
     state.timelineTotal = 0;
+    state.timelineLoaded = false;
     state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
     switchView('timeline');
   });
@@ -4936,7 +5367,7 @@ async function renderTimeline() {
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
 
   const hasPendingFocus = !!state.pendingTimelinePhotoID;
-  if (state.photos.length && !hasPendingFocus) {
+  if (state.timelineLoaded && !hasPendingFocus) {
     await loadShareMap();
     renderTimelineGrid();
     requestVisibleThumbnailWarmup('timeline', state.photos);
@@ -4951,6 +5382,7 @@ async function renderTimeline() {
   state.timelineTotal = 0;
   await loadShareMap();   // b-2: 加载分享状态
   await loadMoreTimeline();
+  state.timelineLoaded = true;
   const focusedPending = await focusPendingTimelinePhoto();
   observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
   if (!hasPendingFocus || !focusedPending) restoreViewScroll('timeline');
@@ -5134,12 +5566,20 @@ async function renderFavorites() {
     if (confirm('确定要打包下载全部个人收藏吗？媒体较多时可能需要一些时间。')) downloadAllFavorites();
   });
 
+  await loadShareMap();
+  if (state.favoriteLoaded) {
+    appendFavoriteGrid(state.favoritePhotos);
+    updateFavoriteTotalHint();
+    observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
+    restoreViewScroll('favorites');
+    return;
+  }
+
   state.favoritePhotos = [];
   state.favoriteCursor = '';
   state.favoriteHasMore = true;
   state.favoriteTotal = 0;
   updateFavoriteTotalHint();
-  await loadShareMap();
   await loadMoreFavorites();
   observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
   restoreViewScroll('favorites');
@@ -5162,6 +5602,7 @@ async function loadMoreTimeline() {
     state.photos.push(...(page.photos || []));
     state.timelineCursor = page.next_cursor || '';
     state.timelineHasMore = page.has_more || false;
+    state.timelineLoaded = true;
     appendTimelineGrid(page.photos || []);
     requestVisibleThumbnailWarmup('timeline', page.photos || []);
   } catch (e) {
@@ -5245,6 +5686,7 @@ async function loadMoreFavorites() {
     state.favoritePhotos.push(...(page.photos || []));
     state.favoriteCursor = page.next_cursor || '';
     state.favoriteHasMore = page.has_more || false;
+    state.favoriteLoaded = true;
     appendFavoriteGrid(page.photos || []);
   } catch (e) {
     console.error(e);
@@ -5292,6 +5734,11 @@ async function renderMemories() {
     renderMemories();
   });
   $('#content').innerHTML = `<div id="memory-groups"></div>`;
+  if (state.memoriesLoaded) {
+    renderMemoryGroups();
+    restoreViewScroll('memories');
+    return;
+  }
   state.memoriesLoading = true;
   state.memoryEntries = loadMemoryEntries();
   await loadShareMap();
@@ -5311,6 +5758,7 @@ async function renderMemories() {
   }
   state.memoryEntries = liveEntries;
   state.memoryPhotos = photos;
+  state.memoriesLoaded = true;
   saveMemoryEntries(liveEntries);
   renderMemoryGroups();
   restoreViewScroll('memories');
@@ -5632,6 +6080,50 @@ function currentViewPhotos() {
   }
 }
 
+function findKnownPhotoByID(id) {
+  const targetID = Number(id);
+  if (!targetID) return null;
+  const pools = [
+    currentViewPhotos(),
+    state.photos,
+    state.favoritePhotos,
+    state.randomAlbumPhotos,
+    state.albumPhotos,
+    state.trashPhotos,
+    state.memoryPhotos,
+  ];
+  for (const pool of pools) {
+    const found = (pool || []).find(photo => Number(photo && photo.id) === targetID);
+    if (found) return found;
+  }
+  return null;
+}
+
+function refreshVisiblePendingThumbnails(force = false) {
+  const now = Date.now();
+  if (!force) {
+    const last = Number(state.thumbnailVisibleRefreshAt || 0);
+    if (now - last < 1200) return;
+  }
+  state.thumbnailVisibleRefreshAt = now;
+  document.querySelectorAll('.photo-thumb.thumb-load-failed img, .photo-thumb.thumb-loading img').forEach(imageEl => {
+    const thumb = imageEl.closest('.photo-thumb');
+    if (!thumb || !document.body.contains(thumb)) return;
+    if (!force && imageEl.complete && imageEl.naturalWidth > 0) {
+      thumb.classList.remove('thumb-loading', 'thumb-load-failed');
+      delete imageEl.dataset.thumbFailed;
+      return;
+    }
+    const photo = findKnownPhotoByID(thumb.dataset.id);
+    if (!photo) return;
+    delete imageEl.dataset.thumbFailed;
+    imageEl.dataset.thumbRetryAttempt = '0';
+    thumb.classList.add('thumb-loading');
+    thumb.classList.remove('thumb-load-failed');
+    imageEl.src = `${mediaThumbURL(photo)}?live=${now}-${photo.id}`;
+  });
+}
+
 function focusPhotoByGridStep(direction) {
   const thumbs = visiblePhotoThumbs();
   if (!thumbs.length) return false;
@@ -5659,6 +6151,16 @@ function openFocusedPhoto() {
 
 function findPhotoThumb(id) {
   return document.querySelector(`.photo-thumb[data-id="${id}"]`);
+}
+
+function currentLoadedPreviewURLForPhoto(photo) {
+  if (!photo || !photo.id) return '';
+  const thumb = findPhotoThumb(photo.id);
+  const image = thumb?.querySelector('img');
+  if (image && image.src && image.complete && image.dataset.thumbFailed !== '1') {
+    return image.currentSrc || image.src || '';
+  }
+  return '';
 }
 
 function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
@@ -6229,11 +6731,23 @@ async function renderAlbums() {
   });
 
   $('#content').innerHTML = `<div id="album-grid-wrap"></div>`;
+  if (state.albumsLoaded) {
+    renderAlbumGrid();
+    restoreViewScroll('albums');
+    return;
+  }
   try {
-	state.albums = await api.get('/api/media/albums');
+    await ensureAlbumsLoaded();
     renderAlbumGrid();
     restoreViewScroll('albums');
   } catch(e) { $('#content').innerHTML = `<p style="color:var(--danger)">加载失败</p>`; }
+}
+
+async function ensureAlbumsLoaded() {
+  if (state.albumsLoaded && Array.isArray(state.albums) && state.albums.length) return state.albums;
+  state.albums = await api.get('/api/media/albums');
+  state.albumsLoaded = true;
+  return state.albums;
 }
 
 function renderAlbumGrid() {
@@ -6292,12 +6806,17 @@ function makeAlbumCard(album) {
 // ── 相册详情 ──────────────────────────────────────────
 async function openAlbumDetail(album) {
   saveViewScroll();
+  const nextID = Number(album && album.id);
+  const prevID = Number(state.currentAlbumID || 0);
   state.currentAlbum = album;
   state.currentAlbumID = album.id;
   state.lastAlbumDetailID = album.id;
-  state.albumPhotos = [];
-  state.albumCursor = '';
-  state.albumHasMore = true;
+  if (nextID !== prevID) {
+    state.albumPhotos = [];
+    state.albumCursor = '';
+    state.albumHasMore = true;
+    state.albumDetailLoadedKey = '';
+  }
   state.view = 'album-detail';
   setHashView('album-detail', album.id);
   $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
@@ -6318,6 +6837,13 @@ function openAdjacentAlbum(offset) {
 
 async function renderAlbumDetail() {
   let album = state.currentAlbum;
+  if (state.currentAlbumID && (!state.albumsLoaded || !(state.albums || []).some(item => Number(item && item.id) === Number(state.currentAlbumID)))) {
+    try {
+      await ensureAlbumsLoaded();
+    } catch (e) {
+      console.warn('补载相册列表失败，Q/E 相册切换可能暂不可用', e);
+    }
+  }
   if (!album && state.currentAlbumID) {
     try {
 		album = await api.get(`/api/media/albums/${state.currentAlbumID}/detail`);
@@ -6361,6 +6887,7 @@ async function renderAlbumDetail() {
       state.albumPhotos = [];
       state.albumCursor = '';
       state.albumHasMore = true;
+      state.albumDetailLoadedKey = '';
       state.viewScrollPositions[viewScrollKeyFor('album-detail', album.id)] = 0;
       renderAlbumDetail();
     });
@@ -6374,9 +6901,19 @@ async function renderAlbumDetail() {
     const touch = e.changedTouches[0];
     showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false });
   });
-  state.albumPhotos = []; state.albumCursor = ''; state.albumHasMore = true;
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
+  const detailStateKey = `${album.id}:${state.albumDetailSort}:${state.mediaKindFilter}`;
+  if (state.albumDetailLoadedKey === detailStateKey && !hasPendingAlbumFocus) {
+    renderAlbumGroups(state.albumPhotos);
+    observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
+    restoreViewScroll('album-detail', album.id);
+    return;
+  }
+  state.albumPhotos = [];
+  state.albumCursor = '';
+  state.albumHasMore = true;
   await loadMoreAlbumPhotos();
+  state.albumDetailLoadedKey = detailStateKey;
   const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
   observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   if (!hasPendingAlbumFocus || !focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
@@ -6495,6 +7032,13 @@ async function renderTrash() {
 <div id="trash-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
 
+  if (state.trashLoaded) {
+    renderTrashGroups(state.trashPhotos);
+    observeLoadMore('load-more', loadMoreTrash, () => state.trashHasMore && !state.trashLoading);
+    restoreViewScroll('trash');
+    return;
+  }
+
   state.trashPhotos = []; state.trashCursor = ''; state.trashHasMore = true;
   await loadMoreTrash();
   observeLoadMore('load-more', loadMoreTrash, () => state.trashHasMore && !state.trashLoading);
@@ -6513,6 +7057,7 @@ async function loadMoreTrash() {
     state.trashPhotos.push(...(page.photos || []));
     state.trashCursor = page.next_cursor || '';
     state.trashHasMore = page.has_more || false;
+    state.trashLoaded = true;
     renderTrashGroups(page.photos || []);
   } catch(e) { console.error(e); }
   finally {
@@ -6846,8 +7391,8 @@ function bindGlobal() {
   }, { passive: true });
   document.addEventListener('click', e => {
     if (e.target.closest('#lb-close')) exitLightboxToContext();
-    if (e.target.closest('#lb-prev'))  lbNav(-1);
-    if (e.target.closest('#lb-next'))  lbNav(1);
+    if (e.target.closest('#lb-prev')) void lbNav(-1);
+    if (e.target.closest('#lb-next')) void lbNav(1);
     if (e.target.closest('#lb-download')) downloadCurrentPhoto();
     if (e.target.closest('#lb-video-bookmark')) showVideoBookmarkMenu();
     if (e.target.closest('#lb-favorite')) toggleCurrentLightboxFavorite();
@@ -6975,6 +7520,21 @@ function bindGlobal() {
       alert('设置失败: ' + ((err && err.error) || err));
     }
   });
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('#library-build-cancel');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = copyText('app.libraryBuild.cancelling', '正在停止…');
+    try {
+      state.libraryBuildStatus = await cancelLibraryBuild();
+      renderView();
+      startLibraryBuildPolling();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = copyText('app.libraryBuild.cancel', '停止构建');
+      alert('停止失败: ' + ((err && err.error) || err));
+    }
+  });
   document.addEventListener('contextmenu', e => {
     if (!$('#lightbox').classList.contains('open')) return;
     if (e.target.closest('.lb-nav')) return;
@@ -7011,7 +7571,8 @@ function handlePhotoGridKeyboard(e) {
   }
   return false;
 }
-async function openLightbox(photos, index) {
+async function openLightbox(photos, index, options = {}) {
+  interruptThumbnailBuildForForegroundTask();
   const target = photos[Math.max(0, index)];
   if (target && isVideoMedia(target)) {
     await ensureSettingsDataLoaded();
@@ -7024,7 +7585,9 @@ async function openLightbox(photos, index) {
   }
   state.lightboxPhotos = photos;
   state.lightboxIndex  = Math.max(0, index);
-  state.lightboxReturnView = state.view;
+  state.lightboxSeedPhotoID = target && target.id ? Number(target.id) : null;
+  state.lightboxSeedPreviewURL = currentLoadedPreviewURLForPhoto(target);
+  state.lightboxReturnView = options.returnView || state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
   state.slideshowRandomQueue = [];
   resetLightboxFocusPoint();
@@ -7066,8 +7629,11 @@ function closeLightbox() {
   }
   $('#lightbox').classList.remove('open');
   unlockPageScrollForLightbox();
+  state.lightboxSeedPhotoID = null;
+  state.lightboxSeedPreviewURL = '';
   state.lightboxReturnView = '';
   state.lightboxReturnAlbumID = null;
+  state.lightboxPageLoading = false;
 }
 function exitLightboxToContext() {
   const returnView = state.lightboxReturnView;
@@ -7097,23 +7663,88 @@ function exitLightboxToContext() {
     focusPhotoThumbInCurrentView(currentPhotoID);
   }
 }
-function lbNav(dir) {
+function lightboxCanLoadMoreForward() {
+  switch (state.lightboxReturnView) {
+    case 'timeline':
+      return state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused;
+    case 'random-album':
+      return state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused;
+    case 'favorites':
+      return state.favoriteHasMore && !state.favoriteLoading;
+    case 'album-detail':
+      return state.albumHasMore && !state.albumLoading && !!state.currentAlbum;
+    case 'trash':
+      return state.trashHasMore && !state.trashLoading;
+    case 'search':
+      return state.searchHasMore && !state.searchLoading && !!state.searchQuery;
+    default:
+      return false;
+  }
+}
+
+async function loadMoreForLightbox() {
+  if (state.lightboxPageLoading || !lightboxCanLoadMoreForward()) return false;
+  const beforeLength = state.lightboxPhotos.length;
+  state.lightboxPageLoading = true;
+  try {
+    switch (state.lightboxReturnView) {
+      case 'timeline':
+        await loadMoreTimeline();
+        break;
+      case 'random-album':
+        await loadMoreRandomAlbum();
+        break;
+      case 'favorites':
+        await loadMoreFavorites();
+        break;
+      case 'album-detail':
+        await loadMoreAlbumPhotos();
+        break;
+      case 'trash':
+        await loadMoreTrash();
+        break;
+      case 'search':
+        await runGlobalSearch(state.searchQuery, { reset: false });
+        state.lightboxPhotos = state.searchResults;
+        break;
+      default:
+        return false;
+    }
+  } finally {
+    state.lightboxPageLoading = false;
+  }
+  return state.lightboxPhotos.length > beforeLength;
+}
+
+async function ensureLightboxIndexAvailable(index) {
+  if (index < state.lightboxPhotos.length) return true;
+  if (index < 0) return false;
+  for (let attempt = 0; attempt < 3 && index >= state.lightboxPhotos.length && lightboxCanLoadMoreForward(); attempt += 1) {
+    const loaded = await loadMoreForLightbox();
+    if (!loaded) break;
+  }
+  return index < state.lightboxPhotos.length;
+}
+
+async function lbNav(dir) {
   const n = state.lightboxIndex + dir;
-  if (n < 0 || n >= state.lightboxPhotos.length) return;
-  lbGoTo(n);
+  if (n < 0) return;
+  if (!(await ensureLightboxIndexAvailable(n))) return;
+  await lbGoTo(n);
 }
 function playNextVideoFromLightbox() {
   if (!state.videoAutoplayNext) return false;
   for (let index = state.lightboxIndex + 1; index < state.lightboxPhotos.length; index += 1) {
     if (isVideoMedia(state.lightboxPhotos[index])) {
-      lbGoTo(index);
+      void lbGoTo(index);
       return true;
     }
   }
   return false;
 }
-function lbGoTo(index, options = {}) {
-  if (index < 0 || index >= state.lightboxPhotos.length) return;
+async function lbGoTo(index, options = {}) {
+  if (index < 0) return;
+  if (!(await ensureLightboxIndexAvailable(index))) return;
   state.lightboxPlaybackToken += 1;
   const video = $('#lb-video');
   if (video) {
@@ -7205,6 +7836,10 @@ function lbRender() {
     updateVideoBookmarkProgress(video, p);
     img.classList.remove('hidden');
     const thumbURL = mediaThumbURL(p);
+    const seededPreviewURL = Number(state.lightboxSeedPhotoID || 0) === Number(p.id || 0)
+      ? String(state.lightboxSeedPreviewURL || '')
+      : '';
+    const previewURL = seededPreviewURL || thumbURL;
     const fullURL = mediaFileURL(p);
     let fullLoaded = false;
     const finishPreview = () => {
@@ -7232,7 +7867,7 @@ function lbRender() {
       setLightboxMediaLoading(false);
     };
     img.dataset.previewStage = 'thumb';
-    img.src = thumbURL;
+    img.src = previewURL;
     if (img.complete) finishPreview();
     if (thumbURL !== fullURL) {
       const fullImage = new Image();
@@ -7255,7 +7890,7 @@ function lbRender() {
   updateVideoBookmarkButton(p);
   updateVideoBookmarkProgress(video, p);
   $('#lb-prev').classList.toggle('hidden', state.lightboxIndex === 0);
-  $('#lb-next').classList.toggle('hidden', state.lightboxIndex === state.lightboxPhotos.length - 1);
+  $('#lb-next').classList.toggle('hidden', state.lightboxIndex === state.lightboxPhotos.length - 1 && !lightboxCanLoadMoreForward());
   applyLightboxZoom();
   updateLightboxHeaderLayout();
   updateSlideshowControls();

@@ -1,5 +1,6 @@
 .vscode
 build.sh
+.build
 .DS_Store
 echogallery-data
 EchoGallery

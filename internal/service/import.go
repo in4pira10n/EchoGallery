@@ -282,6 +282,9 @@ func sourceMediaUnchanged(existing storage.SourceMediaInfo, info fs.FileInfo) bo
 }
 
 func importWorkerCount() int {
+	if lowResourceModeEnabled() {
+		return 1
+	}
 	n := runtime.GOMAXPROCS(0) / 2
 	if n < 1 {
 		return 1

@@ -24,41 +24,46 @@ import (
 )
 
 type stubRegistrar struct {
-	addPhoto                func(albumID int64, photoID int64, userID int64) error
-	createAlbum             func(name, description string, userID int64) (*storage.Album, error)
-	createShare             func(input service.CreateShareInput) (*storage.ShareLink, error)
-	deleteAlbum             func(id int64, userID int64) error
-	deleteShare             func(id int64, userID int64) error
-	getAlbum                func(id int64, userID int64) (*storage.Album, error)
-	getAlbumDownloadEntries func(albumID int64, userID int64) (string, []service.DownloadEntry, error)
-	getShareByToken         func(token string) (*storage.ShareLink, error)
-	listAlbums              func(userID int64) ([]*storage.Album, error)
-	listAlbumsForPhoto      func(photoID int64, userID int64) ([]*storage.Album, error)
-	listShares              func(userID int64) ([]*storage.ShareLink, error)
-	removePhoto             func(albumID int64, photoID int64, userID int64) error
-	updateAlbum             func(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error)
-	register                func(input service.RegisterUploadedVideoInput) (*storage.Photo, error)
-	upload                  func(input service.UploadInput) (*service.UploadResult, error)
-	deletePhoto             func(id int64, userID int64) error
-	emptyTrash              func(userID int64) error
-	getDownloadEntries      func(photoIDs []int64, userID int64) ([]service.DownloadEntry, error)
-	getAlbumMedia           func(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error)
-	getPhoto                func(id int64, userID int64) (*storage.Photo, error)
-	getByUUID               func(uuid string, userID int64) (*storage.Photo, error)
-	getFavorites            func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
-	getTrash                func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
-	getTimeline             func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
-	searchMedia             func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
-	getRandomMedia          func(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
-	mediaPath               func(photo *storage.Photo) string
-	permanentlyDeletePhoto  func(id int64, userID int64) error
-	playWithSystemPlayer    func(id int64, userID int64) error
-	posterPath              func(photo *storage.Photo) string
-	refreshVideoThumbnails  func(userID int64) (*service.VideoThumbnailRefreshResult, error)
-	revealInFinder          func(id int64, userID int64) error
-	restorePhoto            func(id int64, userID int64) error
-	setPhotoFavorite        func(id int64, userID int64, favorite bool) error
-	thumbnailPath           func(photo *storage.Photo) string
+	addPhoto                       func(albumID int64, photoID int64, userID int64) error
+	createAlbum                    func(name, description string, userID int64) (*storage.Album, error)
+	createShare                    func(input service.CreateShareInput) (*storage.ShareLink, error)
+	deleteAlbum                    func(id int64, userID int64) error
+	deleteShare                    func(id int64, userID int64) error
+	getAlbum                       func(id int64, userID int64) (*storage.Album, error)
+	getAlbumDownloadEntries        func(albumID int64, userID int64) (string, []service.DownloadEntry, error)
+	getShareByToken                func(token string) (*storage.ShareLink, error)
+	listAlbums                     func(userID int64) ([]*storage.Album, error)
+	listAlbumsForPhoto             func(photoID int64, userID int64) ([]*storage.Album, error)
+	listShares                     func(userID int64) ([]*storage.ShareLink, error)
+	removePhoto                    func(albumID int64, photoID int64, userID int64) error
+	updateAlbum                    func(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error)
+	register                       func(input service.RegisterUploadedVideoInput) (*storage.Photo, error)
+	upload                         func(input service.UploadInput) (*service.UploadResult, error)
+	deletePhoto                    func(id int64, userID int64) error
+	emptyTrash                     func(userID int64) error
+	getDownloadEntries             func(photoIDs []int64, userID int64) ([]service.DownloadEntry, error)
+	getAlbumMedia                  func(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error)
+	getPhoto                       func(id int64, userID int64) (*storage.Photo, error)
+	getByUUID                      func(uuid string, userID int64) (*storage.Photo, error)
+	getFavorites                   func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	getTrash                       func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	getTimeline                    func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	searchMedia                    func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
+	getRandomMedia                 func(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
+	mediaPath                      func(photo *storage.Photo) string
+	permanentlyDeletePhoto         func(id int64, userID int64) error
+	playWithSystemPlayer           func(id int64, userID int64) error
+	posterPath                     func(photo *storage.Photo) string
+	refreshVideoThumbnails         func(userID int64) (*service.VideoThumbnailRefreshResult, error)
+	startVideoThumbnailRefresh     func(userID int64) (service.VideoThumbnailRefreshStatus, error)
+	getVideoThumbnailRefreshStatus func(userID int64) service.VideoThumbnailRefreshStatus
+	cancelVideoThumbnailRefresh    func(userID int64) (service.VideoThumbnailRefreshStatus, error)
+	revealInFinder                 func(id int64, userID int64) error
+	restorePhoto                   func(id int64, userID int64) error
+	setPhotoFavorite               func(id int64, userID int64, favorite bool) error
+	thumbnailBuildPreviewPath      func(photo *storage.Photo) string
+	thumbnailPath                  func(photo *storage.Photo) string
+	thumbnailPreviewPath           func(photo *storage.Photo) string
 }
 
 func (s stubRegistrar) RegisterUploadedVideo(input service.RegisterUploadedVideoInput) (*storage.Photo, error) {
@@ -186,6 +191,20 @@ func (s stubRegistrar) ThumbnailPath(photo *storage.Photo) string {
 	return s.thumbnailPath(photo)
 }
 
+func (s stubRegistrar) ThumbnailBuildPreviewPath(photo *storage.Photo) string {
+	if s.thumbnailBuildPreviewPath != nil {
+		return s.thumbnailBuildPreviewPath(photo)
+	}
+	return s.ThumbnailPreviewPath(photo)
+}
+
+func (s stubRegistrar) ThumbnailPreviewPath(photo *storage.Photo) string {
+	if s.thumbnailPreviewPath != nil {
+		return s.thumbnailPreviewPath(photo)
+	}
+	return s.thumbnailPath(photo)
+}
+
 func (s stubRegistrar) PermanentlyDeletePhoto(id int64, userID int64) error {
 	return s.permanentlyDeletePhoto(id, userID)
 }
@@ -199,6 +218,27 @@ func (s stubRegistrar) RefreshVideoThumbnails(userID int64) (*service.VideoThumb
 		return &service.VideoThumbnailRefreshResult{}, nil
 	}
 	return s.refreshVideoThumbnails(userID)
+}
+
+func (s stubRegistrar) StartVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error) {
+	if s.startVideoThumbnailRefresh == nil {
+		return service.VideoThumbnailRefreshStatus{Status: "running", Message: "ok"}, nil
+	}
+	return s.startVideoThumbnailRefresh(userID)
+}
+
+func (s stubRegistrar) GetVideoThumbnailRefreshStatus(userID int64) service.VideoThumbnailRefreshStatus {
+	if s.getVideoThumbnailRefreshStatus == nil {
+		return service.VideoThumbnailRefreshStatus{Status: "idle", Message: "当前没有视频缩略图任务"}
+	}
+	return s.getVideoThumbnailRefreshStatus(userID)
+}
+
+func (s stubRegistrar) CancelVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error) {
+	if s.cancelVideoThumbnailRefresh == nil {
+		return service.VideoThumbnailRefreshStatus{Status: "cancelled", Message: "已取消视频缩略图刷新"}, nil
+	}
+	return s.cancelVideoThumbnailRefresh(userID)
 }
 
 func (s stubRegistrar) RevealInFinder(id int64, userID int64) error {
@@ -222,6 +262,12 @@ func okRegistrar() stubRegistrar {
 	}
 	thumbnailFilePath := func(photo *storage.Photo) string {
 		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".webp")
+	}
+	thumbnailBuildPreviewFilePath := func(photo *storage.Photo) string {
+		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".build-preview.webp")
+	}
+	thumbnailPreviewFilePath := func(photo *storage.Photo) string {
+		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".preview.webp")
 	}
 	return stubRegistrar{addPhoto: func(albumID int64, photoID int64, userID int64) error {
 		return nil
@@ -399,7 +445,7 @@ func okRegistrar() stubRegistrar {
 		return nil
 	}, setPhotoFavorite: func(id int64, userID int64, favorite bool) error {
 		return nil
-	}, thumbnailPath: thumbnailFilePath}
+	}, thumbnailBuildPreviewPath: thumbnailBuildPreviewFilePath, thumbnailPath: thumbnailFilePath, thumbnailPreviewPath: thumbnailPreviewFilePath}
 }
 
 func testConfig() *config.Config {
@@ -552,12 +598,12 @@ func TestPlayMediaWithSystemPlayerRoute(t *testing.T) {
 func TestRefreshVideoThumbnailsRoute(t *testing.T) {
 	called := false
 	router := NewRouter(testConfig(), stubRegistrar{
-		refreshVideoThumbnails: func(userID int64) (*service.VideoThumbnailRefreshResult, error) {
+		startVideoThumbnailRefresh: func(userID int64) (service.VideoThumbnailRefreshStatus, error) {
 			called = true
-			return &service.VideoThumbnailRefreshResult{
+			return service.VideoThumbnailRefreshStatus{
+				Status:    "running",
 				Total:     2,
-				Refreshed: 2,
-				Failed:    0,
+				Refreshed: 1,
 			}, nil
 		},
 	})
@@ -572,10 +618,10 @@ func TestRefreshVideoThumbnailsRoute(t *testing.T) {
 		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
 	}
 	if !called {
-		t.Fatal("期望命中刷新视频缩略图处理函数")
+		t.Fatal("期望命中刷新视频缩略图任务处理函数")
 	}
-	if !strings.Contains(w.Body.String(), `"refreshed":2`) {
-		t.Fatalf("期望返回刷新统计，得到 %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"status":"running"`) {
+		t.Fatalf("期望返回任务状态，得到 %s", w.Body.String())
 	}
 }
 

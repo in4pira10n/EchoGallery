@@ -111,7 +111,7 @@ func (s *PhotoService) RefreshVideoThumbnails(userID int64) (*VideoThumbnailRefr
 					continue
 				}
 				result.Total++
-				if err := media.GeneratePoster(s.resolveFinderPath(photo), s.PosterPath(photo), s.thumbnailSize); err != nil {
+				if err := s.generateThumbnailTiersForPhoto(photo); err != nil {
 					result.Failed++
 					if len(result.Errors) < 8 {
 						result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", photo.OriginalName, err))

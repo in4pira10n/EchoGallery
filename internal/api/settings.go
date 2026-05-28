@@ -41,6 +41,8 @@ type settingsResponse struct {
 	ExperimentalPrefetchNeighbors bool              `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
+	FastThumbnailBuild            bool              `json:"fast_thumbnail_build"`
+	LowResourceMode               bool              `json:"low_resource_mode"`
 	PlayerKeymap                  string            `json:"player_keymap"`
 }
 
@@ -67,6 +69,8 @@ type settingsUpdateRequest struct {
 	ExperimentalPrefetchNeighbors bool             `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
+	FastThumbnailBuild            bool             `json:"fast_thumbnail_build"`
+	LowResourceMode               bool             `json:"low_resource_mode"`
 	PlayerKeymap                  string           `json:"player_keymap"`
 }
 
@@ -132,6 +136,8 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile) settings
 		ExperimentalPrefetchNeighbors: profile.Preferences.ExperimentalPrefetchNeighbors,
 		ExperimentalRestoreLastView:   profile.Preferences.ExperimentalRestoreLastView,
 		ContinueLastVideoPosition:     profile.Preferences.ContinueLastVideoPosition,
+		FastThumbnailBuild:            profile.Preferences.FastThumbnailBuild,
+		LowResourceMode:               profile.Preferences.LowResourceMode,
 		PlayerKeymap:                  profile.Preferences.PlayerKeymap,
 	}
 }
@@ -202,6 +208,8 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 				ExperimentalPrefetchNeighbors: req.ExperimentalPrefetchNeighbors,
 				ExperimentalRestoreLastView:   req.ExperimentalRestoreLastView,
 				ContinueLastVideoPosition:     req.ContinueLastVideoPosition,
+				FastThumbnailBuild:            req.FastThumbnailBuild,
+				LowResourceMode:               req.LowResourceMode,
 				PlayerKeymap:                  req.PlayerKeymap,
 			},
 		}
@@ -221,6 +229,7 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 		cfg.Port = nextGlobal.Port
 		cfg.ActiveProfile = nextGlobal.ActiveProfile
 		cfg.ApplyProfile(nextProfile)
+		service.SetLowResourceMode(nextProfile.Preferences.LowResourceMode)
 		if prevThumbnailSize != nextProfile.ThumbnailSize && prevThumbnailDir != "" {
 			_ = os.RemoveAll(prevThumbnailDir)
 			_ = os.MkdirAll(prevThumbnailDir, 0755)

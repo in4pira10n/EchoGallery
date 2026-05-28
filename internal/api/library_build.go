@@ -27,6 +27,7 @@ type LibraryBuildStatus struct {
 type LibraryBuildHooks struct {
 	Status               func() LibraryBuildStatus
 	SetExitAfterComplete func(enabled bool) (LibraryBuildStatus, error)
+	Cancel               func() (LibraryBuildStatus, error)
 }
 
 type libraryBuildExitRequest struct {
@@ -55,6 +56,21 @@ func handleSetLibraryBuildExitAfterComplete(hooks LibraryBuildHooks) gin.Handler
 			return
 		}
 		status, err := hooks.SetExitAfterComplete(req.Enabled)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, status)
+	}
+}
+
+func handleCancelLibraryBuild(hooks LibraryBuildHooks) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if hooks.Cancel == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持停止资源库构建"})
+			return
+		}
+		status, err := hooks.Cancel()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

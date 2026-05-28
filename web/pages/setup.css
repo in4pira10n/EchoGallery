@@ -500,6 +500,7 @@
   background: rgba(229, 242, 255, .12);
   border: 1px solid rgba(190, 222, 255, .18);
   box-shadow: 0 12px 30px rgba(2, 10, 30, .18);
+  cursor: pointer;
   transition:
     transform .2s cubic-bezier(.22, 1, .36, 1),
     border-color .18s ease,
@@ -733,4 +734,5 @@
     grid-column: 2;
     justify-self: start;
   }
+
 }

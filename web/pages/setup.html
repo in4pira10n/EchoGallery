@@ -58,9 +58,12 @@
       message: '当前资源库不可用，请选择其他资源库后重启。',
       currentPath: '当前路径',
       unknownPath: '未记录',
-      existingTitle: '选择已有资源库',
+      existingTitle: '编辑已有资源库',
       existingCount: '{count} 个记录',
       currentInvalid: '当前不可用',
+      useExisting: '使用',
+      editTitle: '编辑资源库',
+      editHint: '保存名称与路径',
       empty: 'config.json 中还没有可切换的资源库记录。',
       createTitle: '新建资源库',
       createHint: '自动创建目录',
@@ -249,7 +252,12 @@
 
   function renderRecovery() {
     root.className = 'login-card setup-card setup-recovery-card';
-    var libraries = state.libraries || [];
+    var recoveryLibraries = (state.libraries || []).map(function (library, index) {
+      return {
+        name: library.name || text('recovery.libraryName', '资源库 {index}', { index: index + 1 }),
+        path: library.path || ''
+      };
+    });
     root.innerHTML =
       '<div class="setup-recovery-hero">' +
         '<div class="setup-recovery-brand"><span class="setup-recovery-mark">E</span><span>EchoGallery</span></div>' +
@@ -260,24 +268,21 @@
       '</div>' +
       '<div class="setup-recovery-grid">' +
         '<section class="setup-recovery-section">' +
-          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.existingTitle', '选择已有资源库')) + '</strong><span>' + esc(text('recovery.existingCount', '{count} 个记录', { count: libraries.length })) + '</span></div>' +
-          '<div class="setup-library-chooser" id="setup-library-chooser">' + (libraries.length ? libraries.map(function (library, index) {
+          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.existingTitle', '编辑已有资源库')) + '</strong><span>' + esc(text('recovery.existingCount', '{count} 个记录', { count: recoveryLibraries.length })) + '</span></div>' +
+          '<div class="setup-library-chooser" id="setup-library-chooser">' + (recoveryLibraries.length ? recoveryLibraries.map(function (library, index) {
             var currentClass = library.path === state.current_storage_path ? ' current' : '';
             var current = library.path === state.current_storage_path ? '<em>' + esc(text('recovery.currentInvalid', '当前不可用')) + '</em>' : '';
-            return '<button class="setup-library-option' + currentClass + '" type="button" data-path="' + esc(library.path) + '">' +
+            return '<div class="setup-library-option setup-library-edit-option' + currentClass + '" data-index="' + index + '">' +
               '<span class="setup-library-option-dot">' + (index + 1) + '</span>' +
               '<span class="setup-library-option-main">' +
                 '<strong>' + esc(library.name || library.path) + '</strong>' +
                 '<small>' + esc(library.path) + '</small>' +
               '</span>' +
               current +
-            '</button>';
+            '</div>';
           }).join('') : '<div class="setup-recovery-empty">' + esc(text('recovery.empty', 'config.json 中还没有可切换的资源库记录。')) + '</div>') + '</div>' +
         '</section>' +
-        '<section class="setup-recovery-section setup-recovery-create">' +
-          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.createTitle', '新建资源库')) + '</strong><span>' + esc(text('recovery.createHint', '自动创建目录')) + '</span></div>' +
-          '<div class="form-group"><label class="form-label" for="setup-new-library-name">' + esc(text('recovery.newNameLabel', '资源库名称')) + '</label><input class="input" id="setup-new-library-name" type="text" placeholder="' + esc(text('recovery.newNamePlaceholder', '例如：新资源库')) + '"></div>' +
-          '<div class="form-group"><label class="form-label" for="setup-new-library-path">' + esc(text('recovery.newPathLabel', '资源库路径')) + '</label><input class="input" id="setup-new-library-path" type="text" placeholder="' + esc(text('recovery.newPathPlaceholder', '输入新路径后会自动创建目录')) + '"></div>' +
+        '<section class="setup-recovery-section setup-recovery-create" id="setup-recovery-editor">' +
         '</section>' +
       '</div>' +
       '<div class="setup-recovery-footer">' +
@@ -285,22 +290,62 @@
         '<div class="login-error" id="setup-error"></div>' +
       '</div>';
 
-    var selectedPath = '';
-    Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (btn) {
-      btn.addEventListener('click', function () {
-        selectedPath = btn.getAttribute('data-path') || '';
+    var selectedIndex = -1;
+    function renderRecoveryEditor() {
+      var editor = document.getElementById('setup-recovery-editor');
+      if (!editor) return;
+      var editing = selectedIndex >= 0 && selectedIndex < recoveryLibraries.length;
+      var library = editing ? recoveryLibraries[selectedIndex] : {};
+      editor.innerHTML =
+        '<div class="setup-recovery-section-head"><strong>' + esc(editing ? text('recovery.editTitle', '编辑资源库') : text('recovery.createTitle', '新建资源库')) + '</strong><span>' + esc(editing ? text('recovery.editHint', '保存名称与路径') : text('recovery.createHint', '自动创建目录')) + '</span></div>' +
+        '<div class="form-group"><label class="form-label" for="setup-new-library-name">' + esc(text('recovery.newNameLabel', '资源库名称')) + '</label><input class="input" id="setup-new-library-name" type="text" value="' + esc(library.name || '') + '" placeholder="' + esc(text('recovery.newNamePlaceholder', '例如：新资源库')) + '"></div>' +
+        '<div class="form-group"><label class="form-label" for="setup-new-library-path">' + esc(text('recovery.newPathLabel', '资源库路径')) + '</label><input class="input" id="setup-new-library-path" type="text" value="' + esc(library.path || '') + '" placeholder="' + esc(text('recovery.newPathPlaceholder', '输入新路径后会自动创建目录')) + '"></div>';
+    }
+    function syncRecoveryEditor() {
+      if (selectedIndex < 0 || selectedIndex >= recoveryLibraries.length) return;
+      recoveryLibraries[selectedIndex] = {
+        name: document.getElementById('setup-new-library-name').value.trim() || text('recovery.libraryName', '资源库 {index}', { index: selectedIndex + 1 }),
+        path: document.getElementById('setup-new-library-path').value.trim()
+      };
+    }
+    renderRecoveryEditor();
+    document.getElementById('setup-library-chooser').addEventListener('click', function (event) {
+      if (event.target !== this) return;
+      syncRecoveryEditor();
+      selectedIndex = -1;
+      Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (item) {
+        item.classList.remove('active');
+      });
+      renderRecoveryEditor();
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.setup-library-edit-option'), function (row) {
+      row.addEventListener('click', function () {
+        syncRecoveryEditor();
+        selectedIndex = Number(row.getAttribute('data-index'));
         Array.prototype.forEach.call(document.querySelectorAll('.setup-library-option'), function (item) {
-          item.classList.toggle('active', item === btn);
+          item.classList.toggle('active', item === row);
         });
+        renderRecoveryEditor();
       });
     });
+    function collectRecoveryLibraries() {
+      syncRecoveryEditor();
+      return recoveryLibraries.map(function (library, index) {
+        return {
+          name: library.name || text('recovery.libraryName', '资源库 {index}', { index: index + 1 }),
+          path: library.path || ''
+        };
+      });
+    }
 
     document.getElementById('setup-select-library').addEventListener('click', async function () {
       var errorEl = document.getElementById('setup-error');
       errorEl.textContent = '';
+      var editedLibraries = collectRecoveryLibraries();
       var newName = document.getElementById('setup-new-library-name').value.trim();
       var newPath = document.getElementById('setup-new-library-path').value.trim();
-      var targetPath = newPath || selectedPath;
+      var selectedLibrary = selectedIndex >= 0 ? editedLibraries[selectedIndex] : null;
+      var targetPath = newPath || (selectedLibrary && selectedLibrary.path) || '';
       if (!targetPath) {
         errorEl.textContent = text('recovery.missingTarget', '请先选择一个资源库，或填写新的资源库路径');
         return;
@@ -312,7 +357,7 @@
         var resp = await fetch('/api/setup/select-library', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({name: newName, storage_path: targetPath})
+          body: JSON.stringify({name: newName, storage_path: targetPath, selected_index: selectedIndex, libraries: editedLibraries})
         });
         var data = await resp.json();
         if (!resp.ok) throw new Error(data.error || '切换失败');

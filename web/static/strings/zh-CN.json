@@ -75,9 +75,12 @@
         "message": "当前资源库不可用，请选择其他资源库后重启。",
         "currentPath": "当前路径",
         "unknownPath": "未记录",
-        "existingTitle": "选择已有资源库",
+        "existingTitle": "编辑已有资源库",
         "existingCount": "{count} 个记录",
         "currentInvalid": "当前不可用",
+        "useExisting": "使用",
+        "editTitle": "编辑资源库",
+        "editHint": "保存名称与路径",
         "empty": "config.json 中还没有可切换的资源库记录。",
         "createTitle": "新建资源库",
         "createHint": "自动创建目录",
@@ -117,7 +120,17 @@
       "etaLabel": "预计剩余",
       "etaPending": "计算中",
       "prunedLabel": "已清理失效媒体",
-      "exitAfterComplete": "构建完成后自动退出应用"
+      "exitAfterComplete": "构建完成后自动退出应用",
+      "cancel": "停止构建",
+      "cancelling": "正在停止…"
+    },
+    "libraryBatchBuild": {
+      "title": "正在批量构建资源库",
+      "cancel": "取消批量构建",
+      "cancelling": "正在取消…",
+      "completed": "批量构建已完成",
+      "cancelled": "已取消批量构建资源库",
+      "failed": "批量构建失败"
     },
     "randomAlbum": {
       "blockingTitle": "正在加载全部乱序相册媒体",

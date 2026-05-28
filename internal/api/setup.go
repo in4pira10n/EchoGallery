@@ -48,8 +48,10 @@ type setupInitRequest struct {
 }
 
 type setupSelectLibraryRequest struct {
-	Name        string `json:"name"`
-	StoragePath string `json:"storage_path"`
+	Name        string           `json:"name"`
+	StoragePath string           `json:"storage_path"`
+	Selected    int              `json:"selected_index"`
+	Libraries   []config.Library `json:"libraries"`
 }
 
 func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() error) http.Handler {
@@ -240,6 +242,24 @@ func (s *setupController) handleSelectLibrary() gin.HandlerFunc {
 			return
 		}
 		selected := strings.TrimSpace(req.StoragePath)
+		if len(req.Libraries) > 0 {
+			libraries := make([]config.Library, 0, len(req.Libraries))
+			for i, library := range req.Libraries {
+				path := strings.TrimSpace(library.Path)
+				if path == "" {
+					continue
+				}
+				name := strings.TrimSpace(library.Name)
+				if name == "" {
+					name = fmt.Sprintf("资源库 %d", i+1)
+				}
+				libraries = append(libraries, config.Library{Name: name, Path: path, LogoAsset: library.LogoAsset, AccentColor: library.AccentColor})
+			}
+			cfg.Libraries = libraries
+			if selected == "" && req.Selected >= 0 && req.Selected < len(req.Libraries) {
+				selected = strings.TrimSpace(req.Libraries[req.Selected].Path)
+			}
+		}
 		if selected == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "资源库路径不能为空"})
 			return
