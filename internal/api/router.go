@@ -215,10 +215,10 @@ func NewRouterWithStaticWithRestart(cfg *config.Config, staticFS fs.FS, registra
 }
 
 func NewRouterWithStaticWithLifecycle(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error) http.Handler {
-	return NewRouterWithStaticWithLifecycleAndBuild(cfg, staticFS, registrar, restart, shutdown, LibraryBuildHooks{}, LibraryBatchBuildHooks{})
+	return NewRouterWithStaticWithLifecycleAndBuild(cfg, staticFS, registrar, restart, shutdown, LibraryBuildHooks{}, LibraryBatchBuildHooks{}, LibraryBatchThumbnailBuildHooks{})
 }
 
-func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error, buildHooks LibraryBuildHooks, batchBuildHooks LibraryBatchBuildHooks) http.Handler {
+func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS, registrar videoRegistrar, restart func() error, shutdown func() error, buildHooks LibraryBuildHooks, batchBuildHooks LibraryBatchBuildHooks, batchThumbnailBuildHooks LibraryBatchThumbnailBuildHooks) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
@@ -245,10 +245,16 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/library-build/status", authMiddleware(cfg), handleGetLibraryBuildStatus(buildHooks))
 	r.PUT("/api/library-build/exit-after-complete", authMiddleware(cfg), handleSetLibraryBuildExitAfterComplete(buildHooks))
 	r.DELETE("/api/library-build", authMiddleware(cfg), handleCancelLibraryBuild(buildHooks))
-	r.GET("/api/settings/libraries/build-all", authMiddleware(cfg), handleGetLibraryBatchBuildStatus(batchBuildHooks))
+	r.GET("/api/settings/libraries/build-all", authMiddleware(cfg), handleGetLibraryBatchBuildStatus(cfg, batchBuildHooks))
 	r.POST("/api/settings/libraries/build-all", authMiddleware(cfg), handleStartLibraryBatchBuild(cfg, batchBuildHooks))
-	r.DELETE("/api/settings/libraries/build-all", authMiddleware(cfg), handleCancelLibraryBatchBuild(batchBuildHooks))
-	r.PUT("/api/settings/libraries/build-all/exit-after-complete", authMiddleware(cfg), handleSetLibraryBatchBuildExitAfterComplete(batchBuildHooks))
+	r.DELETE("/api/settings/libraries/build-all", authMiddleware(cfg), handleCancelLibraryBatchBuild(cfg, batchBuildHooks))
+	r.PUT("/api/settings/libraries/build-all/exit-after-complete", authMiddleware(cfg), handleSetLibraryBatchBuildExitAfterComplete(cfg, batchBuildHooks))
+	r.PUT("/api/settings/libraries/build-all/selection", authMiddleware(cfg), handleSetLibraryBatchBuildSelection(cfg, batchBuildHooks))
+	r.GET("/api/settings/libraries/thumbnails/build-all", authMiddleware(cfg), handleGetLibraryBatchThumbnailBuildStatus(cfg, batchThumbnailBuildHooks))
+	r.POST("/api/settings/libraries/thumbnails/build-all", authMiddleware(cfg), handleStartLibraryBatchThumbnailBuild(cfg, batchThumbnailBuildHooks))
+	r.DELETE("/api/settings/libraries/thumbnails/build-all", authMiddleware(cfg), handleCancelLibraryBatchThumbnailBuild(cfg, batchThumbnailBuildHooks))
+	r.PUT("/api/settings/libraries/thumbnails/build-all/exit-after-complete", authMiddleware(cfg), handleSetLibraryBatchThumbnailBuildExitAfterComplete(cfg, batchThumbnailBuildHooks))
+	r.PUT("/api/settings/libraries/thumbnails/build-all/selection", authMiddleware(cfg), handleSetLibraryBatchThumbnailBuildSelection(cfg, batchThumbnailBuildHooks))
 	r.POST("/api/settings/libraries/logos/refresh", authMiddleware(cfg), handleRefreshLibraryLogos(cfg))
 	r.POST("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authMiddleware(cfg), handleDeleteLibraryLogo(cfg))

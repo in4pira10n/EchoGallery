@@ -36,10 +36,14 @@ type libraryBuildState struct {
 }
 
 type libraryBatchBuildTask struct {
-	cancel context.CancelFunc
+	cancel      context.CancelFunc
+	username    string
+	idleMessage string
+	persistFn   func(status api.LibraryBatchBuildStatus)
 
-	mu     sync.Mutex
-	status api.LibraryBatchBuildStatus
+	mu          sync.Mutex
+	status      api.LibraryBatchBuildStatus
+	lastPersist time.Time
 }
 
 type libraryBatchBuildManager struct {
@@ -47,6 +51,15 @@ type libraryBatchBuildManager struct {
 	task              *libraryBatchBuildTask
 	shutdownAfterDone func() error
 	defaultExitAfter  bool
+	idleMessage       string
+}
+
+type libraryBatchThumbnailBuildManager struct {
+	mu                sync.Mutex
+	task              *libraryBatchBuildTask
+	shutdownAfterDone func() error
+	defaultExitAfter  bool
+	idleMessage       string
 }
 
 func newLibraryBuildState(shutdown func() error) *libraryBuildState {
@@ -60,7 +73,17 @@ func newLibraryBuildState(shutdown func() error) *libraryBuildState {
 }
 
 func newLibraryBatchBuildManager(shutdown func() error) *libraryBatchBuildManager {
-	return &libraryBatchBuildManager{shutdownAfterDone: shutdown}
+	return &libraryBatchBuildManager{
+		shutdownAfterDone: shutdown,
+		idleMessage:       "当前没有批量扫描任务",
+	}
+}
+
+func newLibraryBatchThumbnailBuildManager(shutdown func() error) *libraryBatchThumbnailBuildManager {
+	return &libraryBatchThumbnailBuildManager{
+		shutdownAfterDone: shutdown,
+		idleMessage:       "当前没有批量缩略图任务",
+	}
 }
 
 func newLibraryBatchBuildTask(libraries []config.Library, fast bool, lowResource bool, cancel context.CancelFunc) *libraryBatchBuildTask {
@@ -78,7 +101,7 @@ func newLibraryBatchBuildTask(libraries []config.Library, fast bool, lowResource
 		cancel: cancel,
 		status: api.LibraryBatchBuildStatus{
 			Status:             "running",
-			Message:            "正在准备批量构建资源库…",
+			Message:            "正在准备批量任务…",
 			TotalLibraries:     len(libraries),
 			FastThumbnailBuild: fast,
 			LowResourceMode:    lowResource,
@@ -102,11 +125,12 @@ func (t *libraryBatchBuildTask) mutate(fn func(status *api.LibraryBatchBuildStat
 
 func (t *libraryBatchBuildTask) snapshot() api.LibraryBatchBuildStatus {
 	if t == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务"}
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量任务"}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	status := t.status
+	status.SelectedPaths = append([]string(nil), status.SelectedPaths...)
 	if len(status.Libraries) > 0 {
 		status.Libraries = append([]api.LibraryBatchBuildLibraryStatus(nil), status.Libraries...)
 	}
@@ -125,24 +149,351 @@ func (t *libraryBatchBuildTask) snapshot() api.LibraryBatchBuildStatus {
 	return status
 }
 
-func (m *libraryBatchBuildManager) Status() api.LibraryBatchBuildStatus {
+func (t *libraryBatchBuildTask) persist(force bool) {
+	if t == nil || t.persistFn == nil {
+		return
+	}
+	t.mu.Lock()
+	if !force && !t.lastPersist.IsZero() && time.Since(t.lastPersist) < 800*time.Millisecond {
+		t.mu.Unlock()
+		return
+	}
+	t.lastPersist = time.Now()
+	status := t.status
+	t.mu.Unlock()
+	t.persistFn(status)
+}
+
+type batchTaskKind string
+
+const (
+	batchTaskKindScan       batchTaskKind = "scan"
+	batchTaskKindThumbnails batchTaskKind = "thumbnails"
+)
+
+func loadPersistedBatchStatus(profile *config.Profile, kind batchTaskKind, defaultExitAfter bool, idleMessage string) api.LibraryBatchBuildStatus {
+	if profile == nil {
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage, ExitAfterComplete: defaultExitAfter}
+	}
+	state := profile.BatchScan
+	if kind == batchTaskKindThumbnails {
+		state = profile.BatchThumbnails
+	}
+	status := batchTaskStateToAPI(state, profile.Libraries)
+	if strings.TrimSpace(status.Message) == "" {
+		status.Message = idleMessage
+	}
+	if strings.TrimSpace(status.Status) == "" {
+		status.Status = "idle"
+	}
+	if status.ExitAfterComplete == false && defaultExitAfter {
+		status.ExitAfterComplete = true
+	}
+	if len(status.SelectedPaths) == 0 {
+		status.SelectedPaths = defaultSelectedPaths(profile.Libraries)
+	}
+	return status
+}
+
+func defaultSelectedPaths(libraries []config.Library) []string {
+	selected := make([]string, 0, len(libraries))
+	for _, library := range libraries {
+		path := strings.TrimSpace(library.Path)
+		if path == "" {
+			continue
+		}
+		selected = append(selected, path)
+	}
+	return selected
+}
+
+func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library) api.LibraryBatchBuildStatus {
+	selected := normalizedSelectedLibraries(libraries, state.SelectedPaths)
+	rowsByPath := make(map[string]config.BatchTaskLibraryState, len(state.Libraries))
+	for _, row := range state.Libraries {
+		rowsByPath[strings.TrimSpace(row.Path)] = row
+	}
+	rows := make([]api.LibraryBatchBuildLibraryStatus, 0, len(selected))
+	completed := 0
+	failed := 0
+	for _, library := range selected {
+		row := rowsByPath[strings.TrimSpace(library.Path)]
+		item := api.LibraryBatchBuildLibraryStatus{
+			Name:      library.Name,
+			Path:      library.Path,
+			Status:    row.Status,
+			Message:   row.Message,
+			Imported:  row.Imported,
+			Skipped:   row.Skipped,
+			Pruned:    row.Pruned,
+			Generated: row.Generated,
+			Failed:    row.Failed,
+		}
+		if strings.TrimSpace(item.Status) == "" {
+			item.Status = "pending"
+			item.Message = "等待处理中"
+		}
+		if item.Status == "completed" {
+			completed++
+		}
+		if item.Status == "failed" {
+			failed++
+		}
+		rows = append(rows, item)
+	}
+	status := api.LibraryBatchBuildStatus{
+		Status:              state.Status,
+		Message:             state.Message,
+		SelectedPaths:       selectedPathsFromLibraries(selected),
+		CurrentLibraryName:  state.CurrentLibraryName,
+		CurrentLibraryPath:  state.CurrentLibraryPath,
+		CurrentLibraryIndex: state.CurrentLibraryIndex,
+		TotalLibraries:      len(selected),
+		CompletedLibraries:  completed,
+		FailedLibraries:     failed,
+		CurrentPhase:        state.CurrentPhase,
+		CurrentDone:         state.CurrentDone,
+		CurrentTotal:        state.CurrentTotal,
+		CurrentPercent:      state.CurrentPercent,
+		FastThumbnailBuild:  state.FastThumbnailBuild,
+		LowResourceMode:     state.LowResourceMode,
+		ExitAfterComplete:   state.ExitAfterComplete,
+		StartedAt:           state.StartedAt,
+		UpdatedAt:           state.UpdatedAt,
+		FinishedAt:          state.FinishedAt,
+		Libraries:           rows,
+		Error:               state.Error,
+	}
+	if strings.TrimSpace(status.Status) == "" {
+		status.Status = "idle"
+	}
+	return status
+}
+
+func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskState {
+	rows := make([]config.BatchTaskLibraryState, 0, len(status.Libraries))
+	for _, row := range status.Libraries {
+		rows = append(rows, config.BatchTaskLibraryState{
+			Name:      row.Name,
+			Path:      row.Path,
+			Status:    row.Status,
+			Message:   row.Message,
+			Imported:  row.Imported,
+			Skipped:   row.Skipped,
+			Pruned:    row.Pruned,
+			Generated: row.Generated,
+			Failed:    row.Failed,
+		})
+	}
+	return config.BatchTaskState{
+		SelectedPaths:       append([]string(nil), status.SelectedPaths...),
+		Status:              status.Status,
+		Message:             status.Message,
+		CurrentLibraryName:  status.CurrentLibraryName,
+		CurrentLibraryPath:  status.CurrentLibraryPath,
+		CurrentLibraryIndex: status.CurrentLibraryIndex,
+		TotalLibraries:      status.TotalLibraries,
+		CompletedLibraries:  status.CompletedLibraries,
+		FailedLibraries:     status.FailedLibraries,
+		CurrentPhase:        status.CurrentPhase,
+		CurrentDone:         status.CurrentDone,
+		CurrentTotal:        status.CurrentTotal,
+		CurrentPercent:      status.CurrentPercent,
+		FastThumbnailBuild:  status.FastThumbnailBuild,
+		LowResourceMode:     status.LowResourceMode,
+		ExitAfterComplete:   status.ExitAfterComplete,
+		StartedAt:           status.StartedAt,
+		UpdatedAt:           status.UpdatedAt,
+		FinishedAt:          status.FinishedAt,
+		Error:               status.Error,
+		Libraries:           rows,
+	}
+}
+
+func selectedPathsFromLibraries(libraries []config.Library) []string {
+	selected := make([]string, 0, len(libraries))
+	for _, library := range libraries {
+		path := strings.TrimSpace(library.Path)
+		if path == "" {
+			continue
+		}
+		selected = append(selected, path)
+	}
+	return selected
+}
+
+func normalizedSelectedLibraries(libraries []config.Library, selectedPaths []string) []config.Library {
+	if len(selectedPaths) == 0 {
+		return append([]config.Library(nil), libraries...)
+	}
+	allowed := make(map[string]struct{}, len(selectedPaths))
+	for _, path := range selectedPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		allowed[path] = struct{}{}
+	}
+	selected := make([]config.Library, 0, len(libraries))
+	for _, library := range libraries {
+		if _, ok := allowed[strings.TrimSpace(library.Path)]; ok {
+			selected = append(selected, library)
+		}
+	}
+	return selected
+}
+
+func saveBatchTaskState(cfg *config.Config, username string, kind batchTaskKind, status api.LibraryBatchBuildStatus) error {
+	if cfg == nil || strings.TrimSpace(username) == "" {
+		return nil
+	}
+	profile, err := config.EnsureProfile(cfg, username)
+	if err != nil {
+		return err
+	}
+	state := batchTaskAPIToState(status)
+	if kind == batchTaskKindScan {
+		profile.BatchScan = state
+	} else {
+		profile.BatchThumbnails = state
+	}
+	return config.SaveProfile(cfg, username, profile)
+}
+
+func saveBatchTaskSelection(cfg *config.Config, username string, kind batchTaskKind, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	profile, err := config.EnsureProfile(cfg, username)
+	if err != nil {
+		return api.LibraryBatchBuildStatus{}, err
+	}
+	selected := normalizedSelectedLibraries(profile.Libraries, selectedPathsFromRaw(selectedPaths))
+	selectedPaths = selectedPathsFromLibraries(selected)
+	current := loadPersistedBatchStatus(profile, kind, false, "")
+	current.SelectedPaths = append([]string(nil), selectedPaths...)
+	current.TotalLibraries = len(selectedPaths)
+	current.Libraries = filterBatchStatusLibraries(current.Libraries, selectedPaths, profile.Libraries)
+	current.CompletedLibraries = countBatchStatusWithState(current.Libraries, "completed")
+	current.FailedLibraries = countBatchStatusWithState(current.Libraries, "failed")
+	if kind == batchTaskKindScan {
+		profile.BatchScan = batchTaskAPIToState(current)
+	} else {
+		profile.BatchThumbnails = batchTaskAPIToState(current)
+	}
+	if err := config.SaveProfile(cfg, username, profile); err != nil {
+		return api.LibraryBatchBuildStatus{}, err
+	}
+	return current, nil
+}
+
+func selectedPathsFromRaw(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	return result
+}
+
+func filterBatchStatusLibraries(rows []api.LibraryBatchBuildLibraryStatus, selectedPaths []string, libraries []config.Library) []api.LibraryBatchBuildLibraryStatus {
+	byPath := make(map[string]api.LibraryBatchBuildLibraryStatus, len(rows))
+	for _, row := range rows {
+		byPath[strings.TrimSpace(row.Path)] = row
+	}
+	selected := normalizedSelectedLibraries(libraries, selectedPaths)
+	result := make([]api.LibraryBatchBuildLibraryStatus, 0, len(selected))
+	for _, library := range selected {
+		row, ok := byPath[strings.TrimSpace(library.Path)]
+		if !ok {
+			row = api.LibraryBatchBuildLibraryStatus{
+				Name:    library.Name,
+				Path:    library.Path,
+				Status:  "pending",
+				Message: "等待处理中",
+			}
+		}
+		row.Name = library.Name
+		row.Path = library.Path
+		result = append(result, row)
+	}
+	return result
+}
+
+func countBatchStatusWithState(rows []api.LibraryBatchBuildLibraryStatus, target string) int {
+	count := 0
+	for _, row := range rows {
+		if strings.TrimSpace(row.Status) == target {
+			count++
+		}
+	}
+	return count
+}
+
+func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus, libraries []config.Library, thumbnailMode bool) []api.LibraryBatchBuildLibraryStatus {
+	rows := filterBatchStatusLibraries(previous, selectedPathsFromLibraries(libraries), libraries)
+	allCompleted := len(rows) > 0
+	for _, row := range rows {
+		if row.Status != "completed" {
+			allCompleted = false
+			break
+		}
+	}
+	for index := range rows {
+		if allCompleted {
+			rows[index].Status = "pending"
+			rows[index].Message = "等待重新开始"
+			rows[index].Imported = 0
+			rows[index].Skipped = 0
+			rows[index].Pruned = 0
+			rows[index].Generated = 0
+			rows[index].Failed = 0
+			continue
+		}
+		if rows[index].Status == "completed" {
+			continue
+		}
+		rows[index].Status = "pending"
+		if thumbnailMode {
+			rows[index].Message = "等待继续缩略图任务"
+			rows[index].Generated = 0
+			rows[index].Skipped = 0
+		} else {
+			rows[index].Message = "等待继续扫描"
+			rows[index].Imported = 0
+			rows[index].Skipped = 0
+			rows[index].Pruned = 0
+		}
+		rows[index].Failed = 0
+	}
+	return rows
+}
+
+func (m *libraryBatchBuildManager) Status(profile *config.Profile, username string) api.LibraryBatchBuildStatus {
 	m.mu.Lock()
 	task := m.task
 	defaultExitAfter := m.defaultExitAfter
+	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务", ExitAfterComplete: defaultExitAfter}
+	if task != nil && task.username == username {
+		return task.snapshot()
 	}
-	return task.snapshot()
+	return loadPersistedBatchStatus(profile, batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, userID int64) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务"}, fmt.Errorf("批量构建参数无效")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量扫描参数无效")
 	}
-	libraries := append([]config.Library(nil), profile.Libraries...)
+	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
+	libraries := normalizedSelectedLibraries(profile.Libraries, selectedStatus.SelectedPaths)
 	if len(libraries) == 0 {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务"}, fmt.Errorf("当前没有可构建的资源库")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可扫描的资源库")
 	}
 	m.mu.Lock()
 	defaultExitAfter := m.defaultExitAfter
@@ -155,55 +506,195 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	task := newLibraryBatchBuildTask(libraries, profile.Preferences.FastThumbnailBuild, profile.Preferences.LowResourceMode, cancel)
+	task.username = username
+	task.idleMessage = m.idleMessage
+	task.persistFn = func(status api.LibraryBatchBuildStatus) {
+		_ = saveBatchTaskState(cfg, username, batchTaskKindScan, status)
+	}
+	task.status.Message = "正在准备批量扫描资源库…"
+	task.status.FastThumbnailBuild = false
 	task.status.ExitAfterComplete = defaultExitAfter
+	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false)
+	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
+	task.status.TotalLibraries = len(task.status.Libraries)
 	m.task = task
 	cfgSnapshot := *cfg
 	cfgSnapshot.ApplyProfile(profile)
 	m.mu.Unlock()
 
+	task.persist(true)
 	go m.run(ctx, task, &cfgSnapshot, userID)
 	return task.snapshot(), nil
 }
 
-func (m *libraryBatchBuildManager) Cancel() (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Cancel(cfg *config.Config, username string) (api.LibraryBatchBuildStatus, error) {
 	m.mu.Lock()
 	task := m.task
+	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务"}, nil
+	if task == nil || task.username != username {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
+		}
+		return loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, idleMessage), nil
 	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		if status.Status == "running" {
 			status.Status = "cancelling"
-			status.Message = "正在取消批量构建资源库…"
+			status.Message = "正在取消批量扫描资源库…"
 		}
 	})
+	task.persist(true)
 	if task.cancel != nil {
 		task.cancel()
 	}
 	return task.snapshot(), nil
 }
 
-func (m *libraryBatchBuildManager) SetExitAfterComplete(enabled bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) SetExitAfterComplete(cfg *config.Config, username string, enabled bool) (api.LibraryBatchBuildStatus, error) {
 	m.mu.Lock()
 	m.defaultExitAfter = enabled
 	task := m.task
+	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil {
-		return api.LibraryBatchBuildStatus{
-			Status:            "idle",
-			Message:           "当前没有批量构建任务",
-			ExitAfterComplete: enabled,
-		}, nil
+	if task == nil || task.username != username {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
+		}
+		status := loadPersistedBatchStatus(profile, batchTaskKindScan, enabled, idleMessage)
+		status.ExitAfterComplete = enabled
+		if err := saveBatchTaskState(cfg, username, batchTaskKindScan, status); err != nil {
+			return api.LibraryBatchBuildStatus{}, err
+		}
+		return status, nil
 	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.ExitAfterComplete = enabled
 	})
+	task.persist(true)
 	snapshot := task.snapshot()
 	if enabled && (snapshot.Status == "completed" || snapshot.Status == "failed" || snapshot.Status == "cancelled") && m.shutdownAfterDone != nil {
 		_ = m.shutdownAfterDone()
 	}
 	return snapshot, nil
+}
+
+func (m *libraryBatchBuildManager) SetSelection(cfg *config.Config, username string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	return saveBatchTaskSelection(cfg, username, batchTaskKindScan, selectedPaths)
+}
+
+func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, username string) api.LibraryBatchBuildStatus {
+	m.mu.Lock()
+	task := m.task
+	defaultExitAfter := m.defaultExitAfter
+	idleMessage := m.idleMessage
+	m.mu.Unlock()
+	if task != nil && task.username == username {
+		return task.snapshot()
+	}
+	return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, defaultExitAfter, idleMessage)
+}
+
+func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64) (api.LibraryBatchBuildStatus, error) {
+	if cfg == nil || profile == nil {
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量缩略图参数无效")
+	}
+	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
+	libraries := normalizedSelectedLibraries(profile.Libraries, selectedStatus.SelectedPaths)
+	if len(libraries) == 0 {
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可构建缩略图的资源库")
+	}
+	m.mu.Lock()
+	defaultExitAfter := m.defaultExitAfter
+	if m.task != nil {
+		current := m.task.snapshot()
+		if current.Status == "running" || current.Status == "cancelling" {
+			m.mu.Unlock()
+			return current, nil
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	task := newLibraryBatchBuildTask(libraries, profile.Preferences.FastThumbnailBuild, profile.Preferences.LowResourceMode, cancel)
+	task.username = username
+	task.idleMessage = m.idleMessage
+	task.persistFn = func(status api.LibraryBatchBuildStatus) {
+		_ = saveBatchTaskState(cfg, username, batchTaskKindThumbnails, status)
+	}
+	task.status.Message = "正在准备批量构建缩略图…"
+	task.status.ExitAfterComplete = defaultExitAfter
+	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true)
+	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
+	task.status.TotalLibraries = len(task.status.Libraries)
+	m.task = task
+	cfgSnapshot := *cfg
+	cfgSnapshot.ApplyProfile(profile)
+	m.mu.Unlock()
+
+	task.persist(true)
+	go m.run(ctx, task, &cfgSnapshot, userID)
+	return task.snapshot(), nil
+}
+
+func (m *libraryBatchThumbnailBuildManager) Cancel(cfg *config.Config, username string) (api.LibraryBatchBuildStatus, error) {
+	m.mu.Lock()
+	task := m.task
+	idleMessage := m.idleMessage
+	m.mu.Unlock()
+	if task == nil || task.username != username {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
+		}
+		return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, idleMessage), nil
+	}
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		if status.Status == "running" {
+			status.Status = "cancelling"
+			status.Message = "正在取消批量缩略图任务…"
+		}
+	})
+	task.persist(true)
+	if task.cancel != nil {
+		task.cancel()
+	}
+	return task.snapshot(), nil
+}
+
+func (m *libraryBatchThumbnailBuildManager) SetExitAfterComplete(cfg *config.Config, username string, enabled bool) (api.LibraryBatchBuildStatus, error) {
+	m.mu.Lock()
+	m.defaultExitAfter = enabled
+	task := m.task
+	idleMessage := m.idleMessage
+	m.mu.Unlock()
+	if task == nil || task.username != username {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
+		}
+		status := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, enabled, idleMessage)
+		status.ExitAfterComplete = enabled
+		if err := saveBatchTaskState(cfg, username, batchTaskKindThumbnails, status); err != nil {
+			return api.LibraryBatchBuildStatus{}, err
+		}
+		return status, nil
+	}
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.ExitAfterComplete = enabled
+	})
+	task.persist(true)
+	snapshot := task.snapshot()
+	if enabled && (snapshot.Status == "completed" || snapshot.Status == "failed" || snapshot.Status == "cancelled") && m.shutdownAfterDone != nil {
+		_ = m.shutdownAfterDone()
+	}
+	return snapshot, nil
+}
+
+func (m *libraryBatchThumbnailBuildManager) SetSelection(cfg *config.Config, username string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	return saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, selectedPaths)
 }
 
 func (m *libraryBatchBuildManager) clear(task *libraryBatchBuildTask) {
@@ -218,7 +709,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 	if cfg == nil {
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.Status = "failed"
-			status.Message = "批量构建失败"
+			status.Message = "批量扫描失败"
 			status.Error = "配置不可用"
 			status.FinishedAt = time.Now().Format(time.RFC3339)
 		})
@@ -227,36 +718,18 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
 
-	managedDataDir, err := cfg.ManagedDataDir()
+	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
 	if err != nil {
-		m.failTask(task, fmt.Errorf("计算媒体数据目录失败: %w", err))
-		return
-	}
-	trashDir, err := cfg.TrashPath()
-	if err != nil {
-		m.failTask(task, fmt.Errorf("计算回收站目录失败: %w", err))
-		return
-	}
-	thumbDir, err := cfg.ThumbnailStoragePath()
-	if err != nil {
-		m.failTask(task, fmt.Errorf("计算缩略图目录失败: %w", err))
-		return
-	}
-	if err := os.MkdirAll(managedDataDir, 0755); err != nil {
-		m.failTask(task, fmt.Errorf("创建媒体数据目录失败: %w", err))
-		return
-	}
-	if err := os.MkdirAll(trashDir, 0755); err != nil {
-		m.failTask(task, fmt.Errorf("创建回收站目录失败: %w", err))
-		return
-	}
-	if err := os.MkdirAll(thumbDir, 0755); err != nil {
-		m.failTask(task, fmt.Errorf("创建缩略图目录失败: %w", err))
+		m.failTask(task, err)
 		return
 	}
 
-	libraries := append([]config.Library(nil), cfg.Libraries...)
+	libraries := normalizedSelectedLibraries(cfg.Libraries, task.snapshot().SelectedPaths)
 	for index, library := range libraries {
+		snapshot := task.snapshot()
+		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
+			continue
+		}
 		if ctx.Err() != nil {
 			m.cancelTask(task, index)
 			return
@@ -266,24 +739,11 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
 			continue
 		}
-		dbPath, err := cfg.DatabasePathForStorage(library.Path)
+		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
 		if err != nil {
-			m.failLibrary(task, index, fmt.Errorf("计算数据库路径失败: %w", err))
+			m.failLibrary(task, index, err)
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-			m.failLibrary(task, index, fmt.Errorf("创建数据库目录失败: %w", err))
-			continue
-		}
-		repo, err := sqlite.New(dbPath)
-		if err != nil {
-			m.failLibrary(task, index, fmt.Errorf("打开数据库失败: %w", err))
-			continue
-		}
-
-		svc := service.NewPhotoServiceWithoutWarmup(repo, library.Path, managedDataDir, trashDir)
-		svc.SetThumbnailRoot(thumbDir)
-		svc.SetThumbnailSize(cfg.ThumbnailSize)
 
 		summary, err := svc.ImportExistingPhotosContext(ctx, userID, func(done, total int) {
 			task.mutate(func(status *api.LibraryBatchBuildStatus) {
@@ -302,6 +762,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 				status.Libraries[index].Status = "scanning"
 				status.Libraries[index].Message = fmt.Sprintf("扫描中 %d / %d", done, total)
 			})
+			task.persist(false)
 		})
 		if err != nil {
 			_ = repo.Close()
@@ -312,19 +773,136 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.failLibrary(task, index, fmt.Errorf("扫描资源库失败: %w", err))
 			continue
 		}
-
+		_ = repo.Close()
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
+			status.CompletedLibraries++
+			status.Libraries[index].Status = "completed"
 			status.Libraries[index].Imported = summary.Imported
 			status.Libraries[index].Skipped = summary.Skipped
 			status.Libraries[index].Pruned = summary.Pruned
-			status.Libraries[index].Status = "building"
-			status.Libraries[index].Message = "正在生成缩略图"
-			status.Message = fmt.Sprintf("正在为资源库 %s 生成缩略图", library.Name)
-			status.CurrentPhase = "thumbnails"
-			status.CurrentDone = 0
-			status.CurrentTotal = 0
-			status.CurrentPercent = 0
+			status.Libraries[index].Message = fmt.Sprintf("扫描完成：导入 %d，清理 %d", summary.Imported, summary.Pruned)
+			status.Message = fmt.Sprintf("资源库 %s 扫描完成", library.Name)
 		})
+		task.persist(true)
+	}
+
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentPhase = ""
+		status.CurrentDone = 0
+		status.CurrentTotal = 0
+		status.CurrentPercent = 0
+		if status.FailedLibraries > 0 {
+			status.Status = "completed"
+			status.Message = fmt.Sprintf("批量扫描完成，%d 个资源库成功，%d 个失败", status.CompletedLibraries, status.FailedLibraries)
+			return
+		}
+		status.Status = "completed"
+		status.Message = fmt.Sprintf("批量扫描完成，已处理 %d 个资源库", status.CompletedLibraries)
+	})
+	task.persist(true)
+	if snapshot := task.snapshot(); snapshot.ExitAfterComplete && m.shutdownAfterDone != nil {
+		_ = m.shutdownAfterDone()
+	}
+}
+
+func (m *libraryBatchBuildManager) failTask(task *libraryBatchBuildTask, err error) {
+	message := "批量扫描失败"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = err.Error()
+	}
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.Status = "failed"
+		status.Message = "批量扫描失败"
+		status.Error = message
+		status.FinishedAt = time.Now().Format(time.RFC3339)
+	})
+	task.persist(true)
+}
+
+func (m *libraryBatchBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+		status.CurrentLibraryIndex = index + 1
+		status.CurrentLibraryName = library.Name
+		status.CurrentLibraryPath = library.Path
+		status.CurrentPhase = "scan"
+		status.CurrentDone = 0
+		status.CurrentTotal = 0
+		status.CurrentPercent = 0
+		status.Libraries[index].Status = "scanning"
+		status.Libraries[index].Message = "正在扫描媒体"
+	})
+	task.persist(true)
+}
+
+func (m *libraryBatchBuildManager) failLibrary(task *libraryBatchBuildTask, index int, err error) {
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.FailedLibraries++
+		status.Libraries[index].Status = "failed"
+		status.Libraries[index].Message = strings.TrimSpace(err.Error())
+		status.Libraries[index].Failed++
+		status.Message = fmt.Sprintf("资源库 %s 扫描失败，继续处理下一个", status.Libraries[index].Name)
+		status.CurrentPhase = ""
+	})
+	task.persist(true)
+}
+
+func (m *libraryBatchBuildManager) cancelTask(task *libraryBatchBuildTask, currentIndex int) {
+	task.mutate(func(status *api.LibraryBatchBuildStatus) {
+		status.Status = "cancelled"
+		status.Message = "已取消批量扫描资源库"
+		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentPhase = ""
+		if currentIndex >= 0 && currentIndex < len(status.Libraries) {
+			if status.Libraries[currentIndex].Status == "scanning" || status.Libraries[currentIndex].Status == "building" {
+				status.Libraries[currentIndex].Status = "cancelled"
+				status.Libraries[currentIndex].Message = "已取消"
+			}
+		}
+	})
+	task.persist(true)
+}
+
+func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libraryBatchBuildTask, cfg *config.Config, userID int64) {
+	if cfg == nil {
+		task.mutate(func(status *api.LibraryBatchBuildStatus) {
+			status.Status = "failed"
+			status.Message = "批量缩略图构建失败"
+			status.Error = "配置不可用"
+			status.FinishedAt = time.Now().Format(time.RFC3339)
+		})
+		return
+	}
+
+	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
+
+	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
+	if err != nil {
+		m.failTask(task, err)
+		return
+	}
+
+	libraries := normalizedSelectedLibraries(cfg.Libraries, task.snapshot().SelectedPaths)
+	for index, library := range libraries {
+		snapshot := task.snapshot()
+		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
+			continue
+		}
+		if ctx.Err() != nil {
+			m.cancelTask(task, index)
+			return
+		}
+		m.beginLibrary(task, index, library)
+		if err := os.MkdirAll(library.Path, 0755); err != nil {
+			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
+			continue
+		}
+		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
+		if err != nil {
+			m.failLibrary(task, index, err)
+			continue
+		}
 
 		if _, err := svc.StartThumbnailBuild(userID, cfg.Preferences.FastThumbnailBuild); err != nil {
 			_ = repo.Close()
@@ -332,7 +910,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			continue
 		}
 
-		thumbStatus, cancelled := waitThumbnailBuildTask(ctx, svc, task, index, library, userID)
+		thumbStatus, cancelled := waitThumbnailBuildTask(ctx, svc, task, index, library, userID, "正在为资源库 %s 构建缩略图")
 		_ = repo.Close()
 		if cancelled {
 			m.cancelTask(task, index)
@@ -349,75 +927,84 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.CompletedLibraries++
 			status.Libraries[index].Generated = thumbStatus.Generated
+			status.Libraries[index].Skipped = thumbStatus.Skipped
 			status.Libraries[index].Failed = thumbStatus.Failed
 			status.Libraries[index].Status = "completed"
 			status.Libraries[index].Message = thumbStatus.Message
-			status.Message = fmt.Sprintf("资源库 %s 构建完成", library.Name)
+			status.Message = fmt.Sprintf("资源库 %s 缩略图构建完成", library.Name)
 			status.CurrentDone = thumbStatus.Done
 			status.CurrentTotal = thumbStatus.Total
 			status.CurrentPercent = thumbStatus.Percent
 		})
+		task.persist(true)
 	}
 
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.FinishedAt = time.Now().Format(time.RFC3339)
 		status.CurrentPhase = ""
+		status.CurrentDone = 0
+		status.CurrentTotal = 0
+		status.CurrentPercent = 0
 		if status.FailedLibraries > 0 {
 			status.Status = "completed"
-			status.Message = fmt.Sprintf("批量构建完成，%d 个资源库成功，%d 个失败", status.CompletedLibraries, status.FailedLibraries)
+			status.Message = fmt.Sprintf("批量缩略图构建完成，%d 个资源库成功，%d 个失败", status.CompletedLibraries, status.FailedLibraries)
 			return
 		}
 		status.Status = "completed"
-		status.Message = fmt.Sprintf("批量构建完成，已处理 %d 个资源库", status.CompletedLibraries)
+		status.Message = fmt.Sprintf("批量缩略图构建完成，已处理 %d 个资源库", status.CompletedLibraries)
 	})
+	task.persist(true)
 	if snapshot := task.snapshot(); snapshot.ExitAfterComplete && m.shutdownAfterDone != nil {
 		_ = m.shutdownAfterDone()
 	}
 }
 
-func (m *libraryBatchBuildManager) failTask(task *libraryBatchBuildTask, err error) {
-	message := "批量构建失败"
+func (m *libraryBatchThumbnailBuildManager) failTask(task *libraryBatchBuildTask, err error) {
+	message := "批量缩略图构建失败"
 	if err != nil && strings.TrimSpace(err.Error()) != "" {
 		message = err.Error()
 	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.Status = "failed"
-		status.Message = "批量构建失败"
+		status.Message = "批量缩略图构建失败"
 		status.Error = message
 		status.FinishedAt = time.Now().Format(time.RFC3339)
 	})
+	task.persist(true)
 }
 
-func (m *libraryBatchBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
+func (m *libraryBatchThumbnailBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
-		status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+		status.Message = fmt.Sprintf("正在为资源库 %s 构建缩略图", library.Name)
 		status.CurrentLibraryIndex = index + 1
 		status.CurrentLibraryName = library.Name
 		status.CurrentLibraryPath = library.Path
-		status.CurrentPhase = "scan"
+		status.CurrentPhase = "thumbnails"
 		status.CurrentDone = 0
 		status.CurrentTotal = 0
 		status.CurrentPercent = 0
-		status.Libraries[index].Status = "scanning"
-		status.Libraries[index].Message = "正在扫描媒体"
+		status.Libraries[index].Status = "building"
+		status.Libraries[index].Message = "正在准备缩略图任务"
 	})
+	task.persist(true)
 }
 
-func (m *libraryBatchBuildManager) failLibrary(task *libraryBatchBuildTask, index int, err error) {
+func (m *libraryBatchThumbnailBuildManager) failLibrary(task *libraryBatchBuildTask, index int, err error) {
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.FailedLibraries++
 		status.Libraries[index].Status = "failed"
 		status.Libraries[index].Message = strings.TrimSpace(err.Error())
 		status.Libraries[index].Failed++
-		status.Message = fmt.Sprintf("资源库 %s 构建失败，继续处理下一个", status.Libraries[index].Name)
+		status.Message = fmt.Sprintf("资源库 %s 缩略图构建失败，继续处理下一个", status.Libraries[index].Name)
 		status.CurrentPhase = ""
 	})
+	task.persist(true)
 }
 
-func (m *libraryBatchBuildManager) cancelTask(task *libraryBatchBuildTask, currentIndex int) {
+func (m *libraryBatchThumbnailBuildManager) cancelTask(task *libraryBatchBuildTask, currentIndex int) {
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.Status = "cancelled"
-		status.Message = "已取消批量构建资源库"
+		status.Message = "已取消批量缩略图任务"
 		status.FinishedAt = time.Now().Format(time.RFC3339)
 		status.CurrentPhase = ""
 		if currentIndex >= 0 && currentIndex < len(status.Libraries) {
@@ -427,9 +1014,53 @@ func (m *libraryBatchBuildManager) cancelTask(task *libraryBatchBuildTask, curre
 			}
 		}
 	})
+	task.persist(true)
 }
 
-func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task *libraryBatchBuildTask, index int, library config.Library, userID int64) (service.ThumbnailBuildStatus, bool) {
+func prepareLibraryBatchPaths(cfg *config.Config) (string, string, string, error) {
+	managedDataDir, err := cfg.ManagedDataDir()
+	if err != nil {
+		return "", "", "", fmt.Errorf("计算媒体数据目录失败: %w", err)
+	}
+	trashDir, err := cfg.TrashPath()
+	if err != nil {
+		return "", "", "", fmt.Errorf("计算回收站目录失败: %w", err)
+	}
+	thumbDir, err := cfg.ThumbnailStoragePath()
+	if err != nil {
+		return "", "", "", fmt.Errorf("计算缩略图目录失败: %w", err)
+	}
+	if err := os.MkdirAll(managedDataDir, 0755); err != nil {
+		return "", "", "", fmt.Errorf("创建媒体数据目录失败: %w", err)
+	}
+	if err := os.MkdirAll(trashDir, 0755); err != nil {
+		return "", "", "", fmt.Errorf("创建回收站目录失败: %w", err)
+	}
+	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+		return "", "", "", fmt.Errorf("创建缩略图目录失败: %w", err)
+	}
+	return managedDataDir, trashDir, thumbDir, nil
+}
+
+func openBatchLibraryService(cfg *config.Config, library config.Library, managedDataDir, trashDir, thumbDir string) (*sqlite.DB, *service.PhotoService, error) {
+	dbPath, err := cfg.DatabasePathForStorage(library.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("计算数据库路径失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		return nil, nil, fmt.Errorf("创建数据库目录失败: %w", err)
+	}
+	repo, err := sqlite.New(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("打开数据库失败: %w", err)
+	}
+	svc := service.NewPhotoServiceWithoutWarmup(repo, library.Path, managedDataDir, trashDir)
+	svc.SetThumbnailRoot(thumbDir)
+	svc.SetThumbnailSize(cfg.ThumbnailSize)
+	return repo, svc, nil
+}
+
+func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task *libraryBatchBuildTask, index int, library config.Library, userID int64, messagePattern string) (service.ThumbnailBuildStatus, bool) {
 	ticker := time.NewTicker(350 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -443,12 +1074,14 @@ func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task
 			batch.CurrentDone = status.Done
 			batch.CurrentTotal = status.Total
 			batch.CurrentPercent = status.Percent
-			batch.Message = fmt.Sprintf("正在为资源库 %s 生成缩略图", library.Name)
+			batch.Message = fmt.Sprintf(messagePattern, library.Name)
 			batch.Libraries[index].Generated = status.Generated
+			batch.Libraries[index].Skipped = status.Skipped
 			batch.Libraries[index].Failed = status.Failed
 			batch.Libraries[index].Status = "building"
 			batch.Libraries[index].Message = status.Message
 		})
+		task.persist(false)
 		switch status.Status {
 		case "completed", "failed", "cancelled":
 			return status, false
@@ -757,6 +1390,7 @@ func main() {
 
 	buildState := newLibraryBuildState(shutdownCurrentProcess)
 	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess)
+	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess)
 	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
@@ -776,6 +1410,11 @@ func main() {
 		Start:                batchBuildManager.Start,
 		Cancel:               batchBuildManager.Cancel,
 		SetExitAfterComplete: batchBuildManager.SetExitAfterComplete,
+	}, api.LibraryBatchThumbnailBuildHooks{
+		Status:               batchThumbnailBuildManager.Status,
+		Start:                batchThumbnailBuildManager.Start,
+		Cancel:               batchThumbnailBuildManager.Cancel,
+		SetExitAfterComplete: batchThumbnailBuildManager.SetExitAfterComplete,
 	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {

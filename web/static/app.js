@@ -83,13 +83,21 @@ const COPY_DEFAULTS = {
       prunedLabel: '已清理失效媒体',
       exitAfterComplete: '构建完成后自动退出应用',
     },
-    libraryBatchBuild: {
-      title: '正在批量构建资源库',
-      cancel: '取消批量构建',
+    libraryBatchScan: {
+      title: '正在批量扫描资源库',
+      cancel: '取消批量扫描',
       cancelling: '正在取消…',
-      completed: '批量构建已完成',
-      cancelled: '已取消批量构建资源库',
-      failed: '批量构建失败',
+      completed: '批量扫描已完成',
+      cancelled: '已取消批量扫描资源库',
+      failed: '批量扫描失败',
+    },
+    libraryBatchThumbnail: {
+      title: '正在批量构建缩略图',
+      cancel: '取消批量缩略图',
+      cancelling: '正在取消…',
+      completed: '批量缩略图构建已完成',
+      cancelled: '已取消批量缩略图任务',
+      failed: '批量缩略图构建失败',
     },
     randomAlbum: {
       blockingTitle: '正在加载全部乱序相册媒体',
@@ -2463,6 +2471,24 @@ async function cancelLibraryBatchBuild() {
 async function setLibraryBatchBuildExitAfterComplete(enabled) {
   return api.put('/api/settings/libraries/build-all/exit-after-complete', { enabled });
 }
+async function setLibraryBatchBuildSelection(selectedPaths) {
+  return api.put('/api/settings/libraries/build-all/selection', { selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [] });
+}
+async function fetchLibraryBatchThumbnailBuildStatus() {
+  return api.get('/api/settings/libraries/thumbnails/build-all');
+}
+async function startLibraryBatchThumbnailBuild() {
+  return api.post('/api/settings/libraries/thumbnails/build-all', {});
+}
+async function cancelLibraryBatchThumbnailBuild() {
+  return api.del('/api/settings/libraries/thumbnails/build-all');
+}
+async function setLibraryBatchThumbnailBuildExitAfterComplete(enabled) {
+  return api.put('/api/settings/libraries/thumbnails/build-all/exit-after-complete', { enabled });
+}
+async function setLibraryBatchThumbnailBuildSelection(selectedPaths) {
+  return api.put('/api/settings/libraries/thumbnails/build-all/selection', { selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [] });
+}
 function applyServerSettings(data = {}) {
   state.serverSettings.port = Number(data.port) || 8080;
   state.serverSettings.storage_path = data.storage_path || '';
@@ -3019,9 +3045,12 @@ const state = {
   autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
-  libraryBatchBuildStatus: { status: 'idle', message: '当前没有批量构建任务' },
+  libraryBatchBuildStatus: { status: 'idle', message: '当前没有批量扫描任务' },
   libraryBatchBuildPollTimer: null,
   libraryBatchBuildCancelPending: false,
+  libraryBatchThumbnailBuildStatus: { status: 'idle', message: '当前没有批量缩略图任务' },
+  libraryBatchThumbnailBuildPollTimer: null,
+  libraryBatchThumbnailBuildCancelPending: false,
   thumbnailBuildStatus: { status: 'idle', message: '当前没有缩略图任务' },
   thumbnailBuildPollTimer: null,
   thumbnailBuildCancelPending: false,
@@ -3153,6 +3182,13 @@ function stopLibraryBatchBuildPolling() {
   }
 }
 
+function stopLibraryBatchThumbnailBuildPolling() {
+  if (state.libraryBatchThumbnailBuildPollTimer) {
+    clearTimeout(state.libraryBatchThumbnailBuildPollTimer);
+    state.libraryBatchThumbnailBuildPollTimer = null;
+  }
+}
+
 function stopVideoThumbnailRefreshPolling() {
   if (state.videoThumbnailRefreshPollTimer) {
     clearTimeout(state.videoThumbnailRefreshPollTimer);
@@ -3249,45 +3285,13 @@ function isLibraryBatchBuildActive(status = state.libraryBatchBuildStatus) {
   return value === 'running' || value === 'cancelling';
 }
 
-function formatLibraryBatchBuildDetail(status = state.libraryBatchBuildStatus) {
-  const current = Math.max(0, Number(status && status.current_library_index) || 0);
-  const totalLibraries = Math.max(0, Number(status && status.total_libraries) || 0);
-  const currentDone = Math.max(0, Number(status && status.current_done) || 0);
-  const currentTotal = Math.max(0, Number(status && status.current_total) || 0);
-  const completed = Math.max(0, Number(status && status.completed_libraries) || 0);
-  const failed = Math.max(0, Number(status && status.failed_libraries) || 0);
-  const currentLibrary = String(status && status.current_library_name || '').trim();
-  const phase = status && status.current_phase === 'thumbnails' ? '缩略图' : '扫描';
-  const parts = [
-    status && status.message ? status.message : copyText('app.libraryBatchBuild.title', '正在批量构建资源库'),
-    totalLibraries > 0 ? `资源库 ${current} / ${totalLibraries}` : '准备中',
-  ];
-  if (currentLibrary) parts.push(currentLibrary);
-  if (currentTotal > 0) parts.push(`${phase} ${currentDone} / ${currentTotal}`);
-  if (completed > 0) parts.push(`已完成 ${completed}`);
-  if (failed > 0) parts.push(`失败 ${failed}`);
-  if (status && status.low_resource_mode) parts.push('低资源模式');
-  return parts.join(' · ');
+function syncLibraryBatchBuildOverlay(status = state.libraryBatchBuildStatus) {
+  return status;
 }
 
-function syncLibraryBatchBuildOverlay(status = state.libraryBatchBuildStatus) {
-  if (!isLibraryBatchBuildActive(status)) {
-    hideBlockingProgress();
-    return;
-  }
-  showBlockingProgress(copyText('app.libraryBatchBuild.title', '正在批量构建资源库'), formatLibraryBatchBuildDetail(status), {
-    cancelText: state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchBuild.cancelling', '正在取消…') : copyText('app.libraryBatchBuild.cancel', '取消批量构建'),
-    onCancel: () => {
-      if (state.libraryBatchBuildCancelPending) return;
-      state.libraryBatchBuildCancelPending = true;
-      updateBlockingProgress('正在发送取消请求…');
-      void cancelLibraryBatchBuild().catch(e => {
-        state.libraryBatchBuildCancelPending = false;
-        updateBlockingProgress('取消失败，请稍后重试');
-        console.error('取消批量构建任务失败', e);
-      });
-    },
-  });
+function isLibraryBatchThumbnailBuildActive(status = state.libraryBatchThumbnailBuildStatus) {
+  const value = String(status && status.status || '');
+  return value === 'running' || value === 'cancelling';
 }
 
 async function pollThumbnailBuildStatus() {
@@ -3360,30 +3364,64 @@ async function pollLibraryBatchBuildStatus() {
   try {
     const status = await fetchLibraryBatchBuildStatus();
     const previous = state.libraryBatchBuildStatus || {};
-    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量构建任务' };
+    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量扫描任务' };
     if (state.libraryBatchBuildStatus.status !== 'cancelling') {
       state.libraryBatchBuildCancelPending = false;
     }
-    syncLibraryBatchBuildOverlay(state.libraryBatchBuildStatus);
-    if (state.view === 'settings') syncLibraryBatchBuildPanel();
+    if (state.view === 'settings') {
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
     if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
       state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 600);
       return;
     }
     if (previous.status === 'running' || previous.status === 'cancelling') {
       if (state.libraryBatchBuildStatus.status === 'completed') {
-        showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchBuild.completed', '批量构建已完成'), 3600);
+        showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed', '批量扫描已完成'), 3600);
       } else if (state.libraryBatchBuildStatus.status === 'cancelled') {
-        showToast(copyText('app.libraryBatchBuild.cancelled', '已取消批量构建资源库'), 3200);
+        showToast(copyText('app.libraryBatchScan.cancelled', '已取消批量扫描资源库'), 3200);
       } else if (state.libraryBatchBuildStatus.status === 'failed') {
-        showToast(copyText('app.libraryBatchBuild.failed', '批量构建失败'), 3200);
+        showToast(copyText('app.libraryBatchScan.failed', '批量扫描失败'), 3200);
       }
       if (state.view === 'settings') renderSettingsContent();
     }
   } catch (e) {
-    console.error('获取批量构建任务状态失败', e);
-    hideBlockingProgress();
+    console.error('获取批量扫描任务状态失败', e);
     state.libraryBatchBuildCancelPending = false;
+  }
+}
+
+async function pollLibraryBatchThumbnailBuildStatus() {
+  stopLibraryBatchThumbnailBuildPolling();
+  try {
+    const status = await fetchLibraryBatchThumbnailBuildStatus();
+    const previous = state.libraryBatchThumbnailBuildStatus || {};
+    state.libraryBatchThumbnailBuildStatus = status || { status: 'idle', message: '当前没有批量缩略图任务' };
+    if (state.libraryBatchThumbnailBuildStatus.status !== 'cancelling') {
+      state.libraryBatchThumbnailBuildCancelPending = false;
+    }
+    if (state.view === 'settings') {
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
+    if (isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus)) {
+      state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 600);
+      return;
+    }
+    if (previous.status === 'running' || previous.status === 'cancelling') {
+      if (state.libraryBatchThumbnailBuildStatus.status === 'completed') {
+        showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed', '批量缩略图构建已完成'), 3600);
+      } else if (state.libraryBatchThumbnailBuildStatus.status === 'cancelled') {
+        showToast(copyText('app.libraryBatchThumbnail.cancelled', '已取消批量缩略图任务'), 3200);
+      } else if (state.libraryBatchThumbnailBuildStatus.status === 'failed') {
+        showToast(copyText('app.libraryBatchThumbnail.failed', '批量缩略图构建失败'), 3200);
+      }
+      if (state.view === 'settings') renderSettingsContent();
+    }
+  } catch (e) {
+    console.error('获取批量缩略图任务状态失败', e);
+    state.libraryBatchThumbnailBuildCancelPending = false;
   }
 }
 
@@ -3425,18 +3463,40 @@ async function openThumbnailBuildWorkflow() {
 async function openLibraryBatchBuildWorkflow() {
   try {
     const status = await startLibraryBatchBuild();
-    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量构建任务' };
+    state.libraryBatchBuildStatus = status || { status: 'idle', message: '当前没有批量扫描任务' };
     state.libraryBatchBuildCancelPending = false;
-    syncLibraryBatchBuildOverlay(state.libraryBatchBuildStatus);
-    if (state.view === 'settings') syncLibraryBatchBuildPanel();
+    if (state.view === 'settings') {
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
     if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
       stopLibraryBatchBuildPolling();
       state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 300);
     } else if (state.libraryBatchBuildStatus.status === 'completed') {
-      showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchBuild.completed', '批量构建已完成'));
+      showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed', '批量扫描已完成'));
     }
   } catch (e) {
-    alert('批量构建资源库失败: ' + ((e && e.error) || e));
+    alert('批量扫描资源库失败: ' + ((e && e.error) || e));
+  }
+}
+
+async function openLibraryBatchThumbnailBuildWorkflow() {
+  try {
+    const status = await startLibraryBatchThumbnailBuild();
+    state.libraryBatchThumbnailBuildStatus = status || { status: 'idle', message: '当前没有批量缩略图任务' };
+    state.libraryBatchThumbnailBuildCancelPending = false;
+    if (state.view === 'settings') {
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
+    if (isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus)) {
+      stopLibraryBatchThumbnailBuildPolling();
+      state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
+    } else if (state.libraryBatchThumbnailBuildStatus.status === 'completed') {
+      showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed', '批量缩略图构建已完成'));
+    }
+  } catch (e) {
+    alert('批量构建全部资源库缩略图失败: ' + ((e && e.error) || e));
   }
 }
 
@@ -3599,6 +3659,7 @@ ${renderLibraryLogoGuideModal()}`;
   ensureSettingsDataLoaded();
   startLibraryBuildPolling();
   void pollLibraryBatchBuildStatus();
+  void pollLibraryBatchThumbnailBuildStatus();
   renderView();
 }
 
@@ -4848,10 +4909,68 @@ function libraryBatchBuildStatusLabel(status) {
   }
 }
 
+function libraryBatchSelectedSet(status) {
+  return new Set(Array.isArray(status && status.selected_paths) ? status.selected_paths.map(path => String(path || '').trim()).filter(Boolean) : []);
+}
+
+function libraryBatchCanResume(status) {
+  const rows = Array.isArray(status && status.libraries) ? status.libraries : [];
+  if (!rows.length) return false;
+  const hasCompleted = rows.some(row => String(row.status || '') === 'completed');
+  const hasPendingWork = rows.some(row => String(row.status || '') !== 'completed');
+  return hasCompleted && hasPendingWork;
+}
+
+function renderLibraryBatchSelectionRows(status, inputName) {
+  const selected = libraryBatchSelectedSet(status);
+  const rows = Array.isArray(status && status.libraries) ? status.libraries : [];
+  if (!rows.length) return '<div class="settings-batch-build-empty">当前没有可选资源库。</div>';
+  return rows.map((library, index) => {
+    const checked = selected.size ? selected.has(String(library.path || '').trim()) : true;
+    return `<label class="settings-batch-build-select-row">
+      <span class="settings-toggle-switch settings-batch-build-checkbox">
+        <input type="checkbox" name="${escapeHTML(inputName)}" value="${escapeHTML(library.path || '')}" ${checked ? 'checked' : ''}>
+        <span class="settings-toggle-slider" aria-hidden="true"></span>
+      </span>
+      <span class="settings-batch-build-select-copy">
+        <strong>${escapeHTML(library.name || `资源库 ${index + 1}`)}</strong>
+        <span>${escapeHTML(library.path || '')}</span>
+      </span>
+    </label>`;
+  }).join('');
+}
+
+function renderLibraryBatchTaskProgress(status, idleLabel) {
+  const current = Math.max(0, Number(status && status.current_library_index) || 0);
+  const totalLibraries = Math.max(0, Number(status && status.total_libraries) || 0);
+  const currentDone = Math.max(0, Number(status && status.current_done) || 0);
+  const currentTotal = Math.max(0, Number(status && status.current_total) || 0);
+  const completed = Math.max(0, Number(status && status.completed_libraries) || 0);
+  const failed = Math.max(0, Number(status && status.failed_libraries) || 0);
+  const currentLibrary = String(status && status.current_library_name || '').trim();
+  const phase = status && status.current_phase === 'thumbnails' ? '缩略图' : '扫描';
+  const parts = [];
+  if (currentLibrary) parts.push(`当前：${currentLibrary}`);
+  if (totalLibraries > 0) parts.push(`资源库 ${current} / ${totalLibraries}`);
+  if (currentTotal > 0) {
+    parts.push(`${phase} ${currentDone} / ${currentTotal}`);
+  } else if (currentLibrary) {
+    parts.push(phase);
+  } else if (idleLabel) {
+    parts.push(idleLabel);
+  }
+  parts.push(`完成 ${completed}`);
+  if (failed > 0) parts.push(`失败 ${failed}`);
+  if (status && status.low_resource_mode) parts.push('低资源模式');
+  return parts.join(' · ');
+}
+
 function renderLibraryBatchBuildPanel() {
   const status = state.libraryBatchBuildStatus || {};
   const libraries = Array.isArray(status.libraries) ? status.libraries : [];
   const active = isLibraryBatchBuildActive(status);
+  const otherActive = isLibraryBatchThumbnailBuildActive();
+  const canResume = libraryBatchCanResume(status);
   const currentName = String(status.current_library_name || '').trim();
   const summary = [
     `总计 ${Math.max(0, Number(status.total_libraries) || libraries.length || 0)}`,
@@ -4863,7 +4982,7 @@ function renderLibraryBatchBuildPanel() {
     const current = currentName && currentName === String(library.name || '').trim();
     const detailParts = [];
     if (Number(library.imported) > 0) detailParts.push(`导入 ${Number(library.imported)}`);
-    if (Number(library.generated) > 0) detailParts.push(`缩略图 ${Number(library.generated)}`);
+    if (Number(library.skipped) > 0) detailParts.push(`跳过 ${Number(library.skipped)}`);
     if (Number(library.pruned) > 0) detailParts.push(`清理 ${Number(library.pruned)}`);
     if (Number(library.failed) > 0) detailParts.push(`失败 ${Number(library.failed)}`);
     const meta = detailParts.length ? detailParts.join(' · ') : (library.message || library.path || '');
@@ -4874,18 +4993,24 @@ function renderLibraryBatchBuildPanel() {
       </div>
       <em>${escapeHTML(libraryBatchBuildStatusLabel(rowStatus))}</em>
     </div>`;
-  }).join('') : '<div class="settings-batch-build-empty">当前没有批量构建记录。</div>';
+  }).join('') : '<div class="settings-batch-build-empty">当前没有批量扫描记录。</div>';
+  const progressPercent = Math.max(0, Math.min(100, Number(status.current_percent) || 0));
   return `<div class="settings-batch-build-panel">
     <div class="settings-batch-build-head">
       <div>
-        <strong>${escapeHTML(status.message || '批量构建全部资源库')}</strong>
+        <strong>${escapeHTML(status.message || '批量扫描全部资源库')}</strong>
         <span>${escapeHTML(summary)}</span>
       </div>
       <span class="settings-batch-build-badge ${active ? 'active' : ''}">${escapeHTML(active ? '运行中' : libraryBatchBuildStatusLabel(status.status || 'idle'))}</span>
     </div>
     <div class="settings-batch-build-meta">
-      <span>${escapeHTML(currentName ? `当前：${currentName}` : '可在夜间挂机顺序处理全部资源库')}</span>
+      <span>${escapeHTML(renderLibraryBatchTaskProgress(status, '顺序扫描全部资源库'))}</span>
       <span>${escapeHTML(status.low_resource_mode ? '低资源模式已开启' : '标准资源模式')}</span>
+    </div>
+    <div class="settings-batch-build-progress"><span style="width:${progressPercent}%"></span></div>
+    <div class="settings-batch-build-selection">
+      <strong>批量扫描范围</strong>
+      <div class="settings-batch-build-selection-list">${renderLibraryBatchSelectionRows(status, 'settings-library-batch-build-selection')}</div>
     </div>
     <label class="settings-batch-build-exit">
       <input id="settings-library-batch-build-exit" type="checkbox" ${status.exit_after_complete ? 'checked' : ''}>
@@ -4893,12 +5018,12 @@ function renderLibraryBatchBuildPanel() {
     </label>
     <div class="settings-batch-build-list">${list}</div>
     <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-build-all-libraries-btn" type="button">${active ? '批量构建进行中' : '批量构建全部资源库'}</button>
-      <button class="btn" id="settings-cancel-all-libraries-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchBuild.cancelling', '正在取消…') : copyText('app.libraryBatchBuild.cancel', '取消批量构建')}</button>
+      <button class="btn" id="settings-build-all-libraries-btn" type="button" ${(active || otherActive) ? 'disabled' : ''}>${active ? '批量扫描进行中' : (canResume ? '继续批量扫描' : '批量扫描全部资源库')}</button>
+      <button class="btn" id="settings-cancel-all-libraries-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchScan.cancelling', '正在取消…') : copyText('app.libraryBatchScan.cancel', '取消批量扫描')}</button>
     </div>
     <div class="settings-static settings-batch-build-note">
       <strong>失败处理</strong>
-      <span>若某个资源库失败，会自动跳过并继续处理下一个资源库，适合长时间挂机。</span>
+      <span>现在只负责顺序扫描资源库；若某个资源库失败，会自动跳过并继续处理下一个。</span>
     </div>
   </div>`;
 }
@@ -4907,6 +5032,22 @@ function syncLibraryBatchBuildPanel() {
   const container = $('#settings-library-batch-build');
   if (!container) return;
   container.innerHTML = renderLibraryBatchBuildPanel();
+  $$('input[name="settings-library-batch-build-selection"]').forEach(input => {
+    input.addEventListener('change', async () => {
+      if (isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+        syncLibraryBatchBuildPanel();
+        return;
+      }
+      const selectedPaths = $$('input[name="settings-library-batch-build-selection"]:checked').map(node => node.value);
+      try {
+        state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedPaths);
+        syncLibraryBatchBuildPanel();
+      } catch (e) {
+        alert('保存批量扫描勾选失败: ' + ((e && e.error) || e));
+        syncLibraryBatchBuildPanel();
+      }
+    });
+  });
   $('#settings-build-all-libraries-btn')?.addEventListener('click', openLibraryBatchBuildWorkflow);
   $('#settings-cancel-all-libraries-btn')?.addEventListener('click', async () => {
     if (state.libraryBatchBuildCancelPending || !isLibraryBatchBuildActive()) return;
@@ -4920,13 +5061,122 @@ function syncLibraryBatchBuildPanel() {
     } catch (e) {
       state.libraryBatchBuildCancelPending = false;
       syncLibraryBatchBuildPanel();
-      alert('取消批量构建失败: ' + ((e && e.error) || e));
+      alert('取消批量扫描失败: ' + ((e && e.error) || e));
     }
   });
   $('#settings-library-batch-build-exit')?.addEventListener('change', async e => {
     try {
       state.libraryBatchBuildStatus = await setLibraryBatchBuildExitAfterComplete(e.target.checked);
       syncLibraryBatchBuildPanel();
+    } catch (err) {
+      e.target.checked = !e.target.checked;
+      alert('设置失败: ' + ((err && err.error) || err));
+    }
+  });
+}
+
+function renderLibraryBatchThumbnailBuildPanel() {
+  const status = state.libraryBatchThumbnailBuildStatus || {};
+  const libraries = Array.isArray(status.libraries) ? status.libraries : [];
+  const active = isLibraryBatchThumbnailBuildActive(status);
+  const otherActive = isLibraryBatchBuildActive();
+  const canResume = libraryBatchCanResume(status);
+  const currentName = String(status.current_library_name || '').trim();
+  const summary = [
+    `总计 ${Math.max(0, Number(status.total_libraries) || libraries.length || 0)}`,
+    `完成 ${Math.max(0, Number(status.completed_libraries) || 0)}`,
+    `失败 ${Math.max(0, Number(status.failed_libraries) || 0)}`,
+  ].join(' · ');
+  const list = libraries.length ? libraries.map((library, index) => {
+    const rowStatus = String(library.status || 'pending');
+    const current = currentName && currentName === String(library.name || '').trim();
+    const detailParts = [];
+    if (Number(library.generated) > 0) detailParts.push(`新生成 ${Number(library.generated)}`);
+    if (Number(library.skipped) > 0) detailParts.push(`已存在 ${Number(library.skipped)}`);
+    if (Number(library.failed) > 0) detailParts.push(`失败 ${Number(library.failed)}`);
+    const meta = detailParts.length ? detailParts.join(' · ') : (library.message || library.path || '');
+    return `<div class="settings-batch-build-row ${current ? 'active' : ''} is-${escapeHTML(rowStatus)}">
+      <div class="settings-batch-build-row-main">
+        <strong>${escapeHTML(library.name || `资源库 ${index + 1}`)}</strong>
+        <span>${escapeHTML(meta)}</span>
+      </div>
+      <em>${escapeHTML(libraryBatchBuildStatusLabel(rowStatus))}</em>
+    </div>`;
+  }).join('') : '<div class="settings-batch-build-empty">当前没有批量缩略图记录。</div>';
+  const progressPercent = Math.max(0, Math.min(100, Number(status.current_percent) || 0));
+  return `<div class="settings-batch-build-panel">
+    <div class="settings-batch-build-head">
+      <div>
+        <strong>${escapeHTML(status.message || '批量构建全部资源库缩略图')}</strong>
+        <span>${escapeHTML(summary)}</span>
+      </div>
+      <span class="settings-batch-build-badge ${active ? 'active' : ''}">${escapeHTML(active ? '运行中' : libraryBatchBuildStatusLabel(status.status || 'idle'))}</span>
+    </div>
+    <div class="settings-batch-build-meta">
+      <span>${escapeHTML(renderLibraryBatchTaskProgress(status, '顺序为全部资源库补全缩略图'))}</span>
+      <span>${escapeHTML(status.fast_thumbnail_build ? '极速缩略图模式' : '标准缩略图模式')}</span>
+    </div>
+    <div class="settings-batch-build-progress"><span style="width:${progressPercent}%"></span></div>
+    <div class="settings-batch-build-selection">
+      <strong>批量缩略图范围</strong>
+      <div class="settings-batch-build-selection-list">${renderLibraryBatchSelectionRows(status, 'settings-library-batch-thumbnail-build-selection')}</div>
+    </div>
+    <label class="settings-batch-build-exit">
+      <input id="settings-library-batch-thumbnail-build-exit" type="checkbox" ${status.exit_after_complete ? 'checked' : ''}>
+      <span>全部完成后退出应用</span>
+    </label>
+    <div class="settings-batch-build-list">${list}</div>
+    <div class="settings-actions settings-actions-fill">
+      <button class="btn" id="settings-build-all-library-thumbnails-btn" type="button" ${(active || otherActive) ? 'disabled' : ''}>${active ? '批量缩略图进行中' : (canResume ? '继续批量缩略图' : '批量构建全部资源库缩略图')}</button>
+      <button class="btn" id="settings-cancel-all-library-thumbnails-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchThumbnailBuildCancelPending ? copyText('app.libraryBatchThumbnail.cancelling', '正在取消…') : copyText('app.libraryBatchThumbnail.cancel', '取消批量缩略图')}</button>
+    </div>
+    <div class="settings-static settings-batch-build-note">
+      <strong>运行方式</strong>
+      <span>这个任务不会锁定 App，会在页面里持续更新状态；若某个资源库失败，会自动跳过并继续处理下一个。</span>
+    </div>
+  </div>`;
+}
+
+function syncLibraryBatchThumbnailBuildPanel() {
+  const container = $('#settings-library-batch-thumbnail-build');
+  if (!container) return;
+  container.innerHTML = renderLibraryBatchThumbnailBuildPanel();
+  $$('input[name="settings-library-batch-thumbnail-build-selection"]').forEach(input => {
+    input.addEventListener('change', async () => {
+      if (isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+        syncLibraryBatchThumbnailBuildPanel();
+        return;
+      }
+      const selectedPaths = $$('input[name="settings-library-batch-thumbnail-build-selection"]:checked').map(node => node.value);
+      try {
+        state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedPaths);
+        syncLibraryBatchThumbnailBuildPanel();
+      } catch (e) {
+        alert('保存批量缩略图勾选失败: ' + ((e && e.error) || e));
+        syncLibraryBatchThumbnailBuildPanel();
+      }
+    });
+  });
+  $('#settings-build-all-library-thumbnails-btn')?.addEventListener('click', openLibraryBatchThumbnailBuildWorkflow);
+  $('#settings-cancel-all-library-thumbnails-btn')?.addEventListener('click', async () => {
+    if (state.libraryBatchThumbnailBuildCancelPending || !isLibraryBatchThumbnailBuildActive()) return;
+    state.libraryBatchThumbnailBuildCancelPending = true;
+    syncLibraryBatchThumbnailBuildPanel();
+    try {
+      state.libraryBatchThumbnailBuildStatus = await cancelLibraryBatchThumbnailBuild();
+      stopLibraryBatchThumbnailBuildPolling();
+      state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
+      syncLibraryBatchThumbnailBuildPanel();
+    } catch (e) {
+      state.libraryBatchThumbnailBuildCancelPending = false;
+      syncLibraryBatchThumbnailBuildPanel();
+      alert('取消批量缩略图失败: ' + ((e && e.error) || e));
+    }
+  });
+  $('#settings-library-batch-thumbnail-build-exit')?.addEventListener('change', async e => {
+    try {
+      state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildExitAfterComplete(e.target.checked);
+      syncLibraryBatchThumbnailBuildPanel();
     } catch (err) {
       e.target.checked = !e.target.checked;
       alert('设置失败: ' + ((err && err.error) || err));
@@ -4952,7 +5202,10 @@ function renderSettingsContent() {
     <div class="settings-actions settings-actions-fill">
       <button class="btn" id="settings-build-all-thumbs-btn" type="button">加载全部缩略图</button>
     </div>
-    <div id="settings-library-batch-build">${renderLibraryBatchBuildPanel()}</div>
+    <div class="settings-batch-build-stack">
+      <div id="settings-library-batch-build">${renderLibraryBatchBuildPanel()}</div>
+      <div id="settings-library-batch-thumbnail-build">${renderLibraryBatchThumbnailBuildPanel()}</div>
+    </div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
   </section>
 
@@ -5090,6 +5343,7 @@ function renderSettingsContent() {
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
   $('#settings-build-all-thumbs-btn')?.addEventListener('click', openThumbnailBuildWorkflow);
   syncLibraryBatchBuildPanel();
+  syncLibraryBatchThumbnailBuildPanel();
 
   function bindLibraryRow(row) {
     row.addEventListener('dragstart', e => {

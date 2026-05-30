@@ -4235,8 +4235,13 @@ body.lightbox-page-lock {
   flex-wrap: wrap;
 }
 
-.settings-batch-build-panel {
+.settings-batch-build-stack {
+  display: grid;
+  gap: 16px;
   margin-top: 16px;
+}
+
+.settings-batch-build-panel {
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -4286,6 +4291,70 @@ body.lightbox-page-lock {
   flex-wrap: wrap;
   gap: 8px 14px;
   margin-top: 10px;
+}
+
+.settings-batch-build-selection {
+  margin-top: 14px;
+}
+
+.settings-batch-build-selection strong {
+  display: block;
+  margin-bottom: 10px;
+  font-size: .86rem;
+}
+
+.settings-batch-build-selection-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-batch-build-select-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.settings-batch-build-checkbox {
+  flex: 0 0 auto;
+}
+
+.settings-batch-build-select-copy {
+  min-width: 0;
+}
+
+.settings-batch-build-select-copy strong,
+.settings-batch-build-select-copy span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-batch-build-select-copy span {
+  color: var(--text2);
+  font-size: .8rem;
+}
+
+.settings-batch-build-progress {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text2) 10%, transparent);
+}
+
+.settings-batch-build-progress span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 78%, white);
+  transition: width .24s ease;
 }
 
 .settings-batch-build-exit {

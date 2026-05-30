@@ -23,6 +23,7 @@ type LibraryBatchBuildLibraryStatus struct {
 type LibraryBatchBuildStatus struct {
 	Status              string                           `json:"status"`
 	Message             string                           `json:"message"`
+	SelectedPaths       []string                         `json:"selected_paths,omitempty"`
 	CurrentLibraryName  string                           `json:"current_library_name,omitempty"`
 	CurrentLibraryPath  string                           `json:"current_library_path,omitempty"`
 	CurrentLibraryIndex int                              `json:"current_library_index"`
@@ -45,30 +46,39 @@ type LibraryBatchBuildStatus struct {
 }
 
 type LibraryBatchBuildHooks struct {
-	Status               func() LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, userID int64) (LibraryBatchBuildStatus, error)
-	Cancel               func() (LibraryBatchBuildStatus, error)
-	SetExitAfterComplete func(enabled bool) (LibraryBatchBuildStatus, error)
+	Status               func(profile *config.Profile, username string) LibraryBatchBuildStatus
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64) (LibraryBatchBuildStatus, error)
+	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
+	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
+	SetSelection         func(cfg *config.Config, username string, selectedPaths []string) (LibraryBatchBuildStatus, error)
 }
 
 type libraryBatchBuildExitRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-func handleGetLibraryBatchBuildStatus(hooks LibraryBatchBuildHooks) gin.HandlerFunc {
+type libraryBatchBuildSelectionRequest struct {
+	SelectedPaths []string `json:"selected_paths"`
+}
+
+func handleGetLibraryBatchBuildStatus(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if hooks.Status == nil {
-			c.JSON(http.StatusOK, LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量构建任务"})
+			c.JSON(http.StatusOK, LibraryBatchBuildStatus{Status: "idle", Message: "当前没有批量扫描任务"})
 			return
 		}
-		c.JSON(http.StatusOK, hooks.Status())
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, hooks.Status(profile, currentUsername(c)))
 	}
 }
 
 func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if hooks.Start == nil {
-			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量构建资源库"})
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量扫描资源库"})
 			return
 		}
 		profile, ok := requestProfile(c, cfg)
@@ -80,7 +90,7 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, userID)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -89,13 +99,13 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 	}
 }
 
-func handleCancelLibraryBatchBuild(hooks LibraryBatchBuildHooks) gin.HandlerFunc {
+func handleCancelLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if hooks.Cancel == nil {
-			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消批量构建"})
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消批量扫描"})
 			return
 		}
-		status, err := hooks.Cancel()
+		status, err := hooks.Cancel(cfg, currentUsername(c))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -104,10 +114,10 @@ func handleCancelLibraryBatchBuild(hooks LibraryBatchBuildHooks) gin.HandlerFunc
 	}
 }
 
-func handleSetLibraryBatchBuildExitAfterComplete(hooks LibraryBatchBuildHooks) gin.HandlerFunc {
+func handleSetLibraryBatchBuildExitAfterComplete(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if hooks.SetExitAfterComplete == nil {
-			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量构建完成后退出"})
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量扫描完成后退出"})
 			return
 		}
 		var req libraryBatchBuildExitRequest
@@ -115,7 +125,27 @@ func handleSetLibraryBatchBuildExitAfterComplete(hooks LibraryBatchBuildHooks) g
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
-		status, err := hooks.SetExitAfterComplete(req.Enabled)
+		status, err := hooks.SetExitAfterComplete(cfg, currentUsername(c), req.Enabled)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, status)
+	}
+}
+
+func handleSetLibraryBatchBuildSelection(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if hooks.SetSelection == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量扫描勾选"})
+			return
+		}
+		var req libraryBatchBuildSelectionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		status, err := hooks.SetSelection(cfg, currentUsername(c), req.SelectedPaths)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

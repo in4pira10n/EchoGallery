@@ -18,13 +18,51 @@ const (
 
 // Profile 保存某个用户独立的资源库与偏好设置。
 type Profile struct {
-	StoragePath     string      `json:"storage_path"`
-	Libraries       []Library   `json:"libraries,omitempty"`
-	ThumbnailDir    string      `json:"thumbnail_dir"`
-	ThumbnailSize   int         `json:"thumbnail_size"`
-	TrashDir        string      `json:"trash_dir"`
-	UseSystemPlayer bool        `json:"use_system_player"`
-	Preferences     Preferences `json:"preferences"`
+	StoragePath     string         `json:"storage_path"`
+	Libraries       []Library      `json:"libraries,omitempty"`
+	ThumbnailDir    string         `json:"thumbnail_dir"`
+	ThumbnailSize   int            `json:"thumbnail_size"`
+	TrashDir        string         `json:"trash_dir"`
+	UseSystemPlayer bool           `json:"use_system_player"`
+	Preferences     Preferences    `json:"preferences"`
+	BatchScan       BatchTaskState `json:"batch_scan,omitempty"`
+	BatchThumbnails BatchTaskState `json:"batch_thumbnails,omitempty"`
+}
+
+type BatchTaskLibraryState struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	Imported  int    `json:"imported"`
+	Skipped   int    `json:"skipped"`
+	Pruned    int    `json:"pruned"`
+	Generated int    `json:"generated"`
+	Failed    int    `json:"failed"`
+}
+
+type BatchTaskState struct {
+	SelectedPaths       []string                `json:"selected_paths,omitempty"`
+	Status              string                  `json:"status"`
+	Message             string                  `json:"message"`
+	CurrentLibraryName  string                  `json:"current_library_name,omitempty"`
+	CurrentLibraryPath  string                  `json:"current_library_path,omitempty"`
+	CurrentLibraryIndex int                     `json:"current_library_index"`
+	TotalLibraries      int                     `json:"total_libraries"`
+	CompletedLibraries  int                     `json:"completed_libraries"`
+	FailedLibraries     int                     `json:"failed_libraries"`
+	CurrentPhase        string                  `json:"current_phase,omitempty"`
+	CurrentDone         int                     `json:"current_done"`
+	CurrentTotal        int                     `json:"current_total"`
+	CurrentPercent      float64                 `json:"current_percent"`
+	FastThumbnailBuild  bool                    `json:"fast_thumbnail_build"`
+	LowResourceMode     bool                    `json:"low_resource_mode"`
+	ExitAfterComplete   bool                    `json:"exit_after_complete"`
+	StartedAt           string                  `json:"started_at,omitempty"`
+	UpdatedAt           string                  `json:"updated_at,omitempty"`
+	FinishedAt          string                  `json:"finished_at,omitempty"`
+	Error               string                  `json:"error,omitempty"`
+	Libraries           []BatchTaskLibraryState `json:"libraries,omitempty"`
 }
 
 type profileDefaultsProbe struct {
@@ -153,6 +191,10 @@ func SaveProfile(cfg *Config, username string, profile *Profile) error {
 	}
 	next := *profile
 	next.Libraries = append([]Library(nil), profile.Libraries...)
+	next.BatchScan.SelectedPaths = append([]string(nil), profile.BatchScan.SelectedPaths...)
+	next.BatchScan.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchScan.Libraries...)
+	next.BatchThumbnails.SelectedPaths = append([]string(nil), profile.BatchThumbnails.SelectedPaths...)
+	next.BatchThumbnails.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchThumbnails.Libraries...)
 	if err := next.validate(cfg); err != nil {
 		return err
 	}
@@ -242,6 +284,8 @@ func (p *Profile) applyDefaults(fallback *Config) {
 		p.Preferences.VideoSectionMinMinutes = 10
 	}
 	p.normalizeLibraries()
+	p.BatchScan.normalizeAgainstLibraries(p.Libraries)
+	p.BatchThumbnails.normalizeAgainstLibraries(p.Libraries)
 }
 
 func (p *Profile) normalizeLibraries() {
@@ -290,5 +334,63 @@ func (p *Profile) normalizeLibraries() {
 	}
 	if len(p.Libraries) > 0 {
 		p.StoragePath = p.Libraries[0].Path
+	}
+}
+
+func (s *BatchTaskState) normalizeAgainstLibraries(libraries []Library) {
+	if s == nil {
+		return
+	}
+	allowed := make(map[string]Library, len(libraries))
+	for _, library := range libraries {
+		path := strings.TrimSpace(library.Path)
+		if path == "" {
+			continue
+		}
+		allowed[path] = library
+	}
+	if len(s.SelectedPaths) > 0 {
+		selected := make([]string, 0, len(s.SelectedPaths))
+		seen := make(map[string]struct{}, len(s.SelectedPaths))
+		for _, path := range s.SelectedPaths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				continue
+			}
+			if _, ok := allowed[path]; !ok {
+				continue
+			}
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			selected = append(selected, path)
+		}
+		s.SelectedPaths = selected
+	}
+	if len(s.Libraries) > 0 {
+		rows := make([]BatchTaskLibraryState, 0, len(s.Libraries))
+		seen := make(map[string]struct{}, len(s.Libraries))
+		for _, row := range s.Libraries {
+			path := strings.TrimSpace(row.Path)
+			lib, ok := allowed[path]
+			if !ok {
+				continue
+			}
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			row.Path = path
+			if strings.TrimSpace(row.Name) == "" {
+				row.Name = lib.Name
+			}
+			rows = append(rows, row)
+		}
+		s.Libraries = rows
+	}
+	if len(s.SelectedPaths) == 0 && len(libraries) > 0 {
+		s.Status = ""
+		s.Message = ""
 	}
 }

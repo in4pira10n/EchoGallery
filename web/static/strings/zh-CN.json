@@ -124,13 +124,21 @@
       "cancel": "停止构建",
       "cancelling": "正在停止…"
     },
-    "libraryBatchBuild": {
-      "title": "正在批量构建资源库",
-      "cancel": "取消批量构建",
+    "libraryBatchScan": {
+      "title": "正在批量扫描资源库",
+      "cancel": "取消批量扫描",
       "cancelling": "正在取消…",
-      "completed": "批量构建已完成",
-      "cancelled": "已取消批量构建资源库",
-      "failed": "批量构建失败"
+      "completed": "批量扫描已完成",
+      "cancelled": "已取消批量扫描资源库",
+      "failed": "批量扫描失败"
+    },
+    "libraryBatchThumbnail": {
+      "title": "正在批量构建缩略图",
+      "cancel": "取消批量缩略图",
+      "cancelling": "正在取消…",
+      "completed": "批量缩略图构建已完成",
+      "cancelled": "已取消批量缩略图任务",
+      "failed": "批量缩略图构建失败"
     },
     "randomAlbum": {
       "blockingTitle": "正在加载全部乱序相册媒体",
