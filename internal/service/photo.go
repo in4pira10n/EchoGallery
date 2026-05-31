@@ -19,17 +19,7 @@ import (
 )
 
 const (
-	thumbnailTierBuildPreview    = "build-preview"
-	thumbnailTierBuildFull       = "build-full"
-	thumbnailTierPreview         = "preview"
-	thumbnailTierFull            = "full"
-	thumbnailTierAll             = "all"
-	thumbnailBuildPreviewMaxEdge = 192
-	thumbnailBuildPreviewQuality = 46
-	thumbnailBuildPreviewMethod  = 1
-	thumbnailPreviewMaxEdge      = 256
-	thumbnailPreviewQuality      = 58
-	thumbnailPreviewMethod       = 2
+	thumbnailTierFull = "full"
 )
 
 type thumbnailWorkItem struct {
@@ -279,22 +269,13 @@ func (s *PhotoService) enqueueThumbnailGeneration(photo *storage.Photo, priority
 		return
 	}
 	if s.syncThumbnail {
-		s.generateThumbnailTiersForPhoto(photo) //nolint:errcheck
+		_ = s.generateThumbnailForPhoto(photo)
 		return
 	}
 	if s.thumbJobsImage == nil || s.thumbJobsVideo == nil {
 		return
 	}
-	if !priority && !isVideoMediaKind(photo) {
-		previewMissing := !s.thumbnailExistsForTier(photo, thumbnailTierPreview)
-		fullMissing := !s.thumbnailExistsForTier(photo, thumbnailTierFull)
-		if previewMissing && fullMissing {
-			s.enqueueThumbnailTier(photo, thumbnailTierAll, false)
-			return
-		}
-	}
-	s.enqueueThumbnailTier(photo, thumbnailTierPreview, priority)
-	s.enqueueThumbnailTier(photo, thumbnailTierFull, false)
+	s.enqueueThumbnailTier(photo, thumbnailTierFull, priority)
 }
 
 func isVideoMediaKind(photo *storage.Photo) bool {
@@ -353,8 +334,7 @@ func (s *PhotoService) WarmThumbnailsByUUIDs(uuids []string, userID int64) (int,
 		if err != nil || photo == nil {
 			continue
 		}
-		s.enqueueThumbnailTier(photo, thumbnailTierPreview, true)
-		s.enqueueThumbnailTier(photo, thumbnailTierFull, false)
+		s.enqueueThumbnailTier(photo, thumbnailTierFull, true)
 		warmed++
 		if warmed >= 160 {
 			break
@@ -363,24 +343,17 @@ func (s *PhotoService) WarmThumbnailsByUUIDs(uuids []string, userID int64) (int,
 	return warmed, nil
 }
 
-func (s *PhotoService) thumbnailAlreadyExists(photo *storage.Photo) bool {
-	for _, candidate := range s.ThumbnailCandidates(photo) {
-		if candidate == "" {
-			continue
-		}
-		if _, err := os.Stat(candidate); err == nil {
+func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string) bool {
+	if photo == nil {
+		return false
+	}
+	for _, path := range s.thumbnailSatisfyingPaths(photo, tier) {
+		if resolveManagedFile(path) {
+			s.cleanupRedundantThumbnailFiles(photo)
 			return true
 		}
 	}
 	return false
-}
-
-func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string) bool {
-	path := s.thumbnailPathForTier(photo, tier)
-	if path == "" {
-		return false
-	}
-	return resolveManagedFile(path)
 }
 
 func resolveManagedFile(path string) bool {
@@ -390,8 +363,12 @@ func resolveManagedFile(path string) bool {
 	if _, err := os.Stat(path); err == nil {
 		return true
 	}
-	legacyPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+	legacyPath := legacyThumbnailJPEGPath(path)
 	return legacyPath != path && fileExists(legacyPath)
+}
+
+func legacyThumbnailJPEGPath(path string) string {
+	return strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
 }
 
 func fileExists(path string) bool {
@@ -408,65 +385,24 @@ func (s *PhotoService) generateThumbnailForPhoto(photo *storage.Photo) error {
 	return s.generateThumbnailForPhotoTier(photo, thumbnailTierFull)
 }
 
-func (s *PhotoService) generateThumbnailTiersForPhoto(photo *storage.Photo) error {
-	if photo == nil {
-		return nil
-	}
-	if photo.MediaKind == storage.MediaKindVideo {
-		if err := s.generateThumbnailForPhotoTier(photo, thumbnailTierPreview); err != nil {
-			return err
-		}
-		return s.generateThumbnailForPhotoTier(photo, thumbnailTierFull)
-	}
-	needPreview := !s.thumbnailExistsForTier(photo, thumbnailTierPreview)
-	needFull := !s.thumbnailExistsForTier(photo, thumbnailTierFull)
-	if !needPreview && !needFull {
-		return nil
-	}
-	srcPath := s.resolveFinderPath(photo)
-	file, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	var variants []imgpkg.ThumbnailVariant
-	if needPreview {
-		variants = append(variants, imgpkg.ThumbnailVariant{
-			DestPath: s.ThumbnailPreviewPath(photo),
-			MaxEdge:  s.thumbnailLongEdgeForTier(thumbnailTierPreview),
-			Quality:  thumbnailPreviewQuality,
-			Method:   thumbnailPreviewMethod,
-		})
-	}
-	if needFull {
-		variants = append(variants, imgpkg.ThumbnailVariant{
-			DestPath: s.ThumbnailPath(photo),
-			MaxEdge:  s.thumbnailLongEdgeForTier(thumbnailTierFull),
-		})
-	}
-	return imgpkg.GenerateThumbnailVariants(file, photo.MimeType, variants)
-}
-
 func (s *PhotoService) generateThumbnailForPhotoTier(photo *storage.Photo, tier string) error {
 	if photo == nil {
 		return nil
 	}
-	if tier == thumbnailTierAll {
-		return s.generateThumbnailTiersForPhoto(photo)
-	}
-	if tier == thumbnailTierBuildPreview && s.thumbnailExistsForTier(photo, thumbnailTierPreview) {
-		return nil
-	}
-	if tier == thumbnailTierFull && !s.thumbnailExistsForTier(photo, thumbnailTierPreview) {
-		return s.generateThumbnailTiersForPhoto(photo)
+	if tier != thumbnailTierFull {
+		tier = thumbnailTierFull
 	}
 	if s.thumbnailExistsForTier(photo, tier) {
 		return nil
 	}
-	maxEdge := s.thumbnailLongEdgeForTier(tier)
-	destPath := s.thumbnailPathForTier(photo, tier)
+	maxEdge := s.thumbnailLongEdge()
+	destPath := s.ThumbnailPath(photo)
 	if photo.MediaKind == storage.MediaKindVideo {
-		return media.GeneratePoster(s.resolveFinderPath(photo), destPath, maxEdge)
+		if err := media.GeneratePoster(s.resolveFinderPath(photo), destPath, maxEdge); err != nil {
+			return err
+		}
+		s.cleanupRedundantThumbnailFiles(photo)
+		return nil
 	}
 	srcPath := s.resolveFinderPath(photo)
 	file, err := os.Open(srcPath)
@@ -474,38 +410,14 @@ func (s *PhotoService) generateThumbnailForPhotoTier(photo *storage.Photo, tier 
 		return err
 	}
 	defer file.Close()
-	variant := imgpkg.ThumbnailVariant{
-		DestPath: destPath,
-		MaxEdge:  maxEdge,
+	if err := imgpkg.GenerateThumbnail(file, photo.MimeType, destPath, maxEdge); err != nil {
+		return err
 	}
-	if tier == thumbnailTierBuildPreview {
-		variant.Quality = thumbnailBuildPreviewQuality
-		variant.Method = thumbnailBuildPreviewMethod
-	}
-	if tier == thumbnailTierPreview {
-		variant.Quality = thumbnailPreviewQuality
-		variant.Method = thumbnailPreviewMethod
-	}
-	return imgpkg.GenerateThumbnailVariants(file, photo.MimeType, []imgpkg.ThumbnailVariant{variant})
+	s.cleanupRedundantThumbnailFiles(photo)
+	return nil
 }
 
-func (s *PhotoService) thumbnailLongEdgeForTier(tier string) int {
-	if tier == thumbnailTierBuildPreview {
-		return thumbnailBuildPreviewMaxEdge
-	}
-	if tier == thumbnailTierPreview {
-		size := s.thumbnailSize
-		if size <= 0 {
-			size = imgpkg.DefaultThumbnailLongEdge
-		}
-		if size > thumbnailPreviewMaxEdge {
-			size = thumbnailPreviewMaxEdge
-		}
-		if size < 96 {
-			size = 96
-		}
-		return size
-	}
+func (s *PhotoService) thumbnailLongEdge() int {
 	if s.thumbnailSize <= 0 {
 		return imgpkg.DefaultThumbnailLongEdge
 	}
@@ -629,20 +541,13 @@ func copyPhotoEXIF(src *imgpkg.EXIFData) *storage.PhotoEXIF {
 
 // generateThumbnail 生成缩略图（在后台 goroutine 中调用）
 func (s *PhotoService) generateThumbnail(photo *storage.Photo, srcPath string, mimeType string) {
-	previewPath := s.ThumbnailPreviewPath(photo)
-	fullPath := s.ThumbnailPath(photo)
-
 	f, err := os.Open(srcPath)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-
-	imgpkg.GenerateThumbnail(f, mimeType, previewPath, s.thumbnailLongEdgeForTier(thumbnailTierPreview)) //nolint:errcheck
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return
-	}
-	imgpkg.GenerateThumbnail(f, mimeType, fullPath, s.thumbnailLongEdgeForTier(thumbnailTierFull)) //nolint:errcheck
+	imgpkg.GenerateThumbnail(f, mimeType, s.ThumbnailPath(photo), s.thumbnailLongEdge()) //nolint:errcheck
+	s.cleanupRedundantThumbnailFiles(photo)
 }
 
 // PhotoPath 返回图片原图的磁盘路径
@@ -658,48 +563,18 @@ func (s *PhotoService) ThumbnailPath(photo *storage.Photo) string {
 	return filepath.Join(s.thumbnailPath, photo.UUID+".webp")
 }
 
-func (s *PhotoService) ThumbnailPreviewPath(photo *storage.Photo) string {
-	if photo == nil {
-		return ""
-	}
-	if photo.MediaKind == storage.MediaKindVideo {
-		return s.PosterPreviewPath(photo)
-	}
-	return filepath.Join(s.thumbnailPath, photo.UUID+".preview.webp")
-}
-
-func (s *PhotoService) ThumbnailBuildPreviewPath(photo *storage.Photo) string {
-	if photo == nil {
-		return ""
-	}
-	if photo.MediaKind == storage.MediaKindVideo {
-		return s.PosterBuildPreviewPath(photo)
-	}
-	return filepath.Join(s.thumbnailPath, photo.UUID+".build-preview.webp")
-}
-
-func (s *PhotoService) PosterPreviewPath(photo *storage.Photo) string {
+func (s *PhotoService) legacyThumbnailPreviewPath(photo *storage.Photo) string {
 	if photo == nil {
 		return ""
 	}
 	return filepath.Join(s.thumbnailPath, photo.UUID+".preview.webp")
 }
 
-func (s *PhotoService) PosterBuildPreviewPath(photo *storage.Photo) string {
+func (s *PhotoService) legacyThumbnailBuildPreviewPath(photo *storage.Photo) string {
 	if photo == nil {
 		return ""
 	}
 	return filepath.Join(s.thumbnailPath, photo.UUID+".build-preview.webp")
-}
-
-func (s *PhotoService) thumbnailPathForTier(photo *storage.Photo, tier string) string {
-	if tier == thumbnailTierBuildPreview {
-		return s.ThumbnailBuildPreviewPath(photo)
-	}
-	if tier == thumbnailTierPreview {
-		return s.ThumbnailPreviewPath(photo)
-	}
-	return s.ThumbnailPath(photo)
 }
 
 func (s *PhotoService) LegacyThumbnailPath(photo *storage.Photo) string {
@@ -713,15 +588,48 @@ func (s *PhotoService) ThumbnailCandidates(photo *storage.Photo) []string {
 	if photo == nil {
 		return nil
 	}
-	if photo.MediaKind == storage.MediaKindVideo {
-		candidates := []string{s.PosterPreviewPath(photo), s.PosterBuildPreviewPath(photo), s.PosterPath(photo)}
-		legacy := filepath.Join(s.thumbnailPath, photo.UUID+".jpg")
-		if !strings.EqualFold(legacy, candidates[len(candidates)-1]) {
-			candidates = append(candidates, legacy)
-		}
-		return candidates
+	return []string{
+		s.ThumbnailPath(photo),
+		s.legacyThumbnailPreviewPath(photo),
+		s.legacyThumbnailBuildPreviewPath(photo),
+		s.LegacyThumbnailPath(photo),
 	}
-	return []string{s.ThumbnailPreviewPath(photo), s.ThumbnailBuildPreviewPath(photo), s.ThumbnailPath(photo), s.LegacyThumbnailPath(photo)}
+}
+
+func (s *PhotoService) thumbnailSatisfyingPaths(photo *storage.Photo, tier string) []string {
+	if photo == nil {
+		return nil
+	}
+	return []string{s.ThumbnailPath(photo), s.LegacyThumbnailPath(photo)}
+}
+
+func removeThumbnailFile(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	_ = os.Remove(path)
+	legacy := legacyThumbnailJPEGPath(path)
+	if legacy != path {
+		_ = os.Remove(legacy)
+	}
+}
+
+func (s *PhotoService) cleanupRedundantThumbnailFiles(photo *storage.Photo) {
+	if photo == nil {
+		return
+	}
+	fullPath := s.ThumbnailPath(photo)
+	previewPath := s.legacyThumbnailPreviewPath(photo)
+	buildPreviewPath := s.legacyThumbnailBuildPreviewPath(photo)
+	legacyFullPath := s.LegacyThumbnailPath(photo)
+	fullExists := resolveManagedFile(fullPath)
+	if fullExists {
+		removeThumbnailFile(previewPath)
+		removeThumbnailFile(buildPreviewPath)
+		if fullPath != legacyFullPath {
+			_ = os.Remove(legacyFullPath)
+		}
+	}
 }
 
 // ManagedMediaRelPath 返回应用内部托管媒体文件的相对路径。

@@ -11,7 +11,7 @@ import (
 )
 
 type thumbnailBuildManager interface {
-	StartThumbnailBuild(userID int64, fast bool) (service.ThumbnailBuildStatus, error)
+	StartThumbnailBuild(userID int64) (service.ThumbnailBuildStatus, error)
 	GetThumbnailBuildStatus(userID int64) service.ThumbnailBuildStatus
 	CancelThumbnailBuild(userID int64) (service.ThumbnailBuildStatus, error)
 }
@@ -87,11 +87,7 @@ func handleStartThumbnailBuild(cfg *config.Config, registrar interface{}) gin.Ha
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
-		profile, ok := requestProfile(c, cfg)
-		if !ok {
-			return
-		}
-		status, err := manager.StartThumbnailBuild(userID, profile.Preferences.FastThumbnailBuild)
+		status, err := manager.StartThumbnailBuild(userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

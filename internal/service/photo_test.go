@@ -105,6 +105,63 @@ func TestUpload_UnsupportedFormat(t *testing.T) {
 	}
 }
 
+func TestThumbnailExistsForTier_CleansLegacyPreviewFilesWhenFullExists(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	photo := &storage.Photo{UUID: "thumb-1", MediaKind: storage.MediaKindImage}
+
+	fullPath := svc.ThumbnailPath(photo)
+	previewPath := svc.legacyThumbnailPreviewPath(photo)
+	buildPreviewPath := svc.legacyThumbnailBuildPreviewPath(photo)
+
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte("full"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previewPath, []byte("preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildPreviewPath, []byte("build-preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
+		t.Fatal("full 缩略图应当满足当前请求")
+	}
+	if _, err := os.Stat(previewPath); !os.IsNotExist(err) {
+		t.Fatalf("存在 full 时应删除 preview，得到 err=%v", err)
+	}
+	if _, err := os.Stat(buildPreviewPath); !os.IsNotExist(err) {
+		t.Fatalf("存在 full 时应删除 build-preview，得到 err=%v", err)
+	}
+}
+
+func TestThumbnailExistsForTier_DoesNotUseLegacyPreviewOnly(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	photo := &storage.Photo{UUID: "thumb-2", MediaKind: storage.MediaKindImage}
+
+	previewPath := svc.legacyThumbnailPreviewPath(photo)
+	buildPreviewPath := svc.legacyThumbnailBuildPreviewPath(photo)
+
+	if err := os.MkdirAll(filepath.Dir(previewPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previewPath, []byte("preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildPreviewPath, []byte("build-preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
+		t.Fatal("旧 preview/build-preview 不应再满足当前标准缩略图请求")
+	}
+	if _, err := os.Stat(previewPath); err != nil {
+		t.Fatalf("旧 preview 文件应暂时保留，等待 full 生成后清理: %v", err)
+	}
+}
+
 func TestUpload_FallbackTime(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	data := createJPEGBytes(100, 100)

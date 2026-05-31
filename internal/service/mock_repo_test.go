@@ -226,6 +226,18 @@ func (m *mockRepo) UpdatePhotoEXIF(id int64, userID int64, exif *storage.PhotoEX
 	return nil
 }
 
+func (m *mockRepo) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string, originalName string, size int64, sourceModUnix int64) error {
+	p, ok := m.photos[id]
+	if !ok || p.UploadedBy != userID {
+		return fmt.Errorf("图片不存在")
+	}
+	p.SourceRelPath = sourceRelPath
+	p.OriginalName = originalName
+	p.Size = size
+	p.SourceModUnix = sourceModUnix
+	return nil
+}
+
 func (m *mockRepo) CreateAlbum(album *storage.Album) error {
 	album.ID = m.genID()
 	m.albums[album.ID] = album

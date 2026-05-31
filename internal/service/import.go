@@ -38,6 +38,14 @@ type importJob struct {
 	info          fs.FileInfo
 }
 
+type sourceMoveJob struct {
+	existing      storage.SourceMediaInfo
+	path          string
+	originalName  string
+	sourceRelPath string
+	info          fs.FileInfo
+}
+
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
 // 导入时只建立索引，不在启动阶段预生成缩略图；缩略图在访问时按需生成。
 func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
@@ -58,13 +66,15 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
-	var jobs []importJob
+	var pendingJobs []importJob
+	var relocatedPhotos []*storage.Photo
 	sourceIndex, err := s.repo.ListSourceMediaIndex(uploadedBy)
 	if err != nil {
 		return summary, err
 	}
 	totalCandidates := 0
 	indexSkippedCandidates := 0
+	relocatedCandidates := 0
 	seenSourcePaths := make(map[string]bool)
 	seenFolderAlbums := make(map[string]bool)
 
@@ -107,6 +117,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 			seenFolderAlbums[albumName] = true
 		}
 		totalCandidates++
+		if progress != nil && (totalCandidates <= 12 || totalCandidates%32 == 0) {
+			progress(totalCandidates, 0)
+		}
 
 		var info fs.FileInfo
 		if existing, ok := sourceIndex[sourceRelPath]; ok {
@@ -125,12 +138,66 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 				return nil
 			}
 		}
-		jobs = append(jobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
+		pendingJobs = append(pendingJobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
 		return nil
 	})
 	if err != nil {
 		return summary, err
 	}
+	if progress != nil && totalCandidates > 0 {
+		progress(totalCandidates, 0)
+	}
+
+	moveCandidates := buildMissingSourceFingerprintIndex(sourceIndex, seenSourcePaths)
+	jobs := make([]importJob, 0, len(pendingJobs))
+	for _, job := range pendingJobs {
+		if _, ok := sourceIndex[job.sourceRelPath]; ok {
+			jobs = append(jobs, job)
+			continue
+		}
+		info := job.info
+		if info == nil {
+			info, err = os.Stat(job.path)
+			if err != nil {
+				return summary, err
+			}
+			job.info = info
+		}
+		key := sourceMediaFingerprint(info.Size(), info.ModTime().UnixNano())
+		candidate, ok := pickMovedSourceCandidate(moveCandidates[key], job.originalName)
+		if !ok {
+			jobs = append(jobs, job)
+			continue
+		}
+		photo, moveErr := s.relocateExistingSourceMedia(sourceMoveJob{
+			existing:      candidate,
+			path:          job.path,
+			originalName:  job.originalName,
+			sourceRelPath: job.sourceRelPath,
+			info:          info,
+		}, uploadedBy)
+		if moveErr != nil {
+			return summary, moveErr
+		}
+		relocatedPhotos = append(relocatedPhotos, photo)
+		relocatedCandidates++
+		delete(sourceIndex, candidate.SourceRelPath)
+		sourceIndex[job.sourceRelPath] = storage.SourceMediaInfo{
+			ID:            photo.ID,
+			SourceRelPath: job.sourceRelPath,
+			Size:          info.Size(),
+			SourceModUnix: info.ModTime().UnixNano(),
+		}
+		remaining := moveCandidates[key]
+		for i := range remaining {
+			if remaining[i].ID != candidate.ID {
+				continue
+			}
+			moveCandidates[key] = append(remaining[:i], remaining[i+1:]...)
+			break
+		}
+	}
+
 	pruned, err := s.pruneMissingSourceMedia(ctx, uploadedBy, sourceIndex, seenSourcePaths)
 	if err != nil {
 		return summary, err
@@ -139,6 +206,12 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	if err := s.pruneMissingFolderAlbums(uploadedBy, seenFolderAlbums); err != nil {
 		return summary, err
 	}
+	for _, photo := range relocatedPhotos {
+		if err := s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache); err != nil {
+			return summary, err
+		}
+	}
+	summary.Skipped += relocatedCandidates
 
 	if len(jobs) == 0 {
 		if progress != nil {
@@ -281,9 +354,56 @@ func sourceMediaUnchanged(existing storage.SourceMediaInfo, info fs.FileInfo) bo
 	return existing.Size == info.Size() && existing.SourceModUnix == info.ModTime().UnixNano()
 }
 
+func sourceMediaFingerprint(size int64, modUnix int64) string {
+	return fmt.Sprintf("%d:%d", size, modUnix)
+}
+
+func buildMissingSourceFingerprintIndex(sourceIndex map[string]storage.SourceMediaInfo, seenSourcePaths map[string]bool) map[string][]storage.SourceMediaInfo {
+	index := make(map[string][]storage.SourceMediaInfo)
+	for sourceRelPath, item := range sourceIndex {
+		if sourceRelPath == "" || seenSourcePaths[filepath.Clean(sourceRelPath)] {
+			continue
+		}
+		if item.SourceModUnix == 0 {
+			continue
+		}
+		key := sourceMediaFingerprint(item.Size, item.SourceModUnix)
+		index[key] = append(index[key], item)
+	}
+	return index
+}
+
+func pickMovedSourceCandidate(candidates []storage.SourceMediaInfo, originalName string) (storage.SourceMediaInfo, bool) {
+	if len(candidates) == 0 {
+		return storage.SourceMediaInfo{}, false
+	}
+	cleanName := strings.TrimSpace(originalName)
+	if cleanName != "" {
+		for _, candidate := range candidates {
+			if filepath.Base(candidate.SourceRelPath) == cleanName {
+				return candidate, true
+			}
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], true
+	}
+	return storage.SourceMediaInfo{}, false
+}
+
 func importWorkerCount() int {
 	if lowResourceModeEnabled() {
 		return 1
+	}
+	if batchAggressiveModeEnabled() {
+		n := (runtime.GOMAXPROCS(0) * 3) / 4
+		if n < 2 {
+			return 2
+		}
+		if n > 8 {
+			return 8
+		}
+		return n
 	}
 	n := runtime.GOMAXPROCS(0) / 2
 	if n < 1 {
@@ -293,6 +413,31 @@ func importWorkerCount() int {
 		return 4
 	}
 	return n
+}
+
+func (s *PhotoService) relocateExistingSourceMedia(job sourceMoveJob, uploadedBy int64) (*storage.Photo, error) {
+	photo, err := s.repo.GetPhotoByIDAny(job.existing.ID, uploadedBy)
+	if err != nil {
+		return nil, err
+	}
+	if photo == nil {
+		return nil, fmt.Errorf("待迁移媒体不存在: %s", job.existing.SourceRelPath)
+	}
+	info := job.info
+	if info == nil {
+		info, err = os.Stat(job.path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := s.repo.UpdatePhotoSourceMedia(photo.ID, uploadedBy, job.sourceRelPath, job.originalName, info.Size(), info.ModTime().UnixNano()); err != nil {
+		return nil, err
+	}
+	photo.SourceRelPath = job.sourceRelPath
+	photo.OriginalName = job.originalName
+	photo.Size = info.Size()
+	photo.SourceModUnix = info.ModTime().UnixNano()
+	return photo, nil
 }
 
 func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) (*storage.Photo, bool, error) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSaveSquareLibraryLogo_FitsInsideSquareCanvas(t *testing.T) {
+func TestSaveSquareLibraryLogo_CropsToCenteredSquare(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 4, 2))
 	src.Set(0, 0, color.RGBA{R: 255, A: 255})
 	src.Set(1, 0, color.RGBA{G: 255, A: 255})
@@ -40,13 +40,13 @@ func TestSaveSquareLibraryLogo_FitsInsideSquareCanvas(t *testing.T) {
 	if bounds.Dx() != 4 || bounds.Dy() != 4 {
 		t.Fatalf("期望输出为 4x4，得到 %dx%d", bounds.Dx(), bounds.Dy())
 	}
-	if !colorEqual(decoded.At(0, 1), color.RGBA{R: 255, A: 255}) {
-		t.Fatalf("期望保留完整图像左侧内容")
+	if !colorEqual(decoded.At(0, 1), color.RGBA{G: 255, A: 255}) {
+		t.Fatalf("期望左边缘为居中裁切后的绿色区域")
 	}
-	if !colorEqual(decoded.At(3, 1), color.RGBA{R: 255, G: 255, A: 255}) {
-		t.Fatalf("期望保留完整图像右侧内容")
+	if !colorEqual(decoded.At(3, 1), color.RGBA{B: 255, A: 255}) {
+		t.Fatalf("期望右边缘为居中裁切后的蓝色区域")
 	}
-	if !colorEqual(decoded.At(0, 0), color.RGBA{}) || !colorEqual(decoded.At(0, 3), color.RGBA{}) {
-		t.Fatalf("期望剩余区域保留透明画布")
+	if _, _, _, alpha := decoded.At(0, 0).RGBA(); alpha == 0 {
+		t.Fatalf("期望裁切后整张输出被图片填满，而不是留下透明留白")
 	}
 }

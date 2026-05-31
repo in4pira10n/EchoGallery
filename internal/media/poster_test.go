@@ -52,6 +52,47 @@ func TestGeneratePosterWithRunner_Success(t *testing.T) {
 	}
 }
 
+func TestGeneratePosterVariantsWithRunner_SingleFrameMultiOutput(t *testing.T) {
+	dir := t.TempDir()
+	preview := filepath.Join(dir, "demo.preview.webp")
+	full := filepath.Join(dir, "demo.webp")
+	calls := 0
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		calls++
+		framePath := args[len(args)-1]
+		if err := os.MkdirAll(filepath.Dir(framePath), 0755); err != nil {
+			return nil, err
+		}
+		f, err := os.Create(framePath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		img := image.NewRGBA(image.Rect(0, 0, 1920, 1080))
+		if err := jpeg.Encode(f, img, nil); err != nil {
+			return nil, err
+		}
+		return []byte("ok"), nil
+	}
+
+	err := generatePosterVariantsWithRunner("demo.mp4", []imgpkg.ThumbnailVariant{
+		{DestPath: preview, MaxEdge: 256, Quality: 58, Method: 2},
+		{DestPath: full, MaxEdge: 512},
+	}, &VideoMeta{DurationMS: 120000}, runner, 512)
+	if err != nil {
+		t.Fatalf("期望成功，得到错误: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("期望只抽帧一次，实际 %d 次", calls)
+	}
+	if _, err := os.Stat(preview); err != nil {
+		t.Fatalf("预览缩略图应存在: %v", err)
+	}
+	if _, err := os.Stat(full); err != nil {
+		t.Fatalf("标准缩略图应存在: %v", err)
+	}
+}
+
 func TestGeneratePosterWithRunner_FFmpegUnavailable(t *testing.T) {
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, exec.ErrNotFound

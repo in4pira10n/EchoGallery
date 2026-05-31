@@ -67,9 +67,6 @@ func TestLoadFromPath_Success(t *testing.T) {
 	if !cfg.Preferences.ExperimentalPrefetchNeighbors {
 		t.Errorf("期望旧配置默认开启 experimental_prefetch_neighbors")
 	}
-	if cfg.Preferences.FastThumbnailBuild {
-		t.Errorf("期望旧配置默认关闭 fast_thumbnail_build")
-	}
 }
 
 func TestLoadFromPath_FileNotFound(t *testing.T) {

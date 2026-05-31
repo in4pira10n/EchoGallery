@@ -144,7 +144,7 @@ func (s *PhotoService) runVideoThumbnailRefresh(ctx context.Context, task *video
 			task.finish("cancelled", "已取消视频缩略图刷新", "")
 			return
 		}
-		if err := s.generateThumbnailTiersForPhoto(photo); err != nil {
+		if err := s.generateThumbnailForPhoto(photo); err != nil {
 			task.incrementFailed()
 			continue
 		}

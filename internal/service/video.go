@@ -111,7 +111,7 @@ func (s *PhotoService) RefreshVideoThumbnails(userID int64) (*VideoThumbnailRefr
 					continue
 				}
 				result.Total++
-				if err := s.generateThumbnailTiersForPhoto(photo); err != nil {
+				if err := s.generateThumbnailForPhoto(photo); err != nil {
 					result.Failed++
 					if len(result.Errors) < 8 {
 						result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", photo.OriginalName, err))

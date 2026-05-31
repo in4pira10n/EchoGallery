@@ -10,7 +10,7 @@ import (
 
 type LibraryBatchThumbnailBuildHooks struct {
 	Status               func(profile *config.Profile, username string) LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64) (LibraryBatchBuildStatus, error)
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
 	SetSelection         func(cfg *config.Config, username string, selectedPaths []string) (LibraryBatchBuildStatus, error)
@@ -36,6 +36,13 @@ func handleStartLibraryBatchThumbnailBuild(cfg *config.Config, hooks LibraryBatc
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量构建全部资源库缩略图"})
 			return
 		}
+		var req libraryBatchBuildStartRequest
+		if c.Request.ContentLength > 0 {
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+				return
+			}
+		}
 		profile, ok := requestProfile(c, cfg)
 		if !ok {
 			return
@@ -45,7 +52,7 @@ func handleStartLibraryBatchThumbnailBuild(cfg *config.Config, hooks LibraryBatc
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, currentUsername(c), userID)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

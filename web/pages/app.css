@@ -1715,15 +1715,15 @@ body.selection-mode .date-select-all {
 
 .album-card.list .album-name {
   display: -webkit-box;
-  min-height: 40px;
+  min-height: 60px;
   white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   overflow-wrap: anywhere;
   word-break: break-word;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .album-card.list .album-count-row {
@@ -3520,6 +3520,19 @@ body.lightbox-page-lock {
   min-width: 0;
 }
 
+.settings-control-disabled {
+  opacity: .42;
+}
+
+.settings-control-disabled label {
+  cursor: not-allowed;
+}
+
+.settings-control-disabled input[type="range"]:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .settings-control-panel {
   gap: 12px;
   min-height: 0;
@@ -4241,11 +4254,30 @@ body.lightbox-page-lock {
   margin-top: 16px;
 }
 
+@media (min-width: 1180px) {
+  .settings-batch-build-stack {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
 .settings-batch-build-panel {
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 18px;
   background: color-mix(in srgb, var(--bg) 88%, var(--bg2));
+}
+
+.settings-batch-build-panel-master {
+  grid-column: 1 / -1;
+}
+
+#settings-library-batch-workflow {
+  grid-column: 1 / -1;
+}
+
+.settings-batch-build-master-toggles {
+  margin-top: 14px;
 }
 
 .settings-batch-build-head {
@@ -4316,6 +4348,18 @@ body.lightbox-page-lock {
   border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--bg);
+  transition: border-color .22s ease, background .22s ease, transform .22s ease, box-shadow .22s ease;
+}
+
+.settings-batch-build-select-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg));
+}
+
+.settings-batch-build-select-row.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
 }
 
 .settings-batch-build-checkbox {

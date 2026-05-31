@@ -179,6 +179,24 @@ func (s *DB) UpdatePhotoEXIF(id int64, userID int64, exif *storage.PhotoEXIF) er
 	return nil
 }
 
+// UpdatePhotoSourceMedia 更新导入源媒体的路径与基础源信息。
+func (s *DB) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string, originalName string, size int64, sourceModUnix int64) error {
+	result, err := s.db.Exec(`
+		UPDATE photos
+		SET source_rel_path = ?, original_name = ?, size = ?, source_mod_unix = ?
+		WHERE id = ? AND uploaded_by = ?`,
+		sourceRelPath, originalName, size, sourceModUnix, id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新源媒体路径失败: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("图片不存在")
+	}
+	return nil
+}
+
 // SavePhoto 保存图片记录
 func (s *DB) SavePhoto(photo *storage.Photo) error {
 	if photo.MediaKind == "" {

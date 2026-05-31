@@ -13,7 +13,7 @@ import (
 
 const DefaultLibraryLogoEdge = 512
 
-// SaveSquareLibraryLogo 将输入图片完整缩放到正方形画布中，并输出为 PNG。
+// SaveSquareLibraryLogo 将输入图片居中裁切为正方形并输出为 PNG。
 func SaveSquareLibraryLogo(src io.ReadSeeker, mimeType, destPath string, edge int) error {
 	if edge <= 0 {
 		edge = DefaultLibraryLogoEdge
@@ -29,14 +29,14 @@ func SaveSquareLibraryLogo(src io.ReadSeeker, mimeType, destPath string, edge in
 	if srcW <= 0 || srcH <= 0 {
 		return fmt.Errorf("资源库图像尺寸无效")
 	}
-	scale := float64(edge) / float64(srcW)
-	if hScale := float64(edge) / float64(srcH); hScale < scale {
-		scale = hScale
+	cropEdge := srcW
+	if srcH < cropEdge {
+		cropEdge = srcH
 	}
-	dstW := int(float64(srcW) * scale)
-	dstH := int(float64(srcH) * scale)
-	dstRect := image.Rect((edge-dstW)/2, (edge-dstH)/2, (edge-dstW)/2+dstW, (edge-dstH)/2+dstH)
-	draw.CatmullRom.Scale(dst, dstRect, img, srcBounds, draw.Over, nil)
+	cropMinX := srcBounds.Min.X + (srcW-cropEdge)/2
+	cropMinY := srcBounds.Min.Y + (srcH-cropEdge)/2
+	cropRect := image.Rect(cropMinX, cropMinY, cropMinX+cropEdge, cropMinY+cropEdge)
+	draw.CatmullRom.Scale(dst, dst.Bounds(), img, cropRect, draw.Over, nil)
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("创建资源库图像目录失败: %w", err)

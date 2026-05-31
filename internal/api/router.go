@@ -118,9 +118,7 @@ type videoRegistrar interface {
 	Upload(input service.UploadInput) (*service.UploadResult, error)
 	MediaPath(photo *storage.Photo) string
 	PosterPath(photo *storage.Photo) string
-	ThumbnailBuildPreviewPath(photo *storage.Photo) string
 	ThumbnailPath(photo *storage.Photo) string
-	ThumbnailPreviewPath(photo *storage.Photo) string
 }
 
 type mediaDownloadRequest struct {
@@ -1144,41 +1142,26 @@ func resolveExistingThumbnailCandidates(paths ...string) string {
 	return ""
 }
 
-func thumbnailCandidatePaths(registrar videoRegistrar, photo *storage.Photo, preferFast bool) []string {
+func thumbnailCandidatePaths(registrar videoRegistrar, photo *storage.Photo) []string {
 	if registrar == nil || photo == nil {
 		return nil
 	}
-	if preferFast {
-		return []string{
-			registrar.ThumbnailPreviewPath(photo),
-			registrar.ThumbnailBuildPreviewPath(photo),
-			registrar.ThumbnailPath(photo),
-		}
-	}
 	return []string{
 		registrar.ThumbnailPath(photo),
-		registrar.ThumbnailPreviewPath(photo),
-		registrar.ThumbnailBuildPreviewPath(photo),
 	}
 }
 
-func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo, preferFast bool) (string, error) {
+func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo) (string, error) {
 	if photo == nil {
 		return "", fmt.Errorf("媒体不存在")
 	}
-	thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo, preferFast)...)
+	thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 	if thumbPath != "" {
 		return thumbPath, nil
 	}
 	if photo.MediaKind == storage.MediaKindVideo {
 		preferredPosterPath := registrar.ThumbnailPath(photo)
 		previewSize := cfg.ThumbnailSize
-		if preferFast {
-			preferredPosterPath = registrar.ThumbnailPreviewPath(photo)
-			if previewSize > 256 {
-				previewSize = 256
-			}
-		}
 		if err := media.GeneratePoster(registrar.MediaPath(photo), preferredPosterPath, previewSize); err != nil {
 			return "", err
 		}
@@ -1191,12 +1174,6 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 	}
 	defer file.Close()
 	previewSize := cfg.ThumbnailSize
-	if preferFast {
-		preferredThumbPath = registrar.ThumbnailPreviewPath(photo)
-		if previewSize > 256 {
-			previewSize = 256
-		}
-	}
 	if err := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, previewSize); err != nil {
 		return "", err
 	}
@@ -1246,15 +1223,10 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 			return
 		}
-		profile, ok := requestProfile(c, cfg)
-		if !ok {
-			return
-		}
-		preferFast := profile.Preferences.FastThumbnailBuild
-		thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo, preferFast)...)
+		thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 		if thumbPath == "" {
 			thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
-				return generateThumbnailOnDemand(cfg, registrar, photo, preferFast)
+				return generateThumbnailOnDemand(cfg, registrar, photo)
 			})
 		}
 		if warmer, ok := registrar.(thumbnailWarmer); ok {
@@ -1614,7 +1586,7 @@ func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin
 			thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
 			if thumbPath == "" {
 				thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
-					return generateThumbnailOnDemand(cfg, registrar, photo, true)
+					return generateThumbnailOnDemand(cfg, registrar, photo)
 				})
 			}
 			if thumbPath != "" {

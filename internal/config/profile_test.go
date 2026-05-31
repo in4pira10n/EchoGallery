@@ -79,8 +79,8 @@ func TestLoadFromPath_AppliesActiveProfile(t *testing.T) {
 	if loaded.StoragePath != "/tmp/alice-photos" {
 		t.Fatalf("期望使用活动 Profile 的资源库，得到 %s", loaded.StoragePath)
 	}
-	if loaded.ThumbnailSize != 640 {
-		t.Fatalf("期望使用活动 Profile 的缩略图尺寸，得到 %d", loaded.ThumbnailSize)
+	if loaded.ThumbnailSize != 512 {
+		t.Fatalf("期望活动 Profile 的缩略图尺寸被锁定为 512，得到 %d", loaded.ThumbnailSize)
 	}
 	if loaded.Preferences.GridSize != 200 {
 		t.Fatalf("期望使用活动 Profile 的偏好设置，得到 %d", loaded.Preferences.GridSize)

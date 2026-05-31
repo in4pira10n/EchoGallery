@@ -61,9 +61,7 @@ type stubRegistrar struct {
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
 	setPhotoFavorite               func(id int64, userID int64, favorite bool) error
-	thumbnailBuildPreviewPath      func(photo *storage.Photo) string
 	thumbnailPath                  func(photo *storage.Photo) string
-	thumbnailPreviewPath           func(photo *storage.Photo) string
 }
 
 func (s stubRegistrar) RegisterUploadedVideo(input service.RegisterUploadedVideoInput) (*storage.Photo, error) {
@@ -191,20 +189,6 @@ func (s stubRegistrar) ThumbnailPath(photo *storage.Photo) string {
 	return s.thumbnailPath(photo)
 }
 
-func (s stubRegistrar) ThumbnailBuildPreviewPath(photo *storage.Photo) string {
-	if s.thumbnailBuildPreviewPath != nil {
-		return s.thumbnailBuildPreviewPath(photo)
-	}
-	return s.ThumbnailPreviewPath(photo)
-}
-
-func (s stubRegistrar) ThumbnailPreviewPath(photo *storage.Photo) string {
-	if s.thumbnailPreviewPath != nil {
-		return s.thumbnailPreviewPath(photo)
-	}
-	return s.thumbnailPath(photo)
-}
-
 func (s stubRegistrar) PermanentlyDeletePhoto(id int64, userID int64) error {
 	return s.permanentlyDeletePhoto(id, userID)
 }
@@ -262,12 +246,6 @@ func okRegistrar() stubRegistrar {
 	}
 	thumbnailFilePath := func(photo *storage.Photo) string {
 		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".webp")
-	}
-	thumbnailBuildPreviewFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".build-preview.webp")
-	}
-	thumbnailPreviewFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".preview.webp")
 	}
 	return stubRegistrar{addPhoto: func(albumID int64, photoID int64, userID int64) error {
 		return nil
@@ -445,7 +423,7 @@ func okRegistrar() stubRegistrar {
 		return nil
 	}, setPhotoFavorite: func(id int64, userID int64, favorite bool) error {
 		return nil
-	}, thumbnailBuildPreviewPath: thumbnailBuildPreviewFilePath, thumbnailPath: thumbnailFilePath, thumbnailPreviewPath: thumbnailPreviewFilePath}
+	}, thumbnailPath: thumbnailFilePath}
 }
 
 func testConfig() *config.Config {

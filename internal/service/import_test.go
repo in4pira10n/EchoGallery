@@ -202,6 +202,84 @@ func TestImportExistingPhotos_PrunesMissingFolderAlbums(t *testing.T) {
 	}
 }
 
+func TestImportExistingPhotos_ReusesExistingRecordWhenFolderMoves(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	oldDir := filepath.Join(svc.sourcePath, "旧目录")
+	newDir := filepath.Join(svc.sourcePath, "新目录")
+	if err := os.MkdirAll(oldDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(oldDir, "IMG_2024.jpg")
+	if err := os.WriteFile(oldPath, createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	if first.Imported != 1 {
+		t.Fatalf("期望首次导入 1 张，得到 %d", first.Imported)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("期望首次只有 1 条记录，得到 %d", len(page.Photos))
+	}
+	original := page.Photos[0]
+	originalUUID := original.UUID
+	originalID := original.ID
+	thumbPath := svc.ThumbnailPath(original)
+	if err := os.WriteFile(thumbPath, []byte("thumb"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	newPath := filepath.Join(newDir, "IMG_2024.jpg")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(oldDir); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("迁移目录后二次导入失败: %v", err)
+	}
+	if second.Imported != 0 {
+		t.Fatalf("目录迁移不应重新导入新记录，得到 %d", second.Imported)
+	}
+	page, err = svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("目录迁移后仍应只有 1 条记录，得到 %d", len(page.Photos))
+	}
+	moved := page.Photos[0]
+	if moved.ID != originalID || moved.UUID != originalUUID {
+		t.Fatalf("目录迁移应复用旧记录与缩略图，得到 id=%d uuid=%s", moved.ID, moved.UUID)
+	}
+	if moved.SourceRelPath != filepath.ToSlash(filepath.Join("新目录", "IMG_2024.jpg")) && moved.SourceRelPath != filepath.Clean(filepath.Join("新目录", "IMG_2024.jpg")) {
+		t.Fatalf("期望源路径更新为新目录，得到 %s", moved.SourceRelPath)
+	}
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("原缩略图应继续复用: %v", err)
+	}
+	albums, err := svc.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册失败: %v", err)
+	}
+	if len(albums) != 1 || albums[0].Name != "新目录" {
+		t.Fatalf("期望自动文件夹相册同步迁移到新目录，得到 %+v", albums)
+	}
+}
+
 func TestImportExistingPhotos_SkipsBrokenSupportedFiles(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	if err := os.WriteFile(filepath.Join(svc.sourcePath, "broken.png"), []byte("not-a-real-png"), 0644); err != nil {

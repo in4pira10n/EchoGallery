@@ -26,7 +26,6 @@
     "experimental_prefetch_neighbors": false,
     "experimental_restore_last_view": false,
     "continue_last_video_position": false,
-    "fast_thumbnail_build": false,
     "player_keymap": ""
   }
 }

@@ -55,8 +55,8 @@ type BatchTaskState struct {
 	CurrentDone         int                     `json:"current_done"`
 	CurrentTotal        int                     `json:"current_total"`
 	CurrentPercent      float64                 `json:"current_percent"`
-	FastThumbnailBuild  bool                    `json:"fast_thumbnail_build"`
 	LowResourceMode     bool                    `json:"low_resource_mode"`
+	AggressiveMode      bool                    `json:"aggressive_mode"`
 	ExitAfterComplete   bool                    `json:"exit_after_complete"`
 	StartedAt           string                  `json:"started_at,omitempty"`
 	UpdatedAt           string                  `json:"updated_at,omitempty"`
@@ -67,8 +67,7 @@ type BatchTaskState struct {
 
 type profileDefaultsProbe struct {
 	Preferences struct {
-		FastThumbnailBuild *bool `json:"fast_thumbnail_build"`
-		LowResourceMode    *bool `json:"low_resource_mode"`
+		LowResourceMode *bool `json:"low_resource_mode"`
 	} `json:"preferences"`
 }
 
@@ -136,7 +135,6 @@ func NewUserProfileTemplate(cfg *Config) *Profile {
 		template.AppDataDir = cfg.AppDataDir
 	}
 	profile.applyDefaults(template)
-	profile.Preferences.FastThumbnailBuild = false
 	profile.Preferences.LowResourceMode = false
 	return profile
 }
@@ -157,9 +155,6 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	var probe profileDefaultsProbe
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("解析 Profile 默认值失败: %w", err)
-	}
-	if probe.Preferences.FastThumbnailBuild == nil {
-		profile.Preferences.FastThumbnailBuild = false
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		profile.Preferences.LowResourceMode = false
@@ -256,7 +251,7 @@ func (p *Profile) applyDefaults(fallback *Config) {
 			p.TrashDir = filepath.Join(fallback.AppDataDir, "Trash")
 		}
 	}
-	if p.ThumbnailSize < 96 || p.ThumbnailSize > 1024 {
+	if p.ThumbnailSize != 512 {
 		p.ThumbnailSize = 512
 	}
 	if p.Preferences.Theme == "" {

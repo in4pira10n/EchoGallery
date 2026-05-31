@@ -65,6 +65,9 @@ type Repository interface {
 	// UpdatePhotoEXIF 更新图片 EXIF 数据。
 	UpdatePhotoEXIF(id int64, userID int64, exif *PhotoEXIF) error
 
+	// UpdatePhotoSourceMedia 更新导入源媒体的路径与基础源信息，用于目录迁移后复用原记录与缩略图。
+	UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string, originalName string, size int64, sourceModUnix int64) error
+
 	// --- 相册 ---
 
 	// CreateAlbum 创建相册，成功后填充 album.ID

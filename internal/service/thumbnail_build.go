@@ -32,7 +32,6 @@ type ThumbnailBuildStatus struct {
 
 type thumbnailBuildTask struct {
 	userID int64
-	fast   bool
 	cancel context.CancelFunc
 
 	mu     sync.Mutex
@@ -48,6 +47,16 @@ func imageThumbnailBuildWorkerCount() int {
 	if lowResourceModeEnabled() {
 		return 1
 	}
+	if batchAggressiveModeEnabled() {
+		n := runtime.GOMAXPROCS(0) / 3
+		if n < 2 {
+			return 2
+		}
+		if n > 6 {
+			return 6
+		}
+		return n
+	}
 	n := runtime.GOMAXPROCS(0) / 5
 	if n < 1 {
 		return 1
@@ -59,12 +68,25 @@ func imageThumbnailBuildWorkerCount() int {
 }
 
 func heavyImageThumbnailBuildWorkerCount() int {
+	if batchAggressiveModeEnabled() && !lowResourceModeEnabled() {
+		return 2
+	}
 	return 1
 }
 
 func videoThumbnailBuildWorkerCount() int {
 	if lowResourceModeEnabled() {
 		return 1
+	}
+	if batchAggressiveModeEnabled() {
+		n := runtime.GOMAXPROCS(0) / 5
+		if n < 2 {
+			return 2
+		}
+		if n > 4 {
+			return 4
+		}
+		return n
 	}
 	n := runtime.GOMAXPROCS(0) / 8
 	if n < 1 {
@@ -76,7 +98,7 @@ func videoThumbnailBuildWorkerCount() int {
 	return n
 }
 
-func (s *PhotoService) StartThumbnailBuild(userID int64, fast bool) (ThumbnailBuildStatus, error) {
+func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, error) {
 	if s == nil {
 		return ThumbnailBuildStatus{}, fmt.Errorf("媒体服务不可用")
 	}
@@ -93,11 +115,10 @@ func (s *PhotoService) StartThumbnailBuild(userID int64, fast bool) (ThumbnailBu
 	ctx, cancel := context.WithCancel(context.Background())
 	task := &thumbnailBuildTask{
 		userID: userID,
-		fast:   fast,
 		cancel: cancel,
 		status: ThumbnailBuildStatus{
 			Status:    "running",
-			Message:   thumbnailBuildStartMessage(fast),
+			Message:   thumbnailBuildStartMessage(),
 			StartedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		},
@@ -202,7 +223,7 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 			task.adjustTotal(-removed)
 		}
 		sortPhotosForSequentialThumbnailBuild(page.Photos)
-		targetTier := thumbnailBuildTargetTier(task.fast)
+		targetTier := thumbnailTierFull
 		targetLabel := thumbnailBuildTierLabel(targetTier)
 		for _, photo := range page.Photos {
 			if err := ctx.Err(); err != nil {
@@ -228,7 +249,7 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 			break
 		}
 		cursor = page.NextCursor
-		task.setMessage(thumbnailBuildQueueMessage(task.fast))
+		task.setMessage(thumbnailBuildQueueMessage())
 	}
 
 	close(heavyImageJobs)
@@ -237,70 +258,42 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 	workerWG.Wait()
 
 	if ctx.Err() != nil {
-		task.finish("cancelled", thumbnailBuildCancelledMessage(task.fast), "")
+		task.finish("cancelled", thumbnailBuildCancelledMessage(), "")
 		return
 	}
 	if runErr != nil {
-		task.finish("failed", thumbnailBuildFailedMessage(task.fast), runErr.Error())
+		task.finish("failed", thumbnailBuildFailedMessage(), runErr.Error())
 		return
 	}
-	task.finish("completed", thumbnailBuildCompletedMessage(task.fast), "")
-}
-
-func thumbnailBuildTargetTier(fast bool) string {
-	if fast {
-		return thumbnailTierBuildPreview
-	}
-	return thumbnailTierBuildFull
+	task.finish("completed", thumbnailBuildCompletedMessage(), "")
 }
 
 func thumbnailBuildTierLabel(tier string) string {
 	switch tier {
-	case thumbnailTierBuildPreview:
-		return "极速预览图"
-	case thumbnailTierBuildFull, thumbnailTierFull:
+	case thumbnailTierFull:
 		return "标准缩略图"
-	case thumbnailTierPreview:
-		return "预览图"
-	case thumbnailTierAll:
-		return "预览图与标准图"
 	default:
 		return "缩略图"
 	}
 }
 
-func thumbnailBuildStartMessage(fast bool) string {
-	if fast {
-		return "正在扫描媒体并生成极速预览缩略图…"
-	}
+func thumbnailBuildStartMessage() string {
 	return "正在扫描媒体并生成标准缩略图…"
 }
 
-func thumbnailBuildQueueMessage(fast bool) string {
-	if fast {
-		return "正在排队极速预览图任务…"
-	}
+func thumbnailBuildQueueMessage() string {
 	return "正在排队标准缩略图任务…"
 }
 
-func thumbnailBuildCompletedMessage(fast bool) string {
-	if fast {
-		return "极速预览缩略图已生成完成"
-	}
+func thumbnailBuildCompletedMessage() string {
 	return "标准缩略图已生成完成"
 }
 
-func thumbnailBuildCancelledMessage(fast bool) string {
-	if fast {
-		return "已取消预览缩略图生成"
-	}
+func thumbnailBuildCancelledMessage() string {
 	return "已取消标准缩略图生成"
 }
 
-func thumbnailBuildFailedMessage(fast bool) string {
-	if fast {
-		return "预览缩略图生成失败"
-	}
+func thumbnailBuildFailedMessage() string {
 	return "标准缩略图生成失败"
 }
 
@@ -375,18 +368,8 @@ func (s *PhotoService) runThumbnailBuildWorker(ctx context.Context, task *thumbn
 				continue
 			}
 			if err := s.generateThumbnailForPhotoTier(job.photo, job.tier); err != nil {
-				if job.tier == thumbnailTierAll {
-					task.incrementFailed("预览图")
-					task.incrementFailed("标准图")
-					continue
-				}
 				label := thumbnailBuildTierLabel(job.tier)
 				task.incrementFailed(label)
-				continue
-			}
-			if job.tier == thumbnailTierAll {
-				task.incrementGenerated("预览图")
-				task.incrementGenerated("标准图")
 				continue
 			}
 			label := thumbnailBuildTierLabel(job.tier)

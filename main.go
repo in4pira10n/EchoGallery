@@ -86,7 +86,7 @@ func newLibraryBatchThumbnailBuildManager(shutdown func() error) *libraryBatchTh
 	}
 }
 
-func newLibraryBatchBuildTask(libraries []config.Library, fast bool, lowResource bool, cancel context.CancelFunc) *libraryBatchBuildTask {
+func newLibraryBatchBuildTask(libraries []config.Library, lowResource bool, aggressive bool, cancel context.CancelFunc) *libraryBatchBuildTask {
 	items := make([]api.LibraryBatchBuildLibraryStatus, 0, len(libraries))
 	for _, library := range libraries {
 		items = append(items, api.LibraryBatchBuildLibraryStatus{
@@ -100,15 +100,15 @@ func newLibraryBatchBuildTask(libraries []config.Library, fast bool, lowResource
 	return &libraryBatchBuildTask{
 		cancel: cancel,
 		status: api.LibraryBatchBuildStatus{
-			Status:             "running",
-			Message:            "正在准备批量任务…",
-			TotalLibraries:     len(libraries),
-			FastThumbnailBuild: fast,
-			LowResourceMode:    lowResource,
-			ExitAfterComplete:  false,
-			StartedAt:          now.Format(time.RFC3339),
-			UpdatedAt:          now.Format(time.RFC3339),
-			Libraries:          items,
+			Status:            "running",
+			Message:           "正在准备批量任务…",
+			TotalLibraries:    len(libraries),
+			LowResourceMode:   lowResource,
+			AggressiveMode:    aggressive,
+			ExitAfterComplete: false,
+			StartedAt:         now.Format(time.RFC3339),
+			UpdatedAt:         now.Format(time.RFC3339),
+			Libraries:         items,
 		},
 	}
 }
@@ -192,6 +192,42 @@ func loadPersistedBatchStatus(profile *config.Profile, kind batchTaskKind, defau
 	if len(status.SelectedPaths) == 0 {
 		status.SelectedPaths = defaultSelectedPaths(profile.Libraries)
 	}
+	status = normalizeDormantBatchStatus(kind, status)
+	return status
+}
+
+func normalizeDormantBatchStatus(kind batchTaskKind, status api.LibraryBatchBuildStatus) api.LibraryBatchBuildStatus {
+	value := strings.TrimSpace(status.Status)
+	if value != "running" && value != "cancelling" {
+		return status
+	}
+	if kind == batchTaskKindScan {
+		status.Message = "上次批量扫描已中断，可继续"
+	} else {
+		status.Message = "上次批量缩略图任务已中断，可继续"
+	}
+	status.Status = "cancelled"
+	status.CurrentPhase = ""
+	status.CurrentDone = 0
+	status.CurrentTotal = 0
+	status.CurrentPercent = 0
+	status.CurrentLibraryIndex = 0
+	status.CurrentLibraryName = ""
+	status.CurrentLibraryPath = ""
+	for index := range status.Libraries {
+		switch strings.TrimSpace(status.Libraries[index].Status) {
+		case "scanning", "building", "cancelled":
+			status.Libraries[index].Status = "pending"
+			if kind == batchTaskKindScan {
+				status.Libraries[index].Message = "等待继续扫描"
+			} else {
+				status.Libraries[index].Message = "等待继续缩略图任务"
+			}
+			status.Libraries[index].Failed = 0
+		}
+	}
+	status.CompletedLibraries = countBatchStatusWithState(status.Libraries, "completed")
+	status.FailedLibraries = countBatchStatusWithState(status.Libraries, "failed")
 	return status
 }
 
@@ -255,8 +291,8 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 		CurrentDone:         state.CurrentDone,
 		CurrentTotal:        state.CurrentTotal,
 		CurrentPercent:      state.CurrentPercent,
-		FastThumbnailBuild:  state.FastThumbnailBuild,
 		LowResourceMode:     state.LowResourceMode,
+		AggressiveMode:      state.AggressiveMode,
 		ExitAfterComplete:   state.ExitAfterComplete,
 		StartedAt:           state.StartedAt,
 		UpdatedAt:           state.UpdatedAt,
@@ -299,8 +335,8 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 		CurrentDone:         status.CurrentDone,
 		CurrentTotal:        status.CurrentTotal,
 		CurrentPercent:      status.CurrentPercent,
-		FastThumbnailBuild:  status.FastThumbnailBuild,
 		LowResourceMode:     status.LowResourceMode,
+		AggressiveMode:      status.AggressiveMode,
 		ExitAfterComplete:   status.ExitAfterComplete,
 		StartedAt:           status.StartedAt,
 		UpdatedAt:           status.UpdatedAt,
@@ -486,7 +522,7 @@ func (m *libraryBatchBuildManager) Status(profile *config.Profile, username stri
 	return loadPersistedBatchStatus(profile, batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量扫描参数无效")
 	}
@@ -505,14 +541,16 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	task := newLibraryBatchBuildTask(libraries, profile.Preferences.FastThumbnailBuild, profile.Preferences.LowResourceMode, cancel)
+	effectiveLowResource := profile.Preferences.LowResourceMode && !aggressive
+	task := newLibraryBatchBuildTask(libraries, effectiveLowResource, aggressive, cancel)
 	task.username = username
 	task.idleMessage = m.idleMessage
 	task.persistFn = func(status api.LibraryBatchBuildStatus) {
 		_ = saveBatchTaskState(cfg, username, batchTaskKindScan, status)
 	}
 	task.status.Message = "正在准备批量扫描资源库…"
-	task.status.FastThumbnailBuild = false
+	task.status.LowResourceMode = effectiveLowResource
+	task.status.AggressiveMode = aggressive
 	task.status.ExitAfterComplete = defaultExitAfter
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
 	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false)
@@ -521,6 +559,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	m.task = task
 	cfgSnapshot := *cfg
 	cfgSnapshot.ApplyProfile(profile)
+	cfgSnapshot.Preferences.LowResourceMode = effectiveLowResource
 	m.mu.Unlock()
 
 	task.persist(true)
@@ -598,7 +637,7 @@ func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, user
 	return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量缩略图参数无效")
 	}
@@ -617,13 +656,16 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	task := newLibraryBatchBuildTask(libraries, profile.Preferences.FastThumbnailBuild, profile.Preferences.LowResourceMode, cancel)
+	effectiveLowResource := profile.Preferences.LowResourceMode && !aggressive
+	task := newLibraryBatchBuildTask(libraries, effectiveLowResource, aggressive, cancel)
 	task.username = username
 	task.idleMessage = m.idleMessage
 	task.persistFn = func(status api.LibraryBatchBuildStatus) {
 		_ = saveBatchTaskState(cfg, username, batchTaskKindThumbnails, status)
 	}
 	task.status.Message = "正在准备批量构建缩略图…"
+	task.status.LowResourceMode = effectiveLowResource
+	task.status.AggressiveMode = aggressive
 	task.status.ExitAfterComplete = defaultExitAfter
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
 	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true)
@@ -632,6 +674,7 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	m.task = task
 	cfgSnapshot := *cfg
 	cfgSnapshot.ApplyProfile(profile)
+	cfgSnapshot.Preferences.LowResourceMode = effectiveLowResource
 	m.mu.Unlock()
 
 	task.persist(true)
@@ -717,6 +760,12 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 	}
 
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
+	service.SetBatchAggressiveMode(task.snapshot().AggressiveMode)
+	defer service.SetBatchAggressiveMode(false)
+	sleepGuard := startBestEffortSleepInhibitor("batch library scan")
+	if sleepGuard != nil {
+		defer sleepGuard.Stop()
+	}
 
 	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
 	if err != nil {
@@ -876,6 +925,12 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 	}
 
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
+	service.SetBatchAggressiveMode(task.snapshot().AggressiveMode)
+	defer service.SetBatchAggressiveMode(false)
+	sleepGuard := startBestEffortSleepInhibitor("batch thumbnail build")
+	if sleepGuard != nil {
+		defer sleepGuard.Stop()
+	}
 
 	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
 	if err != nil {
@@ -904,7 +959,7 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			continue
 		}
 
-		if _, err := svc.StartThumbnailBuild(userID, cfg.Preferences.FastThumbnailBuild); err != nil {
+		if _, err := svc.StartThumbnailBuild(userID); err != nil {
 			_ = repo.Close()
 			m.failLibrary(task, index, fmt.Errorf("启动缩略图任务失败: %w", err))
 			continue
@@ -1196,6 +1251,8 @@ func (s *libraryBuildState) progress(done, total int) {
 	if total > 0 {
 		s.status.Status = "running"
 		s.status.Message = "正在扫描与构建资源库"
+	} else if done > 0 && s.status.Status == "discovering" {
+		s.status.Message = fmt.Sprintf("正在发现资源库中的媒体文件… 已发现 %d 条", done)
 	}
 	s.status.Done = done
 	s.status.Total = total
@@ -1410,11 +1467,13 @@ func main() {
 		Start:                batchBuildManager.Start,
 		Cancel:               batchBuildManager.Cancel,
 		SetExitAfterComplete: batchBuildManager.SetExitAfterComplete,
+		SetSelection:         batchBuildManager.SetSelection,
 	}, api.LibraryBatchThumbnailBuildHooks{
 		Status:               batchThumbnailBuildManager.Status,
 		Start:                batchThumbnailBuildManager.Start,
 		Cancel:               batchThumbnailBuildManager.Cancel,
 		SetExitAfterComplete: batchThumbnailBuildManager.SetExitAfterComplete,
+		SetSelection:         batchThumbnailBuildManager.SetSelection,
 	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {

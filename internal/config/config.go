@@ -50,7 +50,6 @@ type Preferences struct {
 	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
-	FastThumbnailBuild            bool   `json:"fast_thumbnail_build"`
 	LowResourceMode               bool   `json:"low_resource_mode"`
 	PlayerKeymap                  string `json:"player_keymap"`
 }
@@ -72,7 +71,6 @@ type configDefaultsProbe struct {
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
-		FastThumbnailBuild            *bool   `json:"fast_thumbnail_build"`
 		LowResourceMode               *bool   `json:"low_resource_mode"`
 		PlayerKeymap                  *string `json:"player_keymap"`
 	} `json:"preferences"`
@@ -235,7 +233,7 @@ func (c *Config) validateGlobal() error {
 	}
 	c.normalizeLibraries()
 	c.ThumbnailDir = strings.TrimSpace(c.ThumbnailDir)
-	if c.ThumbnailSize < 96 || c.ThumbnailSize > 1024 {
+	if c.ThumbnailSize != 512 {
 		c.ThumbnailSize = 512
 	}
 	if c.JWTSecret == "" {
@@ -276,7 +274,7 @@ func (c *Config) applyDefaults() {
 	if c.ThumbnailDir == "" && c.AppDataDir != "" {
 		c.ThumbnailDir = filepath.Join(c.AppDataDir, "thumbnails")
 	}
-	if c.ThumbnailSize == 0 {
+	if c.ThumbnailSize != 512 {
 		c.ThumbnailSize = 512
 	}
 	if c.Preferences.Theme == "" {
@@ -425,9 +423,6 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	}
 	if probe.Preferences.ContinueLastVideoPosition == nil {
 		c.Preferences.ContinueLastVideoPosition = true
-	}
-	if probe.Preferences.FastThumbnailBuild == nil {
-		c.Preferences.FastThumbnailBuild = false
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		c.Preferences.LowResourceMode = false
