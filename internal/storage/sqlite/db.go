@@ -85,6 +85,28 @@ func (s *DB) migrate() error {
 		return err
 	}
 	if _, err := s.db.Exec(`
+		UPDATE albums
+		SET source_kind = 'folder',
+		    source_rel_path = trim(replace(name, '\', '/'))
+		WHERE description = '自动从文件夹导入'
+		  AND trim(name) <> ''
+		  AND (source_kind = '' OR source_kind IS NULL)
+		  AND (source_rel_path = '' OR source_rel_path IS NULL)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		UPDATE photos
+		SET source_rel_path = trim(replace(source_rel_path, '\', '/'), '/')
+		WHERE source_rel_path <> ''`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		UPDATE albums
+		SET source_rel_path = trim(replace(source_rel_path, '\', '/'), '/')
+		WHERE source_rel_path <> ''`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
 		UPDATE photos
 		SET random_sort_key = ((id * 1103515245 + 12345) % 2147483647) + 1
 		WHERE random_sort_key = 0`); err != nil {

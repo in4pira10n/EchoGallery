@@ -18,6 +18,7 @@ const (
 
 // Profile 保存某个用户独立的资源库与偏好设置。
 type Profile struct {
+	ActiveLibraryID string         `json:"active_library_id,omitempty"`
 	StoragePath     string         `json:"storage_path"`
 	Libraries       []Library      `json:"libraries,omitempty"`
 	ThumbnailDir    string         `json:"thumbnail_dir"`
@@ -30,6 +31,7 @@ type Profile struct {
 }
 
 type BatchTaskLibraryState struct {
+	ID        string `json:"id,omitempty"`
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	Status    string `json:"status"`
@@ -42,27 +44,32 @@ type BatchTaskLibraryState struct {
 }
 
 type BatchTaskState struct {
-	SelectedPaths       []string                `json:"selected_paths,omitempty"`
-	Status              string                  `json:"status"`
-	Message             string                  `json:"message"`
-	CurrentLibraryName  string                  `json:"current_library_name,omitempty"`
-	CurrentLibraryPath  string                  `json:"current_library_path,omitempty"`
-	CurrentLibraryIndex int                     `json:"current_library_index"`
-	TotalLibraries      int                     `json:"total_libraries"`
-	CompletedLibraries  int                     `json:"completed_libraries"`
-	FailedLibraries     int                     `json:"failed_libraries"`
-	CurrentPhase        string                  `json:"current_phase,omitempty"`
-	CurrentDone         int                     `json:"current_done"`
-	CurrentTotal        int                     `json:"current_total"`
-	CurrentPercent      float64                 `json:"current_percent"`
-	LowResourceMode     bool                    `json:"low_resource_mode"`
-	AggressiveMode      bool                    `json:"aggressive_mode"`
-	ExitAfterComplete   bool                    `json:"exit_after_complete"`
-	StartedAt           string                  `json:"started_at,omitempty"`
-	UpdatedAt           string                  `json:"updated_at,omitempty"`
-	FinishedAt          string                  `json:"finished_at,omitempty"`
-	Error               string                  `json:"error,omitempty"`
-	Libraries           []BatchTaskLibraryState `json:"libraries,omitempty"`
+	SelectedLibraryIDs   []string                `json:"selected_library_ids,omitempty"`
+	SelectedPaths        []string                `json:"selected_paths,omitempty"`
+	SelectionConfigured  bool                    `json:"selection_configured,omitempty"`
+	Status               string                  `json:"status"`
+	Message              string                  `json:"message"`
+	MoveLegacyThumbnails bool                    `json:"move_legacy_thumbnails,omitempty"`
+	CleanThumbnailFiles  bool                    `json:"clean_thumbnail_files,omitempty"`
+	CurrentLibraryID     string                  `json:"current_library_id,omitempty"`
+	CurrentLibraryName   string                  `json:"current_library_name,omitempty"`
+	CurrentLibraryPath   string                  `json:"current_library_path,omitempty"`
+	CurrentLibraryIndex  int                     `json:"current_library_index"`
+	TotalLibraries       int                     `json:"total_libraries"`
+	CompletedLibraries   int                     `json:"completed_libraries"`
+	FailedLibraries      int                     `json:"failed_libraries"`
+	CurrentPhase         string                  `json:"current_phase,omitempty"`
+	CurrentDone          int                     `json:"current_done"`
+	CurrentTotal         int                     `json:"current_total"`
+	CurrentPercent       float64                 `json:"current_percent"`
+	LowResourceMode      bool                    `json:"low_resource_mode"`
+	AggressiveMode       bool                    `json:"aggressive_mode"`
+	ExitAfterComplete    bool                    `json:"exit_after_complete"`
+	StartedAt            string                  `json:"started_at,omitempty"`
+	UpdatedAt            string                  `json:"updated_at,omitempty"`
+	FinishedAt           string                  `json:"finished_at,omitempty"`
+	Error                string                  `json:"error,omitempty"`
+	Libraries            []BatchTaskLibraryState `json:"libraries,omitempty"`
 }
 
 type profileDefaultsProbe struct {
@@ -116,6 +123,7 @@ func (c *Config) ProfileAvatarPath(username string) (string, error) {
 
 func DefaultProfileFromConfig(cfg *Config) *Profile {
 	profile := &Profile{
+		ActiveLibraryID: cfg.ActiveLibraryID,
 		StoragePath:     cfg.StoragePath,
 		Libraries:       append([]Library(nil), cfg.Libraries...),
 		ThumbnailDir:    cfg.ThumbnailDir,
@@ -186,8 +194,10 @@ func SaveProfile(cfg *Config, username string, profile *Profile) error {
 	}
 	next := *profile
 	next.Libraries = append([]Library(nil), profile.Libraries...)
+	next.BatchScan.SelectedLibraryIDs = append([]string(nil), profile.BatchScan.SelectedLibraryIDs...)
 	next.BatchScan.SelectedPaths = append([]string(nil), profile.BatchScan.SelectedPaths...)
 	next.BatchScan.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchScan.Libraries...)
+	next.BatchThumbnails.SelectedLibraryIDs = append([]string(nil), profile.BatchThumbnails.SelectedLibraryIDs...)
 	next.BatchThumbnails.SelectedPaths = append([]string(nil), profile.BatchThumbnails.SelectedPaths...)
 	next.BatchThumbnails.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchThumbnails.Libraries...)
 	if err := next.validate(cfg); err != nil {
@@ -216,6 +226,7 @@ func (c *Config) ApplyProfile(profile *Profile) {
 		return
 	}
 	profile.applyDefaults(c)
+	c.ActiveLibraryID = profile.ActiveLibraryID
 	c.StoragePath = profile.StoragePath
 	c.Libraries = append([]Library(nil), profile.Libraries...)
 	c.ThumbnailDir = profile.ThumbnailDir
@@ -285,12 +296,15 @@ func (p *Profile) applyDefaults(fallback *Config) {
 
 func (p *Profile) normalizeLibraries() {
 	if len(p.Libraries) == 0 && strings.TrimSpace(p.StoragePath) != "" {
+		usedIDs := make(map[string]struct{}, 1)
 		p.Libraries = []Library{{
+			ID:   ensureLibraryIDForPath("", p.StoragePath, usedIDs),
 			Name: defaultLibraryName(0),
 			Path: p.StoragePath,
 		}}
 	}
 	seen := make(map[string]struct{}, len(p.Libraries))
+	usedIDs := make(map[string]struct{}, len(p.Libraries))
 	normalized := make([]Library, 0, len(p.Libraries))
 	for _, lib := range p.Libraries {
 		path := strings.TrimSpace(lib.Path)
@@ -306,7 +320,9 @@ func (p *Profile) normalizeLibraries() {
 		if name == "" {
 			name = defaultLibraryName(len(normalized))
 		}
+		id := ensureLibraryIDForPath(lib.ID, path, usedIDs)
 		normalized = append(normalized, Library{
+			ID:          id,
 			Name:        name,
 			Path:        path,
 			LogoAsset:   strings.TrimSpace(lib.LogoAsset),
@@ -314,7 +330,19 @@ func (p *Profile) normalizeLibraries() {
 		})
 	}
 	p.Libraries = normalized
+	activeID := normalizeLibraryID(p.ActiveLibraryID)
+	if activeID != "" {
+		for _, lib := range p.Libraries {
+			if lib.ID == activeID {
+				p.ActiveLibraryID = lib.ID
+				p.StoragePath = lib.Path
+				return
+			}
+		}
+	}
+	p.ActiveLibraryID = activeID
 	if strings.TrimSpace(p.StoragePath) == "" && len(p.Libraries) > 0 {
+		p.ActiveLibraryID = p.Libraries[0].ID
 		p.StoragePath = p.Libraries[0].Path
 	}
 	if p.StoragePath == "" {
@@ -323,11 +351,13 @@ func (p *Profile) normalizeLibraries() {
 	activeKey := NormalizeStoragePath(p.StoragePath)
 	for _, lib := range p.Libraries {
 		if NormalizeStoragePath(lib.Path) == activeKey {
+			p.ActiveLibraryID = lib.ID
 			p.StoragePath = lib.Path
 			return
 		}
 	}
 	if len(p.Libraries) > 0 {
+		p.ActiveLibraryID = p.Libraries[0].ID
 		p.StoragePath = p.Libraries[0].Path
 	}
 }
@@ -337,12 +367,35 @@ func (s *BatchTaskState) normalizeAgainstLibraries(libraries []Library) {
 		return
 	}
 	allowed := make(map[string]Library, len(libraries))
+	allowedByID := make(map[string]Library, len(libraries))
 	for _, library := range libraries {
 		path := strings.TrimSpace(library.Path)
 		if path == "" {
 			continue
 		}
 		allowed[path] = library
+		if id := strings.TrimSpace(library.ID); id != "" {
+			allowedByID[id] = library
+		}
+	}
+	if len(s.SelectedLibraryIDs) > 0 {
+		selected := make([]string, 0, len(s.SelectedLibraryIDs))
+		seen := make(map[string]struct{}, len(s.SelectedLibraryIDs))
+		for _, id := range s.SelectedLibraryIDs {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, ok := allowedByID[id]; !ok {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			selected = append(selected, id)
+		}
+		s.SelectedLibraryIDs = selected
 	}
 	if len(s.SelectedPaths) > 0 {
 		selected := make([]string, 0, len(s.SelectedPaths))
@@ -367,16 +420,24 @@ func (s *BatchTaskState) normalizeAgainstLibraries(libraries []Library) {
 		rows := make([]BatchTaskLibraryState, 0, len(s.Libraries))
 		seen := make(map[string]struct{}, len(s.Libraries))
 		for _, row := range s.Libraries {
-			path := strings.TrimSpace(row.Path)
-			lib, ok := allowed[path]
+			lib := Library{}
+			ok := false
+			if id := strings.TrimSpace(row.ID); id != "" {
+				lib, ok = allowedByID[id]
+			}
 			if !ok {
+				path := strings.TrimSpace(row.Path)
+				lib, ok = allowed[path]
+				if !ok {
+					continue
+				}
+			}
+			if _, exists := seen[lib.ID]; exists {
 				continue
 			}
-			if _, exists := seen[path]; exists {
-				continue
-			}
-			seen[path] = struct{}{}
-			row.Path = path
+			seen[lib.ID] = struct{}{}
+			row.ID = lib.ID
+			row.Path = lib.Path
 			if strings.TrimSpace(row.Name) == "" {
 				row.Name = lib.Name
 			}
@@ -384,8 +445,15 @@ func (s *BatchTaskState) normalizeAgainstLibraries(libraries []Library) {
 		}
 		s.Libraries = rows
 	}
-	if len(s.SelectedPaths) == 0 && len(libraries) > 0 {
+	if len(s.SelectedLibraryIDs) == 0 && len(s.SelectedPaths) == 0 && len(libraries) > 0 {
 		s.Status = ""
 		s.Message = ""
+	}
+	if strings.TrimSpace(s.CurrentLibraryID) != "" {
+		if lib, ok := allowedByID[strings.TrimSpace(s.CurrentLibraryID)]; ok {
+			s.CurrentLibraryID = lib.ID
+			s.CurrentLibraryPath = lib.Path
+			s.CurrentLibraryName = lib.Name
+		}
 	}
 }

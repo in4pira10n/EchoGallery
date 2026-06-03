@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	execCommand = exec.Command
-	currentOS   = runtime.GOOS
+	execCommand    = exec.Command
+	currentOS      = runtime.GOOS
 	moveFileRename = os.Rename
 )
 
@@ -76,17 +76,45 @@ func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*sto
 
 // GetAlbum 获取单个相册。
 func (s *PhotoService) GetAlbum(id int64, userID int64) (*storage.Album, error) {
-	return s.repo.GetAlbumByID(id, userID)
+	album, err := s.repo.GetAlbumByID(id, userID)
+	if err != nil || album == nil {
+		return album, err
+	}
+	if !isAutoFolderAlbum(album) {
+		return nil, nil
+	}
+	return album, nil
 }
 
 // ListAlbums 获取用户所有相册。
 func (s *PhotoService) ListAlbums(userID int64) ([]*storage.Album, error) {
-	return s.repo.ListAlbums(userID)
+	albums, err := s.repo.ListAlbums(userID)
+	if err != nil {
+		return nil, err
+	}
+	return filterAutoFolderAlbums(albums), nil
 }
 
 // ListAlbumsForPhoto 获取包含指定媒体的相册。
 func (s *PhotoService) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
-	return s.repo.ListAlbumsForPhoto(photoID, userID)
+	albums, err := s.repo.ListAlbumsForPhoto(photoID, userID)
+	if err != nil {
+		return nil, err
+	}
+	return filterAutoFolderAlbums(albums), nil
+}
+
+func filterAutoFolderAlbums(albums []*storage.Album) []*storage.Album {
+	if len(albums) == 0 {
+		return albums
+	}
+	filtered := make([]*storage.Album, 0, len(albums))
+	for _, album := range albums {
+		if isAutoFolderAlbum(album) {
+			filtered = append(filtered, album)
+		}
+	}
+	return filtered
 }
 
 // ListShares 获取用户所有分享链接。
@@ -270,7 +298,7 @@ func (s *PhotoService) PermanentlyDeletePhoto(id int64, userID int64) error {
 	}
 
 	s.moveManagedFileToTrash(s.MediaPath(photo))
-	for _, thumbPath := range s.ThumbnailCandidates(photo) {
+	for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
 		s.moveManagedFileToTrash(thumbPath)
 	}
 	return nil
@@ -285,7 +313,7 @@ func (s *PhotoService) EmptyTrash(userID int64) error {
 
 	for _, photo := range photos {
 		s.moveManagedFileToTrash(s.MediaPath(photo))
-		for _, thumbPath := range s.ThumbnailCandidates(photo) {
+		for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
 			s.moveManagedFileToTrash(thumbPath)
 		}
 	}
@@ -305,6 +333,37 @@ func (s *PhotoService) RevealInFinder(id int64, userID int64) error {
 	target := s.resolveFinderPath(photo)
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("文件不存在")
+	}
+	if err := revealInFileManager(target); err != nil {
+		return fmt.Errorf("在文件管理器中打开失败: %w", err)
+	}
+	return nil
+}
+
+// RevealAlbumInFinder 在系统文件管理器中定位文件夹相册。
+func (s *PhotoService) RevealAlbumInFinder(id int64, userID int64) error {
+	album, err := s.repo.GetAlbumByID(id, userID)
+	if err != nil {
+		return err
+	}
+	if album == nil || !isAutoFolderAlbum(album) {
+		return fmt.Errorf("相册不存在")
+	}
+	relPath := autoFolderAlbumPath(album)
+	if relPath == "" {
+		return fmt.Errorf("相册没有可打开的文件夹路径")
+	}
+	cleanRel := filepath.Clean(relPath)
+	if filepath.IsAbs(cleanRel) || cleanRel == "." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) || cleanRel == ".." {
+		return fmt.Errorf("相册路径无效")
+	}
+	target := filepath.Join(s.sourcePath, cleanRel)
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("文件夹不存在")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("相册路径不是文件夹")
 	}
 	if err := revealInFileManager(target); err != nil {
 		return fmt.Errorf("在文件管理器中打开失败: %w", err)

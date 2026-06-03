@@ -90,6 +90,7 @@ func newLibraryBatchBuildTask(libraries []config.Library, lowResource bool, aggr
 	items := make([]api.LibraryBatchBuildLibraryStatus, 0, len(libraries))
 	for _, library := range libraries {
 		items = append(items, api.LibraryBatchBuildLibraryStatus{
+			ID:      library.ID,
 			Name:    library.Name,
 			Path:    library.Path,
 			Status:  "pending",
@@ -130,6 +131,7 @@ func (t *libraryBatchBuildTask) snapshot() api.LibraryBatchBuildStatus {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	status := t.status
+	status.SelectedLibraryIDs = append([]string(nil), status.SelectedLibraryIDs...)
 	status.SelectedPaths = append([]string(nil), status.SelectedPaths...)
 	if len(status.Libraries) > 0 {
 		status.Libraries = append([]api.LibraryBatchBuildLibraryStatus(nil), status.Libraries...)
@@ -189,7 +191,10 @@ func loadPersistedBatchStatus(profile *config.Profile, kind batchTaskKind, defau
 	if status.ExitAfterComplete == false && defaultExitAfter {
 		status.ExitAfterComplete = true
 	}
-	if len(status.SelectedPaths) == 0 {
+	if !status.SelectionConfigured && len(status.SelectedLibraryIDs) == 0 {
+		status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(profile.Libraries)
+	}
+	if !status.SelectionConfigured && len(status.SelectedPaths) == 0 {
 		status.SelectedPaths = defaultSelectedPaths(profile.Libraries)
 	}
 	status = normalizeDormantBatchStatus(kind, status)
@@ -211,6 +216,7 @@ func normalizeDormantBatchStatus(kind batchTaskKind, status api.LibraryBatchBuil
 	status.CurrentDone = 0
 	status.CurrentTotal = 0
 	status.CurrentPercent = 0
+	status.CurrentLibraryID = ""
 	status.CurrentLibraryIndex = 0
 	status.CurrentLibraryName = ""
 	status.CurrentLibraryPath = ""
@@ -243,18 +249,40 @@ func defaultSelectedPaths(libraries []config.Library) []string {
 	return selected
 }
 
+func selectedLibraryIDsFromLibraries(libraries []config.Library) []string {
+	selected := make([]string, 0, len(libraries))
+	for _, library := range libraries {
+		if id := strings.TrimSpace(library.ID); id != "" {
+			selected = append(selected, id)
+		}
+	}
+	return selected
+}
+
 func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library) api.LibraryBatchBuildStatus {
-	selected := normalizedSelectedLibraries(libraries, state.SelectedPaths)
+	selectionConfigured := state.SelectionConfigured || len(state.SelectedLibraryIDs) > 0 || len(state.SelectedPaths) > 0
+	selected := normalizedSelectedLibraries(libraries, state.SelectedLibraryIDs, state.SelectedPaths)
+	if selectionConfigured {
+		selected = normalizedSelectedLibrariesAllowEmpty(libraries, state.SelectedLibraryIDs, state.SelectedPaths)
+	}
+	rowsByID := make(map[string]config.BatchTaskLibraryState, len(state.Libraries))
 	rowsByPath := make(map[string]config.BatchTaskLibraryState, len(state.Libraries))
 	for _, row := range state.Libraries {
+		if id := strings.TrimSpace(row.ID); id != "" {
+			rowsByID[id] = row
+		}
 		rowsByPath[strings.TrimSpace(row.Path)] = row
 	}
 	rows := make([]api.LibraryBatchBuildLibraryStatus, 0, len(selected))
 	completed := 0
 	failed := 0
 	for _, library := range selected {
-		row := rowsByPath[strings.TrimSpace(library.Path)]
+		row, ok := rowsByID[strings.TrimSpace(library.ID)]
+		if !ok {
+			row = rowsByPath[strings.TrimSpace(library.Path)]
+		}
 		item := api.LibraryBatchBuildLibraryStatus{
+			ID:        library.ID,
 			Name:      library.Name,
 			Path:      library.Path,
 			Status:    row.Status,
@@ -278,27 +306,32 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 		rows = append(rows, item)
 	}
 	status := api.LibraryBatchBuildStatus{
-		Status:              state.Status,
-		Message:             state.Message,
-		SelectedPaths:       selectedPathsFromLibraries(selected),
-		CurrentLibraryName:  state.CurrentLibraryName,
-		CurrentLibraryPath:  state.CurrentLibraryPath,
-		CurrentLibraryIndex: state.CurrentLibraryIndex,
-		TotalLibraries:      len(selected),
-		CompletedLibraries:  completed,
-		FailedLibraries:     failed,
-		CurrentPhase:        state.CurrentPhase,
-		CurrentDone:         state.CurrentDone,
-		CurrentTotal:        state.CurrentTotal,
-		CurrentPercent:      state.CurrentPercent,
-		LowResourceMode:     state.LowResourceMode,
-		AggressiveMode:      state.AggressiveMode,
-		ExitAfterComplete:   state.ExitAfterComplete,
-		StartedAt:           state.StartedAt,
-		UpdatedAt:           state.UpdatedAt,
-		FinishedAt:          state.FinishedAt,
-		Libraries:           rows,
-		Error:               state.Error,
+		Status:               state.Status,
+		Message:              state.Message,
+		SelectedLibraryIDs:   selectedLibraryIDsFromLibraries(selected),
+		SelectedPaths:        selectedPathsFromLibraries(selected),
+		SelectionConfigured:  selectionConfigured,
+		MoveLegacyThumbnails: state.MoveLegacyThumbnails,
+		CleanThumbnailFiles:  state.CleanThumbnailFiles,
+		CurrentLibraryID:     state.CurrentLibraryID,
+		CurrentLibraryName:   state.CurrentLibraryName,
+		CurrentLibraryPath:   state.CurrentLibraryPath,
+		CurrentLibraryIndex:  state.CurrentLibraryIndex,
+		TotalLibraries:       len(selected),
+		CompletedLibraries:   completed,
+		FailedLibraries:      failed,
+		CurrentPhase:         state.CurrentPhase,
+		CurrentDone:          state.CurrentDone,
+		CurrentTotal:         state.CurrentTotal,
+		CurrentPercent:       state.CurrentPercent,
+		LowResourceMode:      state.LowResourceMode,
+		AggressiveMode:       state.AggressiveMode,
+		ExitAfterComplete:    state.ExitAfterComplete,
+		StartedAt:            state.StartedAt,
+		UpdatedAt:            state.UpdatedAt,
+		FinishedAt:           state.FinishedAt,
+		Libraries:            rows,
+		Error:                state.Error,
 	}
 	if strings.TrimSpace(status.Status) == "" {
 		status.Status = "idle"
@@ -310,6 +343,7 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 	rows := make([]config.BatchTaskLibraryState, 0, len(status.Libraries))
 	for _, row := range status.Libraries {
 		rows = append(rows, config.BatchTaskLibraryState{
+			ID:        row.ID,
 			Name:      row.Name,
 			Path:      row.Path,
 			Status:    row.Status,
@@ -322,27 +356,32 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 		})
 	}
 	return config.BatchTaskState{
-		SelectedPaths:       append([]string(nil), status.SelectedPaths...),
-		Status:              status.Status,
-		Message:             status.Message,
-		CurrentLibraryName:  status.CurrentLibraryName,
-		CurrentLibraryPath:  status.CurrentLibraryPath,
-		CurrentLibraryIndex: status.CurrentLibraryIndex,
-		TotalLibraries:      status.TotalLibraries,
-		CompletedLibraries:  status.CompletedLibraries,
-		FailedLibraries:     status.FailedLibraries,
-		CurrentPhase:        status.CurrentPhase,
-		CurrentDone:         status.CurrentDone,
-		CurrentTotal:        status.CurrentTotal,
-		CurrentPercent:      status.CurrentPercent,
-		LowResourceMode:     status.LowResourceMode,
-		AggressiveMode:      status.AggressiveMode,
-		ExitAfterComplete:   status.ExitAfterComplete,
-		StartedAt:           status.StartedAt,
-		UpdatedAt:           status.UpdatedAt,
-		FinishedAt:          status.FinishedAt,
-		Error:               status.Error,
-		Libraries:           rows,
+		SelectedLibraryIDs:   append([]string(nil), status.SelectedLibraryIDs...),
+		SelectedPaths:        append([]string(nil), status.SelectedPaths...),
+		SelectionConfigured:  status.SelectionConfigured,
+		Status:               status.Status,
+		Message:              status.Message,
+		MoveLegacyThumbnails: status.MoveLegacyThumbnails,
+		CleanThumbnailFiles:  status.CleanThumbnailFiles,
+		CurrentLibraryID:     status.CurrentLibraryID,
+		CurrentLibraryName:   status.CurrentLibraryName,
+		CurrentLibraryPath:   status.CurrentLibraryPath,
+		CurrentLibraryIndex:  status.CurrentLibraryIndex,
+		TotalLibraries:       status.TotalLibraries,
+		CompletedLibraries:   status.CompletedLibraries,
+		FailedLibraries:      status.FailedLibraries,
+		CurrentPhase:         status.CurrentPhase,
+		CurrentDone:          status.CurrentDone,
+		CurrentTotal:         status.CurrentTotal,
+		CurrentPercent:       status.CurrentPercent,
+		LowResourceMode:      status.LowResourceMode,
+		AggressiveMode:       status.AggressiveMode,
+		ExitAfterComplete:    status.ExitAfterComplete,
+		StartedAt:            status.StartedAt,
+		UpdatedAt:            status.UpdatedAt,
+		FinishedAt:           status.FinishedAt,
+		Error:                status.Error,
+		Libraries:            rows,
 	}
 }
 
@@ -358,9 +397,21 @@ func selectedPathsFromLibraries(libraries []config.Library) []string {
 	return selected
 }
 
-func normalizedSelectedLibraries(libraries []config.Library, selectedPaths []string) []config.Library {
-	if len(selectedPaths) == 0 {
+func normalizedSelectedLibraries(libraries []config.Library, selectedLibraryIDs []string, selectedPaths []string) []config.Library {
+	if len(selectedLibraryIDs) == 0 && len(selectedPaths) == 0 {
 		return append([]config.Library(nil), libraries...)
+	}
+	return normalizedSelectedLibrariesAllowEmpty(libraries, selectedLibraryIDs, selectedPaths)
+}
+
+func normalizedSelectedLibrariesAllowEmpty(libraries []config.Library, selectedLibraryIDs []string, selectedPaths []string) []config.Library {
+	allowedIDs := make(map[string]struct{}, len(selectedLibraryIDs))
+	for _, id := range selectedLibraryIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		allowedIDs[id] = struct{}{}
 	}
 	allowed := make(map[string]struct{}, len(selectedPaths))
 	for _, path := range selectedPaths {
@@ -372,11 +423,24 @@ func normalizedSelectedLibraries(libraries []config.Library, selectedPaths []str
 	}
 	selected := make([]config.Library, 0, len(libraries))
 	for _, library := range libraries {
+		if len(allowedIDs) > 0 {
+			if _, ok := allowedIDs[strings.TrimSpace(library.ID)]; ok {
+				selected = append(selected, library)
+			}
+			continue
+		}
 		if _, ok := allowed[strings.TrimSpace(library.Path)]; ok {
 			selected = append(selected, library)
 		}
 	}
 	return selected
+}
+
+func selectedLibrariesFromBatchStatus(libraries []config.Library, status api.LibraryBatchBuildStatus) []config.Library {
+	if status.SelectionConfigured {
+		return normalizedSelectedLibrariesAllowEmpty(libraries, status.SelectedLibraryIDs, status.SelectedPaths)
+	}
+	return normalizedSelectedLibraries(libraries, status.SelectedLibraryIDs, status.SelectedPaths)
 }
 
 func saveBatchTaskState(cfg *config.Config, username string, kind batchTaskKind, status api.LibraryBatchBuildStatus) error {
@@ -396,17 +460,21 @@ func saveBatchTaskState(cfg *config.Config, username string, kind batchTaskKind,
 	return config.SaveProfile(cfg, username, profile)
 }
 
-func saveBatchTaskSelection(cfg *config.Config, username string, kind batchTaskKind, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+func saveBatchTaskSelection(cfg *config.Config, username string, kind batchTaskKind, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
 	profile, err := config.EnsureProfile(cfg, username)
 	if err != nil {
 		return api.LibraryBatchBuildStatus{}, err
 	}
-	selected := normalizedSelectedLibraries(profile.Libraries, selectedPathsFromRaw(selectedPaths))
+	selectedLibraryIDs = selectedIDsFromRaw(selectedLibraryIDs)
+	selected := normalizedSelectedLibrariesAllowEmpty(profile.Libraries, selectedLibraryIDs, selectedPathsFromRaw(selectedPaths))
 	selectedPaths = selectedPathsFromLibraries(selected)
+	selectedLibraryIDs = selectedLibraryIDsFromLibraries(selected)
 	current := loadPersistedBatchStatus(profile, kind, false, "")
+	current.SelectedLibraryIDs = append([]string(nil), selectedLibraryIDs...)
 	current.SelectedPaths = append([]string(nil), selectedPaths...)
+	current.SelectionConfigured = true
 	current.TotalLibraries = len(selectedPaths)
-	current.Libraries = filterBatchStatusLibraries(current.Libraries, selectedPaths, profile.Libraries)
+	current.Libraries = filterBatchStatusLibraries(current.Libraries, selectedLibraryIDs, selectedPaths, profile.Libraries, true)
 	current.CompletedLibraries = countBatchStatusWithState(current.Libraries, "completed")
 	current.FailedLibraries = countBatchStatusWithState(current.Libraries, "failed")
 	if kind == batchTaskKindScan {
@@ -437,23 +505,52 @@ func selectedPathsFromRaw(paths []string) []string {
 	return result
 }
 
-func filterBatchStatusLibraries(rows []api.LibraryBatchBuildLibraryStatus, selectedPaths []string, libraries []config.Library) []api.LibraryBatchBuildLibraryStatus {
+func selectedIDsFromRaw(ids []string) []string {
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
+}
+
+func filterBatchStatusLibraries(rows []api.LibraryBatchBuildLibraryStatus, selectedLibraryIDs []string, selectedPaths []string, libraries []config.Library, allowEmpty bool) []api.LibraryBatchBuildLibraryStatus {
+	byID := make(map[string]api.LibraryBatchBuildLibraryStatus, len(rows))
 	byPath := make(map[string]api.LibraryBatchBuildLibraryStatus, len(rows))
 	for _, row := range rows {
+		if id := strings.TrimSpace(row.ID); id != "" {
+			byID[id] = row
+		}
 		byPath[strings.TrimSpace(row.Path)] = row
 	}
-	selected := normalizedSelectedLibraries(libraries, selectedPaths)
+	selected := normalizedSelectedLibraries(libraries, selectedLibraryIDs, selectedPaths)
+	if allowEmpty {
+		selected = normalizedSelectedLibrariesAllowEmpty(libraries, selectedLibraryIDs, selectedPaths)
+	}
 	result := make([]api.LibraryBatchBuildLibraryStatus, 0, len(selected))
 	for _, library := range selected {
-		row, ok := byPath[strings.TrimSpace(library.Path)]
+		row, ok := byID[strings.TrimSpace(library.ID)]
+		if !ok {
+			row, ok = byPath[strings.TrimSpace(library.Path)]
+		}
 		if !ok {
 			row = api.LibraryBatchBuildLibraryStatus{
+				ID:      library.ID,
 				Name:    library.Name,
 				Path:    library.Path,
 				Status:  "pending",
 				Message: "等待处理中",
 			}
 		}
+		row.ID = library.ID
 		row.Name = library.Name
 		row.Path = library.Path
 		result = append(result, row)
@@ -471,8 +568,8 @@ func countBatchStatusWithState(rows []api.LibraryBatchBuildLibraryStatus, target
 	return count
 }
 
-func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus, libraries []config.Library, thumbnailMode bool) []api.LibraryBatchBuildLibraryStatus {
-	rows := filterBatchStatusLibraries(previous, selectedPathsFromLibraries(libraries), libraries)
+func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus, libraries []config.Library, thumbnailMode bool, rerunCompleted bool) []api.LibraryBatchBuildLibraryStatus {
+	rows := filterBatchStatusLibraries(previous, selectedLibraryIDsFromLibraries(libraries), selectedPathsFromLibraries(libraries), libraries, false)
 	allCompleted := len(rows) > 0
 	for _, row := range rows {
 		if row.Status != "completed" {
@@ -481,7 +578,7 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 		}
 	}
 	for index := range rows {
-		if allCompleted {
+		if allCompleted && rerunCompleted {
 			rows[index].Status = "pending"
 			rows[index].Message = "等待重新开始"
 			rows[index].Imported = 0
@@ -497,6 +594,8 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 		rows[index].Status = "pending"
 		if thumbnailMode {
 			rows[index].Message = "等待继续缩略图任务"
+			rows[index].Imported = 0
+			rows[index].Pruned = 0
 			rows[index].Generated = 0
 			rows[index].Skipped = 0
 		} else {
@@ -527,7 +626,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量扫描参数无效")
 	}
 	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
-	libraries := normalizedSelectedLibraries(profile.Libraries, selectedStatus.SelectedPaths)
+	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
 	if len(libraries) == 0 {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可扫描的资源库")
 	}
@@ -552,8 +651,10 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.status.LowResourceMode = effectiveLowResource
 	task.status.AggressiveMode = aggressive
 	task.status.ExitAfterComplete = defaultExitAfter
+	task.status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false)
+	task.status.SelectionConfigured = true
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, true)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
 	m.task = task
@@ -621,8 +722,8 @@ func (m *libraryBatchBuildManager) SetExitAfterComplete(cfg *config.Config, user
 	return snapshot, nil
 }
 
-func (m *libraryBatchBuildManager) SetSelection(cfg *config.Config, username string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
-	return saveBatchTaskSelection(cfg, username, batchTaskKindScan, selectedPaths)
+func (m *libraryBatchBuildManager) SetSelection(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	return saveBatchTaskSelection(cfg, username, batchTaskKindScan, selectedLibraryIDs, selectedPaths)
 }
 
 func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, username string) api.LibraryBatchBuildStatus {
@@ -637,12 +738,12 @@ func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, user
 	return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量缩略图参数无效")
 	}
 	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
-	libraries := normalizedSelectedLibraries(profile.Libraries, selectedStatus.SelectedPaths)
+	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
 	if len(libraries) == 0 {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可构建缩略图的资源库")
 	}
@@ -667,8 +768,19 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	task.status.LowResourceMode = effectiveLowResource
 	task.status.AggressiveMode = aggressive
 	task.status.ExitAfterComplete = defaultExitAfter
+	task.status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true)
+	task.status.SelectionConfigured = true
+	task.status.MoveLegacyThumbnails = moveLegacyThumbnails
+	task.status.CleanThumbnailFiles = cleanThumbnailFiles
+	rerunCompleted := true
+	if (moveLegacyThumbnails || cleanThumbnailFiles) &&
+		selectedStatus.Status == "completed" &&
+		selectedStatus.MoveLegacyThumbnails == moveLegacyThumbnails &&
+		selectedStatus.CleanThumbnailFiles == cleanThumbnailFiles {
+		rerunCompleted = false
+	}
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, rerunCompleted)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
 	m.task = task
@@ -736,8 +848,8 @@ func (m *libraryBatchThumbnailBuildManager) SetExitAfterComplete(cfg *config.Con
 	return snapshot, nil
 }
 
-func (m *libraryBatchThumbnailBuildManager) SetSelection(cfg *config.Config, username string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
-	return saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, selectedPaths)
+func (m *libraryBatchThumbnailBuildManager) SetSelection(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	return saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, selectedLibraryIDs, selectedPaths)
 }
 
 func (m *libraryBatchBuildManager) clear(task *libraryBatchBuildTask) {
@@ -773,9 +885,9 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		return
 	}
 
-	libraries := normalizedSelectedLibraries(cfg.Libraries, task.snapshot().SelectedPaths)
+	snapshot := task.snapshot()
+	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
 	for index, library := range libraries {
-		snapshot := task.snapshot()
 		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
 			continue
 		}
@@ -797,6 +909,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		summary, err := svc.ImportExistingPhotosContext(ctx, userID, func(done, total int) {
 			task.mutate(func(status *api.LibraryBatchBuildStatus) {
 				status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+				status.CurrentLibraryID = library.ID
 				status.CurrentLibraryIndex = index + 1
 				status.CurrentLibraryName = library.Name
 				status.CurrentLibraryPath = library.Path
@@ -837,6 +950,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentLibraryID = ""
 		status.CurrentPhase = ""
 		status.CurrentDone = 0
 		status.CurrentTotal = 0
@@ -872,6 +986,7 @@ func (m *libraryBatchBuildManager) failTask(task *libraryBatchBuildTask, err err
 func (m *libraryBatchBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+		status.CurrentLibraryID = library.ID
 		status.CurrentLibraryIndex = index + 1
 		status.CurrentLibraryName = library.Name
 		status.CurrentLibraryPath = library.Path
@@ -902,6 +1017,7 @@ func (m *libraryBatchBuildManager) cancelTask(task *libraryBatchBuildTask, curre
 		status.Status = "cancelled"
 		status.Message = "已取消批量扫描资源库"
 		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentLibraryID = ""
 		status.CurrentPhase = ""
 		if currentIndex >= 0 && currentIndex < len(status.Libraries) {
 			if status.Libraries[currentIndex].Status == "scanning" || status.Libraries[currentIndex].Status == "building" {
@@ -938,9 +1054,9 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		return
 	}
 
-	libraries := normalizedSelectedLibraries(cfg.Libraries, task.snapshot().SelectedPaths)
+	snapshot := task.snapshot()
+	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
 	for index, library := range libraries {
-		snapshot := task.snapshot()
 		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
 			continue
 		}
@@ -957,6 +1073,51 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		if err != nil {
 			m.failLibrary(task, index, err)
 			continue
+		}
+
+		options := service.ThumbnailMaintenanceOptions{
+			MoveLegacyThumbnails: snapshot.MoveLegacyThumbnails,
+			CleanThumbnailFiles:  snapshot.CleanThumbnailFiles,
+		}
+		if options.Enabled() {
+			summary, err := svc.MaintainThumbnailsContext(ctx, userID, options, func(progress service.ThumbnailMaintenanceProgress) {
+				task.mutate(func(status *api.LibraryBatchBuildStatus) {
+					status.Message = progress.Message
+					status.CurrentLibraryID = library.ID
+					status.CurrentLibraryIndex = index + 1
+					status.CurrentLibraryName = library.Name
+					status.CurrentLibraryPath = library.Path
+					status.CurrentPhase = thumbnailMaintenancePhase(options)
+					status.CurrentDone = progress.Done
+					status.CurrentTotal = progress.Total
+					if progress.Total > 0 {
+						status.CurrentPercent = float64(progress.Done) / float64(progress.Total) * 100
+					} else {
+						status.CurrentPercent = 0
+					}
+					status.Libraries[index].Status = "building"
+					status.Libraries[index].Imported = progress.Moved
+					status.Libraries[index].Pruned = progress.Cleaned
+					status.Libraries[index].Failed = progress.Failed
+					status.Libraries[index].Message = progress.Message
+				})
+				task.persist(false)
+			})
+			if err != nil {
+				_ = repo.Close()
+				if ctx.Err() != nil {
+					m.cancelTask(task, index)
+					return
+				}
+				m.failLibrary(task, index, fmt.Errorf("整理缩略图目录失败: %w", err))
+				continue
+			}
+			task.mutate(func(status *api.LibraryBatchBuildStatus) {
+				status.Libraries[index].Imported = summary.Moved
+				status.Libraries[index].Pruned = summary.Cleaned
+				status.Libraries[index].Failed = summary.Failed
+			})
+			task.persist(false)
 		}
 
 		if _, err := svc.StartThumbnailBuild(userID); err != nil {
@@ -996,6 +1157,7 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentLibraryID = ""
 		status.CurrentPhase = ""
 		status.CurrentDone = 0
 		status.CurrentTotal = 0
@@ -1031,6 +1193,7 @@ func (m *libraryBatchThumbnailBuildManager) failTask(task *libraryBatchBuildTask
 func (m *libraryBatchThumbnailBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.Message = fmt.Sprintf("正在为资源库 %s 构建缩略图", library.Name)
+		status.CurrentLibraryID = library.ID
 		status.CurrentLibraryIndex = index + 1
 		status.CurrentLibraryName = library.Name
 		status.CurrentLibraryPath = library.Path
@@ -1061,6 +1224,7 @@ func (m *libraryBatchThumbnailBuildManager) cancelTask(task *libraryBatchBuildTa
 		status.Status = "cancelled"
 		status.Message = "已取消批量缩略图任务"
 		status.FinishedAt = time.Now().Format(time.RFC3339)
+		status.CurrentLibraryID = ""
 		status.CurrentPhase = ""
 		if currentIndex >= 0 && currentIndex < len(status.Libraries) {
 			if status.Libraries[currentIndex].Status == "scanning" || status.Libraries[currentIndex].Status == "building" {
@@ -1111,8 +1275,22 @@ func openBatchLibraryService(cfg *config.Config, library config.Library, managed
 	}
 	svc := service.NewPhotoServiceWithoutWarmup(repo, library.Path, managedDataDir, trashDir)
 	svc.SetThumbnailRoot(thumbDir)
+	svc.SetThumbnailLibraryID(library.ID)
 	svc.SetThumbnailSize(cfg.ThumbnailSize)
 	return repo, svc, nil
+}
+
+func thumbnailMaintenancePhase(options service.ThumbnailMaintenanceOptions) string {
+	switch {
+	case options.MoveLegacyThumbnails && options.CleanThumbnailFiles:
+		return "maintenance"
+	case options.MoveLegacyThumbnails:
+		return "migrate"
+	case options.CleanThumbnailFiles:
+		return "cleanup"
+	default:
+		return "thumbnails"
+	}
 }
 
 func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task *libraryBatchBuildTask, index int, library config.Library, userID int64, messagePattern string) (service.ThumbnailBuildStatus, bool) {
@@ -1122,6 +1300,7 @@ func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task
 	for {
 		status := svc.GetThumbnailBuildStatus(userID)
 		task.mutate(func(batch *api.LibraryBatchBuildStatus) {
+			batch.CurrentLibraryID = library.ID
 			batch.CurrentLibraryIndex = index + 1
 			batch.CurrentLibraryName = library.Name
 			batch.CurrentLibraryPath = library.Path
@@ -1438,6 +1617,7 @@ func main() {
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
 	photoService := service.NewPhotoService(repo, cfg.StoragePath, managedDataDir, trashDir)
 	photoService.SetThumbnailRoot(thumbDir)
+	photoService.SetThumbnailLibraryID(cfg.ActiveLibraryID)
 	photoService.SetThumbnailSize(cfg.ThumbnailSize)
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()

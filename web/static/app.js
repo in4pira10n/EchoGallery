@@ -57,6 +57,8 @@ const legacyVideoBookmarksStorageKey = 'echogallery_video_bookmarks_v1';
 const globalVideoVolumeStorageKey = 'echogallery_global_video_volume_v1';
 const libraryBatchWorkflowEnabledStorageKey = 'echogallery_library_batch_workflow_enabled_v1';
 const libraryBatchWorkflowAggressiveStorageKey = 'echogallery_library_batch_workflow_aggressive_v1';
+const libraryBatchWorkflowMoveLegacyStorageKey = 'echogallery_library_batch_workflow_move_legacy_v1';
+const libraryBatchWorkflowCleanFilesStorageKey = 'echogallery_library_batch_workflow_clean_files_v1';
 const libraryBatchWorkflowPhaseStorageKey = 'echogallery_library_batch_workflow_phase_v1';
 const copyCatalogPath = '/static/strings/zh-CN.json';
 const COPY_DEFAULTS = {
@@ -274,6 +276,7 @@ function hashString(value) {
 }
 function libraryVisualSeed(library = {}) {
   return String(
+    library.id ||
     library.logo_asset ||
     library.logoAsset ||
     library.path ||
@@ -353,13 +356,15 @@ function normalizeLibraries(libraries, fallbackPath = '') {
   const result = [];
   const seen = new Set();
   (libraries || []).forEach((library, index) => {
+    const id = String(library && library.id || '').trim();
     const path = (library && library.path || '').trim();
     if (!path) return;
-    const key = path.toLowerCase();
+    const key = id || path.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
     result.push({
       index,
+      id,
       name: (library && library.name || '').trim() || `资源库 ${index + 1}`,
       path,
       logo_asset: library && (library.logo_asset || library.logoAsset) || '',
@@ -368,7 +373,7 @@ function normalizeLibraries(libraries, fallbackPath = '') {
     });
   });
   if (!result.length && (fallbackPath || '').trim()) {
-    result.push({ index: 0, name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '' });
+    result.push({ index: 0, id: '', name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '' });
   }
   return result;
 }
@@ -654,6 +659,14 @@ function navIconMarkup(view, active = false) {
   const pair = iconSets[view] || [icons.photo, icons.photo];
   return active ? (pair[1] || pair[0] || '') : (pair[0] || '');
 }
+
+function syncNavActiveView(view) {
+  $$('.nav-item[data-view]').forEach(a => {
+    const active = a.dataset.view === view || (view === 'album-detail' && a.dataset.view === 'albums');
+    a.classList.toggle('active', active);
+    a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
+  });
+}
 async function loadInlineSVGIcons() {
   await Promise.all(Object.entries(svgIconFiles).map(async ([key, file]) => {
     try {
@@ -760,6 +773,7 @@ function normalizePathForCompare(value) {
 }
 function normalizeLibrariesForCompare(libraries = []) {
   return normalizeLibraries(libraries).map(library => ({
+    id: String(library.id || '').trim(),
     name: String(library.name || '').trim(),
     path: normalizePathForCompare(library.path),
     logo_asset: String(library.logo_asset || library.logoAsset || '').trim(),
@@ -1546,9 +1560,17 @@ function lightboxMediaNaturalSize() {
       height: Number(photo.height) || (img && img.naturalHeight) || 0,
     };
   }
+  const videoWidth = Number(video && video.videoWidth) || 0;
+  const videoHeight = Number(video && video.videoHeight) || 0;
+  if (videoWidth > 0 && videoHeight > 0) {
+    return {
+      width: videoWidth,
+      height: videoHeight,
+    };
+  }
   return {
-    width: Number(photo.width) || (video && video.videoWidth) || 0,
-    height: Number(photo.height) || (video && video.videoHeight) || 0,
+    width: Number(photo.width) || 0,
+    height: Number(photo.height) || 0,
   };
 }
 function lightboxViewportMetrics(body) {
@@ -1701,6 +1723,7 @@ function setExperimentalSetting(key, enabled) {
 function normalizeLibrary(data = {}) {
   return {
     index: Number.isInteger(Number(data.index)) ? Number(data.index) : (Number.isInteger(Number(data.logo_index)) ? Number(data.logo_index) : -1),
+    id: String(data.id || '').trim(),
     name: data.name || '',
     path: data.path || '',
     logo_asset: data.logo_asset || data.logoAsset || '',
@@ -1821,7 +1844,12 @@ function applyRoundedImageFavicon(favicon, url, accent, fallbackText) {
   };
   img.src = url;
 }
-function resolveActiveLibrary(libraries, currentPath) {
+function resolveActiveLibrary(libraries, currentID, currentPath) {
+  const normalizedID = String(currentID || '').trim();
+  if (normalizedID) {
+    const byID = libraries.find(item => String(item.id || '').trim() === normalizedID);
+    if (byID) return byID;
+  }
   const normalizedPath = String(currentPath || '').trim();
   return libraries.find(item => item.path === normalizedPath) || libraries[0] || null;
 }
@@ -1829,10 +1857,10 @@ function currentLibraryBrand() {
   const draftLibraries = collectLibraryDrafts();
   if (draftLibraries.length) {
     const activeSelect = $('#settings-active-library');
-    const activePath = activeSelect ? activeSelect.value.trim() : (state.serverSettings.storage_path || '').trim();
-    return resolveActiveLibrary(draftLibraries, activePath);
+    const activeValue = activeSelect ? activeSelect.value.trim() : '';
+    return resolveActiveLibrary(draftLibraries, activeValue, state.serverSettings.storage_path || '');
   }
-  return resolveActiveLibrary(state.serverSettings.libraries || [], state.serverSettings.storage_path || '');
+  return resolveActiveLibrary(state.serverSettings.libraries || [], state.serverSettings.active_library_id || '', state.serverSettings.storage_path || '');
 }
 async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
   if (!library || library.logo_asset || library.logo_image_url || library.logoImageUrl || state.libraryRandomLogoLoading) return;
@@ -1848,7 +1876,7 @@ async function ensureRandomLibraryLogo(library = currentLibraryBrand()) {
   state.libraryRandomLogoLoading = true;
   try {
     const resp = await refreshLibraryLogos(false);
-    const refreshedLibrary = resolveActiveLibrary((resp && resp.data && resp.data.libraries) || state.serverSettings.libraries || [], libraryPath);
+    const refreshedLibrary = resolveActiveLibrary((resp && resp.data && resp.data.libraries) || state.serverSettings.libraries || [], library.id || '', libraryPath);
     const logoURL = resolveLibraryLogoURL(refreshedLibrary || {});
     if (logoURL) {
       state.libraryRandomLogos[key] = logoURL;
@@ -2399,6 +2427,7 @@ async function loadServerSettings() {
   } catch (_) {
     state.serverSettings = {
       port: 8080,
+      active_library_id: '',
       storage_path: '',
       libraries: [],
       thumbnail_dir: '',
@@ -2466,14 +2495,21 @@ async function cancelLibraryBatchBuild() {
 async function setLibraryBatchBuildExitAfterComplete(enabled) {
   return api.put('/api/settings/libraries/build-all/exit-after-complete', { enabled });
 }
-async function setLibraryBatchBuildSelection(selectedPaths) {
-  return api.put('/api/settings/libraries/build-all/selection', { selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [] });
+async function setLibraryBatchBuildSelection(selectedLibraryIDs, selectedPaths = []) {
+  return api.put('/api/settings/libraries/build-all/selection', {
+    selected_library_ids: Array.isArray(selectedLibraryIDs) ? selectedLibraryIDs : [],
+    selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [],
+  });
 }
 async function fetchLibraryBatchThumbnailBuildStatus() {
   return api.get('/api/settings/libraries/thumbnails/build-all');
 }
 async function startLibraryBatchThumbnailBuild(options = {}) {
-  return api.post('/api/settings/libraries/thumbnails/build-all', { aggressive: !!options.aggressive });
+  return api.post('/api/settings/libraries/thumbnails/build-all', {
+    aggressive: !!options.aggressive,
+    move_legacy_thumbnails: !!options.moveLegacyThumbnails,
+    clean_thumbnail_files: !!options.cleanThumbnailFiles,
+  });
 }
 async function cancelLibraryBatchThumbnailBuild() {
   return api.del('/api/settings/libraries/thumbnails/build-all');
@@ -2481,11 +2517,15 @@ async function cancelLibraryBatchThumbnailBuild() {
 async function setLibraryBatchThumbnailBuildExitAfterComplete(enabled) {
   return api.put('/api/settings/libraries/thumbnails/build-all/exit-after-complete', { enabled });
 }
-async function setLibraryBatchThumbnailBuildSelection(selectedPaths) {
-  return api.put('/api/settings/libraries/thumbnails/build-all/selection', { selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [] });
+async function setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs, selectedPaths = []) {
+  return api.put('/api/settings/libraries/thumbnails/build-all/selection', {
+    selected_library_ids: Array.isArray(selectedLibraryIDs) ? selectedLibraryIDs : [],
+    selected_paths: Array.isArray(selectedPaths) ? selectedPaths : [],
+  });
 }
 function applyServerSettings(data = {}) {
   state.serverSettings.port = Number(data.port) || 8080;
+  state.serverSettings.active_library_id = data.active_library_id || '';
   state.serverSettings.storage_path = data.storage_path || '';
   state.serverSettings.libraries = normalizeLibraryList(data.libraries, data.storage_path || '');
   state.serverSettings.thumbnail_dir = data.thumbnail_dir || '';
@@ -2522,10 +2562,12 @@ function applyServerSettings(data = {}) {
 }
 function buildSettingsPayload() {
   const libraries = normalizeLibraries(state.serverSettings.libraries, state.serverSettings.storage_path || '');
-  let activePath = (state.serverSettings.storage_path || '').trim();
+  const activeLibrary = resolveActiveLibrary(libraries, state.serverSettings.active_library_id || '', state.serverSettings.storage_path || '');
+  let activePath = (activeLibrary && activeLibrary.path || state.serverSettings.storage_path || '').trim();
   if (!activePath && libraries.length) activePath = libraries[0].path;
   return {
     port: state.serverSettings.port || 8080,
+    active_library_id: activeLibrary && activeLibrary.id || '',
     storage_path: activePath,
     libraries,
     thumbnail_dir: state.serverSettings.thumbnail_dir || '',
@@ -2861,6 +2903,14 @@ async function revealInFinder(photoId) {
     alert('打开失败: ' + (e.error || e));
   }
 }
+async function revealAlbumInFinder(albumId) {
+  try {
+    await api.post(`/api/media/albums/${albumId}/reveal`, {});
+    showToast('已在文件管理器中定位');
+  } catch (e) {
+    alert('打开失败: ' + (e.error || e));
+  }
+}
 
 // ── 状态 ──────────────────────────────────────────────
 const state = {
@@ -2945,6 +2995,7 @@ const state = {
   thumbRadius: 2,
   serverSettings: {
     port: 8080,
+    active_library_id: '',
     storage_path: '',
     libraries: [],
     thumbnail_dir: '',
@@ -3042,6 +3093,8 @@ const state = {
   libraryBatchBuildCancelPending: false,
   libraryBatchWorkflowEnabled: localStorage.getItem(libraryBatchWorkflowEnabledStorageKey) === '1',
   libraryBatchWorkflowAggressive: localStorage.getItem(libraryBatchWorkflowAggressiveStorageKey) === '1',
+  libraryBatchWorkflowMoveLegacyThumbnails: localStorage.getItem(libraryBatchWorkflowMoveLegacyStorageKey) === '1',
+  libraryBatchWorkflowCleanThumbnailFiles: localStorage.getItem(libraryBatchWorkflowCleanFilesStorageKey) === '1',
   libraryBatchWorkflowPhase: localStorage.getItem(libraryBatchWorkflowPhaseStorageKey) || '',
   libraryBatchThumbnailBuildStatus: { status: 'idle', message: '当前没有批量缩略图任务' },
   libraryBatchThumbnailBuildPollTimer: null,
@@ -3497,7 +3550,12 @@ async function openLibraryBatchBuildWorkflow(options = {}) {
 
 async function openLibraryBatchThumbnailBuildWorkflow(options = {}) {
   try {
-    const status = await startLibraryBatchThumbnailBuild(options);
+    const requestOptions = {
+      ...options,
+      moveLegacyThumbnails: Object.prototype.hasOwnProperty.call(options, 'moveLegacyThumbnails') ? !!options.moveLegacyThumbnails : !!state.libraryBatchWorkflowMoveLegacyThumbnails,
+      cleanThumbnailFiles: Object.prototype.hasOwnProperty.call(options, 'cleanThumbnailFiles') ? !!options.cleanThumbnailFiles : !!state.libraryBatchWorkflowCleanThumbnailFiles,
+    };
+    const status = await startLibraryBatchThumbnailBuild(requestOptions);
     state.libraryBatchThumbnailBuildStatus = status || { status: 'idle', message: '当前没有批量缩略图任务' };
     state.libraryBatchThumbnailBuildCancelPending = false;
     if (state.view === 'settings') {
@@ -3771,11 +3829,7 @@ function openLastAlbumDetail() {
     state.currentAlbumID = albumID;
     state.view = 'album-detail';
     setHashView('album-detail', albumID);
-    $$('.nav-item[data-view]').forEach(a => {
-      const active = a.dataset.view === 'albums';
-      a.classList.toggle('active', active);
-      a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
-    });
+    syncNavActiveView('album-detail');
     applyLibraryBranding();
     renderView();
     return;
@@ -3784,11 +3838,7 @@ function openLastAlbumDetail() {
   state.currentAlbumID = albumID;
   state.view = 'album-detail';
   setHashView('album-detail', albumID);
-  $$('.nav-item[data-view]').forEach(a => {
-    const active = a.dataset.view === 'albums';
-    a.classList.toggle('active', active);
-    a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
-  });
+  syncNavActiveView('album-detail');
   applyLibraryBranding();
   renderView();
 }
@@ -3809,11 +3859,7 @@ function switchView(view) {
     if (view !== 'albums') state.currentAlbumID = null;
     setHashView(view); // c-2: 同步到 hash
   }
-  $$('.nav-item[data-view]').forEach(a => {
-    const active = a.dataset.view === view || (view === 'album-detail' && a.dataset.view === 'albums');
-    a.classList.toggle('active', active);
-    a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
-  });
+  syncNavActiveView(view);
   applyLibraryBranding();
   renderView();
 }
@@ -4412,14 +4458,15 @@ function renderLibraryAccentSwatches(accentColor) {
 }
 
 function renderLibrarySettingsRow(library = {}, index = 0) {
+  const id = library.id || '';
   const name = library.name || `资源库 ${index + 1}`;
   const path = library.path || '';
   const logoAsset = library.logo_asset || '';
   const logoURL = library.logo_image_url || '';
   const accentColor = resolveLibraryAccentColor(library);
-  const isActive = path && path === (state.serverSettings.storage_path || '');
+  const isActive = (id && id === (state.serverSettings.active_library_id || '')) || (!id && path && path === (state.serverSettings.storage_path || ''));
   return `
-    <div class="settings-library-row${isActive ? ' active' : ''}" draggable="true" data-library-index="${index}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" style="--library-accent:${accentColor}">
+    <div class="settings-library-row${isActive ? ' active' : ''}" draggable="true" data-library-id="${escapeHTML(id)}" data-library-index="${index}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" style="--library-accent:${accentColor}">
       <div class="settings-library-main">
         <div class="settings-library-logo-block">
           <div class="settings-library-logo-preview"></div>
@@ -4445,6 +4492,7 @@ function renderLibrarySettingsRow(library = {}, index = 0) {
 function collectLibraryInputs() {
   const rows = $$('.settings-library-row');
   return rows.map((row, index) => ({
+    id: row.dataset.libraryId || '',
     name: $('.settings-library-name', row).value.trim() || `资源库 ${index + 1}`,
     path: $('.settings-library-path', row).value.trim(),
     logo_asset: row.dataset.logoAction === 'remove' ? '' : row.dataset.logoAsset || '',
@@ -4456,6 +4504,7 @@ function collectLibraryDrafts() {
   const rows = $$('.settings-library-row');
   if (!rows.length) return [];
   return rows.map((row, index) => ({
+    id: row.dataset.libraryId || '',
     name: $('.settings-library-name', row).value.trim() || `资源库 ${index + 1}`,
     path: $('.settings-library-path', row).value.trim(),
     logo_asset: row.dataset.logoAction === 'remove' ? '' : row.dataset.logoAsset || '',
@@ -4468,7 +4517,8 @@ function syncLibraryDraftsToRuntime() {
   const libraries = collectLibraryDrafts();
   if (!libraries.length) return [];
   state.serverSettings.libraries = normalizeLibraryList(libraries, state.serverSettings.storage_path || '');
-  if (!state.serverSettings.libraries.some(library => library.path === state.serverSettings.storage_path)) {
+  if (!state.serverSettings.libraries.some(library => (library.id && library.id === state.serverSettings.active_library_id) || library.path === state.serverSettings.storage_path)) {
+    state.serverSettings.active_library_id = state.serverSettings.libraries[0]?.id || '';
     state.serverSettings.storage_path = state.serverSettings.libraries[0]?.path || '';
   }
   return state.serverSettings.libraries;
@@ -4489,6 +4539,7 @@ function buildLibraryLogoPreview(row, library = {}) {
   const displayPath = $('.settings-library-path', row) ? $('.settings-library-path', row).value.trim() : (library.path || '');
   const displayLibrary = {
     index: Number.isInteger(Number(row.dataset.libraryIndex)) ? Number(row.dataset.libraryIndex) : (Number.isInteger(Number(library.index)) ? Number(library.index) : -1),
+    id: row.dataset.libraryId || library.id || '',
     name: displayName || library.name || '',
     path: displayPath || library.path || '',
     logo_asset: row.dataset.logoAsset || library.logo_asset || '',
@@ -4515,6 +4566,7 @@ function createLibrarySettingsRow(library = {}, index = 0) {
 function libraryDraftFromRow(row) {
   if (!row) return {};
   return {
+    id: row.dataset.libraryId || '',
     name: $('.settings-library-name', row)?.value.trim() || '',
     path: $('.settings-library-path', row)?.value.trim() || '',
     logo_asset: row.dataset.logoAsset || '',
@@ -4537,6 +4589,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   const draft = editing
     ? libraryDraftFromRow(row)
     : {
+      id: '',
       name: `资源库 ${index + 1}`,
       path: '',
       logo_asset: '',
@@ -4595,6 +4648,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     const accentValue = currentEditorAccent();
     const library = {
       index,
+      id: draft.id || '',
       name: nameInput.value.trim(),
       path: pathInput.value.trim(),
       logo_asset: logoAsset,
@@ -4654,6 +4708,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   });
   $('#library-editor-save', modal).addEventListener('click', async () => {
     const library = {
+      id: draft.id || '',
       name: nameInput.value.trim() || `资源库 ${index + 1}`,
       path: pathInput.value.trim(),
       logo_asset: logoAction === 'remove' ? '' : logoAsset,
@@ -4668,7 +4723,10 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     nextRow.dataset.logoAction = logoAction;
     nextRow._pendingLogoFile = pendingFile;
     nextRow._pendingLogoNeedsCrop = pendingLogoNeedsCrop;
-    if (editing && row.classList.contains('active')) state.serverSettings.storage_path = library.path;
+    if (editing && row.classList.contains('active')) {
+      state.serverSettings.active_library_id = library.id || '';
+      state.serverSettings.storage_path = library.path;
+    }
     if (editing) row.replaceWith(nextRow);
     else {
       $('#settings-library-list .settings-empty')?.remove();
@@ -4699,26 +4757,28 @@ function syncActiveLibrarySelect() {
   const select = $('#settings-active-library');
   const libraries = collectLibraryDrafts();
   const previousIndex = select ? select.selectedIndex : -1;
-  const current = ((select && select.value) || state.serverSettings.storage_path || '').trim();
-  let activePath = current;
-  if (!libraries.some(library => library.path === activePath) && previousIndex >= 0 && libraries[previousIndex]) {
-    activePath = libraries[previousIndex].path;
+  const current = ((select && select.value) || state.serverSettings.active_library_id || state.serverSettings.storage_path || '').trim();
+  let activeLibrary = resolveActiveLibrary(libraries, current, state.serverSettings.storage_path || '');
+  if (!activeLibrary && previousIndex >= 0 && libraries[previousIndex]) {
+    activeLibrary = libraries[previousIndex];
   }
-  if (!activePath && libraries.length) activePath = libraries[0].path;
+  if (!activeLibrary && libraries.length) activeLibrary = libraries[0];
+  const activePath = activeLibrary && activeLibrary.path || '';
+  state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
   state.serverSettings.storage_path = activePath || '';
   state.serverSettings.libraries = normalizeLibraryList(libraries, state.serverSettings.storage_path || '');
   if (select) {
     select.innerHTML = libraries.map((library, index) => {
-      const selected = library.path === activePath || (!activePath && index === 0);
-      return `<option value="${library.path}" ${selected ? 'selected' : ''}>${library.name}</option>`;
+      const selected = (activeLibrary && ((library.id && library.id === activeLibrary.id) || library.path === activeLibrary.path)) || (!activePath && index === 0);
+      return `<option value="${escapeHTML(library.id || library.path)}" ${selected ? 'selected' : ''}>${library.name}</option>`;
     }).join('') || '<option value="">请先添加资源库</option>';
   }
   $$('.settings-library-row').forEach(row => {
+    const id = row.dataset.libraryId || '';
     const path = $('.settings-library-path', row)?.value.trim() || '';
-    row.classList.toggle('active', !!path && path === activePath);
+    row.classList.toggle('active', (!!id && id === (activeLibrary && activeLibrary.id || '')) || (!!path && path === activePath));
   });
   const floatingAdd = $('#settings-add-library-btn');
-  const activeLibrary = resolveActiveLibrary(libraries, activePath);
   if (floatingAdd && activeLibrary) {
     const accent = resolveLibraryAccentColor(activeLibrary);
     floatingAdd.style.setProperty('--highlight-bg', accent);
@@ -4814,7 +4874,10 @@ function collectSettingsFormState() {
   state.serverSettings.libraries = collectLibraryInputs();
   if (!state.serverSettings.libraries.length) throw new Error('请至少保留一个资源库');
   state.serverSettings.port = parseInt($('#settings-port')?.value, 10) || state.serverSettings.port || 8080;
-  state.serverSettings.storage_path = $('#settings-active-library')?.value.trim() || state.serverSettings.storage_path || state.serverSettings.libraries[0].path;
+  const activeValue = $('#settings-active-library')?.value.trim() || state.serverSettings.active_library_id || state.serverSettings.storage_path || '';
+  const activeLibrary = resolveActiveLibrary(state.serverSettings.libraries, activeValue, state.serverSettings.storage_path || '');
+  state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
+  state.serverSettings.storage_path = activeLibrary && activeLibrary.path || state.serverSettings.storage_path || state.serverSettings.libraries[0].path;
   state.serverSettings.thumbnail_dir = $('#settings-thumbnail-dir').value.trim();
   state.serverSettings.thumbnail_size = 512;
   state.serverSettings.trash_dir = $('#settings-trash-dir').value.trim();
@@ -4912,14 +4975,14 @@ function refreshVideoBookmarkThumbIndicators() {
   updateVideoBookmarkThumbIndicators();
 }
 
-function renderSettingsToggle(id, label, checked, description = '') {
+function renderSettingsToggle(id, label, checked, description = '', disabled = false) {
   return `<label class="settings-toggle" for="${id}">
     <span class="settings-toggle-copy">
       <span class="settings-toggle-title">${escapeHTML(label)}</span>
       ${description ? `<span class="settings-toggle-description">${escapeHTML(description)}</span>` : ''}
     </span>
     <span class="settings-toggle-switch">
-      <input id="${id}" type="checkbox" ${checked ? 'checked' : ''}>
+      <input id="${id}" type="checkbox" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
       <span class="settings-toggle-slider" aria-hidden="true"></span>
     </span>
   </label>`;
@@ -4928,6 +4991,8 @@ function renderSettingsToggle(id, label, checked, description = '') {
 function persistLibraryBatchWorkflowPrefs() {
   localStorage.setItem(libraryBatchWorkflowEnabledStorageKey, state.libraryBatchWorkflowEnabled ? '1' : '0');
   localStorage.setItem(libraryBatchWorkflowAggressiveStorageKey, state.libraryBatchWorkflowAggressive ? '1' : '0');
+  localStorage.setItem(libraryBatchWorkflowMoveLegacyStorageKey, state.libraryBatchWorkflowMoveLegacyThumbnails ? '1' : '0');
+  localStorage.setItem(libraryBatchWorkflowCleanFilesStorageKey, state.libraryBatchWorkflowCleanThumbnailFiles ? '1' : '0');
 }
 
 function setLibraryBatchWorkflowPhase(phase = '') {
@@ -4944,12 +5009,27 @@ function libraryBatchWorkflowActive() {
   return state.libraryBatchWorkflowPhase === 'scan' || state.libraryBatchWorkflowPhase === 'thumbnails';
 }
 
+function libraryBatchWorkflowOptionLabels() {
+  const labels = [];
+  if (state.libraryBatchWorkflowMoveLegacyThumbnails) labels.push('整理旧版资源库');
+  if (state.libraryBatchWorkflowCleanThumbnailFiles) labels.push('清理文件');
+  return labels;
+}
+
 async function syncLibraryBatchWorkflowSelections() {
-  const selectedPaths = Array.isArray(state.libraryBatchBuildStatus?.selected_paths) && state.libraryBatchBuildStatus.selected_paths.length
-    ? state.libraryBatchBuildStatus.selected_paths
-    : $$('input[name="settings-library-batch-build-selection"]:checked').map(node => node.value);
-  state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedPaths);
-  state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedPaths);
+  const selectedLibraryIDs = Array.isArray(state.libraryBatchBuildStatus?.selected_library_ids) && state.libraryBatchBuildStatus.selected_library_ids.length
+    ? state.libraryBatchBuildStatus.selected_library_ids
+    : $$('input[name="settings-library-batch-workflow-selection"]:checked').map(node => node.value);
+  state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedLibraryIDs);
+  state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs);
+}
+
+async function setLibraryBatchWorkflowSelectionAll(enabled) {
+  const selectedLibraryIDs = enabled ? allBatchSelectableLibraryValues(libraryBatchWorkflowSelectionStatus()) : [];
+  applyLibraryBatchSelectionState(state.libraryBatchBuildStatus, selectedLibraryIDs);
+  applyLibraryBatchSelectionState(state.libraryBatchThumbnailBuildStatus, selectedLibraryIDs);
+  state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedLibraryIDs);
+  state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs);
 }
 
 function libraryBatchBuildStatusLabel(status) {
@@ -4966,31 +5046,125 @@ function libraryBatchBuildStatusLabel(status) {
   }
 }
 
+function libraryBatchWorkflowSelectionStatus() {
+  const scan = state.libraryBatchBuildStatus || {};
+  const thumbnails = state.libraryBatchThumbnailBuildStatus || {};
+  if (state.libraryBatchWorkflowPhase === 'thumbnails') return thumbnails;
+  if (state.libraryBatchWorkflowPhase === 'scan') return scan;
+  if (isLibraryBatchBuildActive(scan)) return scan;
+  if (isLibraryBatchThumbnailBuildActive(thumbnails)) return thumbnails;
+  if (Array.isArray(scan.libraries) && scan.libraries.length) return scan;
+  if (Array.isArray(thumbnails.libraries) && thumbnails.libraries.length) return thumbnails;
+  return scan || thumbnails || {};
+}
+
+function libraryBatchWorkflowProgressPercent() {
+  const scan = state.libraryBatchBuildStatus || {};
+  const thumbnails = state.libraryBatchThumbnailBuildStatus || {};
+  const scanPercent = Math.max(0, Math.min(100, Number(scan.current_percent) || 0));
+  const thumbnailPercent = Math.max(0, Math.min(100, Number(thumbnails.current_percent) || 0));
+  if (state.libraryBatchWorkflowEnabled || libraryBatchWorkflowActive()) {
+    if (state.libraryBatchWorkflowPhase === 'thumbnails') return Math.min(100, 50 + thumbnailPercent / 2);
+    if (state.libraryBatchWorkflowPhase === 'scan' || isLibraryBatchBuildActive(scan)) return scanPercent / 2;
+    if (String(scan.status || '') === 'completed' && isLibraryBatchThumbnailBuildActive(thumbnails)) return Math.min(100, 50 + thumbnailPercent / 2);
+    if (String(scan.status || '') === 'completed' && String(thumbnails.status || '') === 'completed') return 100;
+  }
+  if (isLibraryBatchThumbnailBuildActive(thumbnails)) return thumbnailPercent;
+  if (isLibraryBatchBuildActive(scan)) return scanPercent;
+  if (String(thumbnails.status || '') === 'completed') return 100;
+  if (String(scan.status || '') === 'completed') return state.libraryBatchWorkflowEnabled ? 50 : 100;
+  return Math.max(scanPercent, thumbnailPercent);
+}
+
+function libraryBatchWorkflowProgressCopy() {
+  const status = libraryBatchWorkflowSelectionStatus();
+  if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
+    return renderLibraryBatchTaskProgress(state.libraryBatchBuildStatus, '顺序扫描全部资源库');
+  }
+  if (isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus)) {
+    return renderLibraryBatchTaskProgress(state.libraryBatchThumbnailBuildStatus, '顺序为全部资源库补全缩略图');
+  }
+  return renderLibraryBatchTaskProgress(status, '等待开始批量任务');
+}
+
 function renderLibraryBatchWorkflowPanel() {
   const running = libraryBatchWorkflowActive();
+  const controlsDisabled = running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive();
+  const hasSelection = libraryBatchWorkflowHasSelection();
+  const selectionStatus = libraryBatchWorkflowSelectionStatus();
+  const progressPercent = libraryBatchWorkflowProgressPercent();
   const currentPhase = state.libraryBatchWorkflowPhase === 'thumbnails' ? '批量缩略图阶段' : '批量扫描阶段';
+  const optionLabels = libraryBatchWorkflowOptionLabels();
+  const optionCopy = optionLabels.length ? `；附加处理：${optionLabels.join('、')}` : '';
   const statusCopy = running
-    ? `当前处于${currentPhase}${state.libraryBatchWorkflowAggressive ? '，并已启用高资源模式' : ''}`
+    ? `当前处于${currentPhase}${state.libraryBatchWorkflowAggressive ? '，并已启用高资源模式' : ''}${optionCopy}`
     : (state.libraryBatchWorkflowEnabled
-      ? `点击后会先扫描，再自动接着构建缩略图${state.libraryBatchWorkflowAggressive ? '，并临时启用高资源模式' : ''}`
+      ? `点击后会先扫描，再自动接着构建缩略图${state.libraryBatchWorkflowAggressive ? '，并临时启用高资源模式' : ''}${optionCopy}`
       : '关闭后保持现有两段式手动流程');
   return `<div class="settings-batch-build-panel settings-batch-build-panel-master">
     <div class="settings-batch-build-head">
       <div>
-        <strong>批量工作流</strong>
+        <h3>批量工作流</h3>
         <span>${escapeHTML(statusCopy)}</span>
       </div>
       <span class="settings-batch-build-badge ${running ? 'active' : ''}">${escapeHTML(running ? '串行运行中' : '可选')}</span>
     </div>
-    <div class="settings-group settings-batch-build-master-toggles">
-      ${renderSettingsToggle('settings-library-batch-workflow-enabled', '扫描后自动构建缩略图', state.libraryBatchWorkflowEnabled, '适合一次性把多个资源库扫描并补全缩略图。')}
-      ${renderSettingsToggle('settings-library-batch-workflow-aggressive', '高资源无人值守模式', state.libraryBatchWorkflowAggressive, '临时提高扫描与缩略图并发，优先缩短总耗时。')}
+    <div class="settings-batch-workflow-progress" aria-label="批量工作流进度">
+      <span style="width:${progressPercent}%"></span>
+    </div>
+    <div class="settings-batch-build-meta">
+      <span>${escapeHTML(libraryBatchWorkflowProgressCopy())}</span>
+      <span>${Math.round(progressPercent)}%</span>
+    </div>
+    <div class="settings-batch-build-selection">
+      <strong>资源库范围</strong>
+      <div class="settings-batch-build-selection-list settings-batch-workflow-selection-list ${controlsDisabled ? 'is-disabled' : ''}">${renderLibraryBatchSelectionRows(selectionStatus, 'settings-library-batch-workflow-selection', controlsDisabled)}</div>
+    </div>
+    <div class="settings-group settings-batch-build-master-toggles ${controlsDisabled ? 'is-disabled' : ''}">
+      ${renderSettingsToggle('settings-library-batch-workflow-select-all', '批量范围全选', libraryBatchWorkflowAllSelected(), '', controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-enabled', '扫描后自动构建缩略图', state.libraryBatchWorkflowEnabled, '适合一次性把多个资源库扫描并补全缩略图。', controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-aggressive', '高资源无人值守模式', state.libraryBatchWorkflowAggressive, '临时提高扫描与缩略图并发，优先缩短总耗时。', controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-move-legacy', '整理旧版资源库', state.libraryBatchWorkflowMoveLegacyThumbnails, '为旧资源库补齐稳定 ID，并把旧缩略图迁移到按资源库 ID 隔离的新目录。', controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-clean-files', '清理文件', state.libraryBatchWorkflowCleanThumbnailFiles, '清理旧 JPG、preview、build-preview 等遗留缩略图文件；不会删除其它资源库的缩略图目录。', controlsDisabled)}
     </div>
     <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${(isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) ? 'disabled' : ''}>${state.libraryBatchWorkflowEnabled ? '一键开始扫描并构建缩略图' : '开始批量扫描'}</button>
+      <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${controlsDisabled || !hasSelection ? 'disabled' : ''}>${state.libraryBatchWorkflowEnabled ? '一键开始扫描并构建缩略图' : '开始批量扫描'}</button>
       <button class="btn" id="settings-cancel-library-batch-workflow-btn" type="button" ${running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive() ? '' : 'disabled'}>${running ? '取消当前工作流' : '取消当前阶段'}</button>
     </div>
   </div>`;
+}
+
+async function cancelLibraryBatchWorkflow() {
+  clearLibraryBatchWorkflowPhase();
+  if (isLibraryBatchBuildActive()) {
+    if (state.libraryBatchBuildCancelPending) return;
+    state.libraryBatchBuildCancelPending = true;
+    syncLibraryBatchWorkflowPanel();
+    try {
+      state.libraryBatchBuildStatus = await cancelLibraryBatchBuild();
+      stopLibraryBatchBuildPolling();
+      state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 300);
+    } catch (e) {
+      state.libraryBatchBuildCancelPending = false;
+      alert('取消批量扫描失败: ' + ((e && e.error) || e));
+    }
+    syncLibraryBatchWorkflowPanel();
+    return;
+  }
+  if (isLibraryBatchThumbnailBuildActive()) {
+    if (state.libraryBatchThumbnailBuildCancelPending) return;
+    state.libraryBatchThumbnailBuildCancelPending = true;
+    syncLibraryBatchWorkflowPanel();
+    try {
+      state.libraryBatchThumbnailBuildStatus = await cancelLibraryBatchThumbnailBuild();
+      stopLibraryBatchThumbnailBuildPolling();
+      state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
+    } catch (e) {
+      state.libraryBatchThumbnailBuildCancelPending = false;
+      alert('取消批量缩略图失败: ' + ((e && e.error) || e));
+    }
+    syncLibraryBatchWorkflowPanel();
+  }
 }
 
 async function openLibraryBatchFullWorkflow() {
@@ -5005,12 +5179,51 @@ async function openLibraryBatchFullWorkflow() {
 }
 
 function libraryBatchSelectedSet(status) {
+  const selectedIDs = Array.isArray(status && status.selected_library_ids) ? status.selected_library_ids.map(id => String(id || '').trim()).filter(Boolean) : [];
+  if (selectedIDs.length) return new Set(selectedIDs);
   return new Set(Array.isArray(status && status.selected_paths) ? status.selected_paths.map(path => String(path || '').trim()).filter(Boolean) : []);
 }
 
-function applyLibraryBatchSelectionState(status, selectedPaths) {
+function libraryBatchSelectionConfigured(status) {
+  return !!(status && status.selection_configured) || libraryBatchSelectedSet(status).size > 0;
+}
+
+function allBatchSelectableLibraryValues(status) {
+  return allBatchSelectableLibraries(status).map(library => String(library.id || library.path || '').trim()).filter(Boolean);
+}
+
+function libraryBatchStatusAllSelected(status) {
+  const rows = allBatchSelectableLibraries(status);
+  if (!rows.length) return false;
+  const selected = libraryBatchSelectedSet(status);
+  if (!libraryBatchSelectionConfigured(status)) return true;
+  return rows.every(library => {
+    const id = String(library.id || '').trim();
+    const path = String(library.path || '').trim();
+    return (id && selected.has(id)) || (path && selected.has(path));
+  });
+}
+
+function libraryBatchWorkflowAllSelected() {
+  return libraryBatchStatusAllSelected(libraryBatchWorkflowSelectionStatus());
+}
+
+function libraryBatchStatusHasSelection(status) {
+  const rows = allBatchSelectableLibraries(status);
+  if (!rows.length) return false;
+  if (!libraryBatchSelectionConfigured(status)) return true;
+  return libraryBatchSelectedSet(status).size > 0;
+}
+
+function libraryBatchWorkflowHasSelection() {
+  return libraryBatchStatusHasSelection(libraryBatchWorkflowSelectionStatus());
+}
+
+function applyLibraryBatchSelectionState(status, selectedLibraryIDs) {
   if (!status) return;
-  status.selected_paths = Array.isArray(selectedPaths) ? [...selectedPaths] : [];
+  status.selected_library_ids = Array.isArray(selectedLibraryIDs) ? [...selectedLibraryIDs] : [];
+  status.selected_paths = [];
+  status.selection_configured = true;
 }
 
 function libraryBatchCanResume(status) {
@@ -5030,6 +5243,7 @@ function allBatchSelectableLibraries(status) {
     const path = String(library.path || '').trim();
     const row = rowByPath.get(path) || {};
     return {
+      id: library.id || row.id || '',
       name: library.name || row.name || `资源库 ${index + 1}`,
       path,
       status: row.status || 'pending',
@@ -5043,15 +5257,19 @@ function allBatchSelectableLibraries(status) {
   });
 }
 
-function renderLibraryBatchSelectionRows(status, inputName) {
+function renderLibraryBatchSelectionRows(status, inputName, disabled = false) {
   const selected = libraryBatchSelectedSet(status);
+  const usingIDs = Array.isArray(status && status.selected_library_ids) && status.selected_library_ids.length > 0;
+  const selectionConfigured = libraryBatchSelectionConfigured(status);
   const rows = allBatchSelectableLibraries(status);
   if (!rows.length) return '<div class="settings-batch-build-empty">当前没有可选资源库。</div>';
   return rows.map((library, index) => {
-    const checked = selected.size ? selected.has(String(library.path || '').trim()) : true;
+    const value = String(library.id || library.path || '').trim();
+    const compareValue = usingIDs ? value : String(library.path || '').trim();
+    const checked = selectionConfigured ? selected.has(compareValue) : true;
     return `<label class="settings-batch-build-select-row ${checked ? 'is-selected' : ''}">
       <span class="settings-toggle-switch settings-batch-build-checkbox">
-        <input type="checkbox" name="${escapeHTML(inputName)}" value="${escapeHTML(library.path || '')}" ${checked ? 'checked' : ''}>
+        <input type="checkbox" name="${escapeHTML(inputName)}" value="${escapeHTML(value)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
         <span class="settings-toggle-slider" aria-hidden="true"></span>
       </span>
       <span class="settings-batch-build-select-copy">
@@ -5070,7 +5288,24 @@ function renderLibraryBatchTaskProgress(status, idleLabel) {
   const completed = Math.max(0, Number(status && status.completed_libraries) || 0);
   const failed = Math.max(0, Number(status && status.failed_libraries) || 0);
   const currentLibrary = String(status && status.current_library_name || '').trim();
-  const phase = status && status.current_phase === 'thumbnails' ? '缩略图' : '扫描';
+  let phase = '扫描';
+  switch (String(status && status.current_phase || '')) {
+    case 'thumbnails':
+      phase = '缩略图';
+      break;
+    case 'migrate':
+      phase = '整理旧版资源库';
+      break;
+    case 'cleanup':
+      phase = '清理文件';
+      break;
+    case 'maintenance':
+      phase = '整理缩略图目录';
+      break;
+    default:
+      phase = '扫描';
+      break;
+  }
   const parts = [];
   if (currentLibrary) parts.push(`当前：${currentLibrary}`);
   if (totalLibraries > 0) parts.push(`资源库 ${current} / ${totalLibraries}`);
@@ -5093,6 +5328,7 @@ function renderLibraryBatchBuildPanel() {
   const active = isLibraryBatchBuildActive(status);
   const otherActive = isLibraryBatchThumbnailBuildActive();
   const canResume = libraryBatchCanResume(status);
+  const hasSelection = libraryBatchStatusHasSelection(status);
   const currentName = String(status.current_library_name || '').trim();
   const summary = [
     `总计 ${Math.max(0, Number(status.total_libraries) || libraries.length || 0)}`,
@@ -5140,12 +5376,8 @@ function renderLibraryBatchBuildPanel() {
     </label>
     <div class="settings-batch-build-list">${list}</div>
     <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-build-all-libraries-btn" type="button" ${(active || otherActive) ? 'disabled' : ''}>${active ? '批量扫描进行中' : (canResume ? '继续批量扫描' : '批量扫描全部资源库')}</button>
+      <button class="btn" id="settings-build-all-libraries-btn" type="button" ${(active || otherActive || !hasSelection) ? 'disabled' : ''}>${active ? '批量扫描进行中' : (canResume ? '继续批量扫描' : '批量扫描全部资源库')}</button>
       <button class="btn" id="settings-cancel-all-libraries-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchBuildCancelPending ? copyText('app.libraryBatchScan.cancelling', '正在取消…') : copyText('app.libraryBatchScan.cancel', '取消批量扫描')}</button>
-    </div>
-    <div class="settings-static settings-batch-build-note">
-      <strong>失败处理</strong>
-      <span>现在只负责顺序扫描资源库；若某个资源库失败，会自动跳过并继续处理下一个。</span>
     </div>
   </div>`;
 }
@@ -5160,11 +5392,12 @@ function syncLibraryBatchBuildPanel() {
         syncLibraryBatchBuildPanel();
         return;
       }
-      const selectedPaths = $$('input[name="settings-library-batch-build-selection"]:checked').map(node => node.value);
-      applyLibraryBatchSelectionState(state.libraryBatchBuildStatus, selectedPaths);
+      const selectedLibraryIDs = $$('input[name="settings-library-batch-build-selection"]:checked').map(node => node.value);
+      applyLibraryBatchSelectionState(state.libraryBatchBuildStatus, selectedLibraryIDs);
       try {
-        state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedPaths);
+        state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedLibraryIDs);
         setTimeout(syncLibraryBatchBuildPanel, 180);
+        syncLibraryBatchWorkflowPanel();
       } catch (e) {
         alert('保存批量扫描勾选失败: ' + ((e && e.error) || e));
         syncLibraryBatchBuildPanel();
@@ -5202,6 +5435,36 @@ function syncLibraryBatchWorkflowPanel() {
   const container = $('#settings-library-batch-workflow');
   if (!container) return;
   container.innerHTML = renderLibraryBatchWorkflowPanel();
+  $$('input[name="settings-library-batch-workflow-selection"]').forEach(input => {
+    input.addEventListener('change', async () => {
+      if (isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+        syncLibraryBatchWorkflowPanel();
+        return;
+      }
+      const selectedLibraryIDs = $$('input[name="settings-library-batch-workflow-selection"]:checked').map(node => node.value);
+      applyLibraryBatchSelectionState(state.libraryBatchBuildStatus, selectedLibraryIDs);
+      applyLibraryBatchSelectionState(state.libraryBatchThumbnailBuildStatus, selectedLibraryIDs);
+      try {
+        state.libraryBatchBuildStatus = await setLibraryBatchBuildSelection(selectedLibraryIDs);
+        state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs);
+        setTimeout(syncLibraryBatchWorkflowPanel, 180);
+      } catch (e) {
+        alert('保存批量范围失败: ' + ((e && e.error) || e));
+        syncLibraryBatchWorkflowPanel();
+      }
+    });
+  });
+  $('#settings-library-batch-workflow-select-all')?.addEventListener('change', async e => {
+    try {
+      await setLibraryBatchWorkflowSelectionAll(!!e.target.checked);
+      syncLibraryBatchWorkflowPanel();
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    } catch (err) {
+      alert('保存批量范围失败: ' + ((err && err.error) || err));
+      syncLibraryBatchWorkflowPanel();
+    }
+  });
   $('#settings-library-batch-workflow-enabled')?.addEventListener('change', e => {
     state.libraryBatchWorkflowEnabled = !!e.target.checked;
     persistLibraryBatchWorkflowPrefs();
@@ -5212,17 +5475,18 @@ function syncLibraryBatchWorkflowPanel() {
     persistLibraryBatchWorkflowPrefs();
     syncLibraryBatchWorkflowPanel();
   });
-  $('#settings-start-library-batch-workflow-btn')?.addEventListener('click', openLibraryBatchFullWorkflow);
-  $('#settings-cancel-library-batch-workflow-btn')?.addEventListener('click', async () => {
-    clearLibraryBatchWorkflowPhase();
-    if (isLibraryBatchBuildActive()) {
-      $('#settings-cancel-all-libraries-btn')?.click();
-      return;
-    }
-    if (isLibraryBatchThumbnailBuildActive()) {
-      $('#settings-cancel-all-library-thumbnails-btn')?.click();
-    }
+  $('#settings-library-batch-workflow-move-legacy')?.addEventListener('change', e => {
+    state.libraryBatchWorkflowMoveLegacyThumbnails = !!e.target.checked;
+    persistLibraryBatchWorkflowPrefs();
+    syncLibraryBatchWorkflowPanel();
   });
+  $('#settings-library-batch-workflow-clean-files')?.addEventListener('change', e => {
+    state.libraryBatchWorkflowCleanThumbnailFiles = !!e.target.checked;
+    persistLibraryBatchWorkflowPrefs();
+    syncLibraryBatchWorkflowPanel();
+  });
+  $('#settings-start-library-batch-workflow-btn')?.addEventListener('click', openLibraryBatchFullWorkflow);
+  $('#settings-cancel-library-batch-workflow-btn')?.addEventListener('click', cancelLibraryBatchWorkflow);
 }
 
 function renderLibraryBatchThumbnailBuildPanel() {
@@ -5231,6 +5495,7 @@ function renderLibraryBatchThumbnailBuildPanel() {
   const active = isLibraryBatchThumbnailBuildActive(status);
   const otherActive = isLibraryBatchBuildActive();
   const canResume = libraryBatchCanResume(status);
+  const hasSelection = libraryBatchStatusHasSelection(status);
   const currentName = String(status.current_library_name || '').trim();
   const summary = [
     `总计 ${Math.max(0, Number(status.total_libraries) || libraries.length || 0)}`,
@@ -5241,6 +5506,8 @@ function renderLibraryBatchThumbnailBuildPanel() {
     const rowStatus = String(library.status || 'pending');
     const current = currentName && currentName === String(library.name || '').trim();
     const detailParts = [];
+    if (Number(library.imported) > 0) detailParts.push(`已迁移 ${Number(library.imported)}`);
+    if (Number(library.pruned) > 0) detailParts.push(`已清理 ${Number(library.pruned)}`);
     if (Number(library.generated) > 0) detailParts.push(`新生成 ${Number(library.generated)}`);
     if (Number(library.skipped) > 0) detailParts.push(`已存在 ${Number(library.skipped)}`);
     if (Number(library.failed) > 0) detailParts.push(`失败 ${Number(library.failed)}`);
@@ -5254,6 +5521,9 @@ function renderLibraryBatchThumbnailBuildPanel() {
     </div>`;
   }).join('') : '<div class="settings-batch-build-empty">当前没有批量缩略图记录。</div>';
   const progressPercent = Math.max(0, Math.min(100, Number(status.current_percent) || 0));
+  const optionParts = [];
+  if (status.move_legacy_thumbnails) optionParts.push('整理旧版资源库');
+  if (status.clean_thumbnail_files) optionParts.push('清理文件');
   return `<div class="settings-batch-build-panel">
     <div class="settings-batch-build-head">
       <div>
@@ -5264,7 +5534,7 @@ function renderLibraryBatchThumbnailBuildPanel() {
     </div>
     <div class="settings-batch-build-meta">
       <span>${escapeHTML(renderLibraryBatchTaskProgress(status, '顺序为全部资源库补全缩略图'))}</span>
-      <span>${escapeHTML(status.aggressive_mode ? '高资源模式' : (status.low_resource_mode ? '低资源模式已开启' : '标准资源模式'))}</span>
+      <span>${escapeHTML([status.aggressive_mode ? '高资源模式' : (status.low_resource_mode ? '低资源模式已开启' : '标准资源模式'), ...optionParts].filter(Boolean).join(' · '))}</span>
     </div>
     <div class="settings-batch-build-progress"><span style="width:${progressPercent}%"></span></div>
     <div class="settings-batch-build-selection">
@@ -5277,12 +5547,8 @@ function renderLibraryBatchThumbnailBuildPanel() {
     </label>
     <div class="settings-batch-build-list">${list}</div>
     <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-build-all-library-thumbnails-btn" type="button" ${(active || otherActive) ? 'disabled' : ''}>${active ? '批量缩略图进行中' : (canResume ? '继续批量缩略图' : '批量构建全部资源库缩略图')}</button>
+      <button class="btn" id="settings-build-all-library-thumbnails-btn" type="button" ${(active || otherActive || !hasSelection) ? 'disabled' : ''}>${active ? '批量缩略图进行中' : (canResume ? '继续批量缩略图' : '批量构建全部资源库缩略图')}</button>
       <button class="btn" id="settings-cancel-all-library-thumbnails-btn" type="button" ${active ? '' : 'disabled'}>${state.libraryBatchThumbnailBuildCancelPending ? copyText('app.libraryBatchThumbnail.cancelling', '正在取消…') : copyText('app.libraryBatchThumbnail.cancel', '取消批量缩略图')}</button>
-    </div>
-    <div class="settings-static settings-batch-build-note">
-      <strong>运行方式</strong>
-      <span>这个任务不会锁定 App，会在页面里持续更新状态；若某个资源库失败，会自动跳过并继续处理下一个。</span>
     </div>
   </div>`;
 }
@@ -5297,11 +5563,12 @@ function syncLibraryBatchThumbnailBuildPanel() {
         syncLibraryBatchThumbnailBuildPanel();
         return;
       }
-      const selectedPaths = $$('input[name="settings-library-batch-thumbnail-build-selection"]:checked').map(node => node.value);
-      applyLibraryBatchSelectionState(state.libraryBatchThumbnailBuildStatus, selectedPaths);
+      const selectedLibraryIDs = $$('input[name="settings-library-batch-thumbnail-build-selection"]:checked').map(node => node.value);
+      applyLibraryBatchSelectionState(state.libraryBatchThumbnailBuildStatus, selectedLibraryIDs);
       try {
-        state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedPaths);
+        state.libraryBatchThumbnailBuildStatus = await setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs);
         setTimeout(syncLibraryBatchThumbnailBuildPanel, 180);
+        syncLibraryBatchWorkflowPanel();
       } catch (e) {
         alert('保存批量缩略图勾选失败: ' + ((e && e.error) || e));
         syncLibraryBatchThumbnailBuildPanel();
@@ -5353,12 +5620,11 @@ function renderSettingsContent() {
     <div class="settings-actions settings-actions-fill">
       <button class="btn" id="settings-build-all-thumbs-btn" type="button">加载全部缩略图</button>
     </div>
-    <div class="settings-batch-build-stack">
-      <div id="settings-library-batch-workflow">${renderLibraryBatchWorkflowPanel()}</div>
-      <div id="settings-library-batch-build">${renderLibraryBatchBuildPanel()}</div>
-      <div id="settings-library-batch-thumbnail-build">${renderLibraryBatchThumbnailBuildPanel()}</div>
-    </div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
+  </section>
+
+  <section class="card settings-panel settings-panel-batch-workflow">
+    <div id="settings-library-batch-workflow">${renderLibraryBatchWorkflowPanel()}</div>
   </section>
 
   <section class="card settings-panel settings-panel-display">
@@ -5490,8 +5756,6 @@ function renderSettingsContent() {
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
   $('#settings-build-all-thumbs-btn')?.addEventListener('click', openThumbnailBuildWorkflow);
   syncLibraryBatchWorkflowPanel();
-  syncLibraryBatchBuildPanel();
-  syncLibraryBatchThumbnailBuildPanel();
 
   function bindLibraryRow(row) {
     row.addEventListener('dragstart', e => {
@@ -5563,7 +5827,8 @@ function renderSettingsContent() {
         showToast('请先填写资源库路径');
         return;
       }
-      if (path === (state.serverSettings.storage_path || '').trim()) return;
+      if ((row.dataset.libraryId || '') === (state.serverSettings.active_library_id || '') || path === (state.serverSettings.storage_path || '').trim()) return;
+      state.serverSettings.active_library_id = row.dataset.libraryId || '';
       state.serverSettings.storage_path = path;
       syncActiveLibrarySelect();
       applyLibraryBranding();
@@ -5591,7 +5856,9 @@ function renderSettingsContent() {
   $$('.settings-library-row').forEach(bindLibraryRow);
   reindexLibrarySettingsRows();
   $('#settings-active-library')?.addEventListener('change', e => {
-    state.serverSettings.storage_path = e.target.value;
+    const activeLibrary = resolveActiveLibrary(collectLibraryDrafts(), e.target.value, state.serverSettings.storage_path || '');
+    state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
+    state.serverSettings.storage_path = activeLibrary && activeLibrary.path || '';
     applyLibraryBranding();
     setSettingsDirty();
   });
@@ -5693,7 +5960,6 @@ function renderSelectionBarMarkup({ countLabel = '条已选', extraAction = '' }
   return `<span id="sel-bar" class="selected-bar">
     <span class="selected-count" id="sel-count">0</span> ${countLabel}
     <button class="btn btn-sm" id="download-sel-btn">下载选中</button>
-    <button class="btn btn-sm" id="add-to-album-btn">${icons.album} 添加到相册</button>
     ${extraAction}
     <button class="btn-icon" id="clear-sel-btn">${icons.close}</button>
   </span>`;
@@ -5702,7 +5968,6 @@ function renderSelectionBarMarkup({ countLabel = '条已选', extraAction = '' }
 function bindSelectionBarHandlers({ extraButtonID = '', extraAction } = {}) {
   $('#clear-sel-btn')?.addEventListener('click', clearSelection);
   $('#download-sel-btn')?.addEventListener('click', downloadSelected);
-  $('#add-to-album-btn')?.addEventListener('click', () => openAlbumPickerModal(null));
   if (extraButtonID && typeof extraAction === 'function') {
     $(`#${extraButtonID}`)?.addEventListener('click', extraAction);
   }
@@ -6566,12 +6831,11 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
   if (containingAlbums.length) {
     items.push('-');
     containingAlbums.forEach(album => {
-      items.push({ icon: icons.contextAlbum, label: `在相册中查看：${album.name}`, action: () => openInAlbum(album, photo.id) });
+      items.push({ icon: icons.contextAlbum, label: `在相册中查看：${albumDisplayTitle(album)}`, action: () => openInAlbum(album, photo.id) });
     });
   }
   items.push(
     '-',
-    { icon: icons.contextAlbum, label: '添加到相册…', action: () => openAlbumPickerModal([photo.id]) },
     { icon: icons.contextShare, label: isShared ? '管理分享…' : '分享…', action: () => isShared ? openShareListModal('photo', photo.id) : openShareModal('photo', photo.id) },
     '-',
     { icon: icons.contextDelete, label: '删除', danger: true, action: () => deleteSinglePhoto(photo.id) },
@@ -6586,6 +6850,9 @@ async function showPhotoContextMenu(x, y, photo, thumbEl, listRef) {
     albums = await api.get(`/api/media/${photo.id}/albums`);
   } catch (e) {
     console.error('加载媒体所在相册失败:', e);
+  }
+  if ((!albums || !albums.length) && state.view === 'album-detail' && state.currentAlbum && state.currentAlbum.id) {
+    albums = [state.currentAlbum];
   }
   showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef, albums || []));
 }
@@ -6669,38 +6936,17 @@ function showTrashContextMenu(x, y, photo) {
 }
 
 async function addSelectedMediaToAlbum(album) {
-  if (!album || !album.id) return;
-  const ids = [...state.selected];
-  if (!ids.length) {
-    showToast('请先选择要添加的媒体');
-    return;
-  }
-  let ok = 0;
-  let fail = 0;
-  for (const id of ids) {
-    try {
-      await api.post(`/api/media/albums/${album.id}`, { media_id: id });
-      ok += 1;
-    } catch (_) {
-      fail += 1;
-    }
-  }
-  if (ok > 0) clearSelection();
-  showToast(`已添加 ${ok} 条到「${album.name}」${fail ? `，${fail} 条失败` : ''}`);
+  showToast('文件夹相册暂不支持手动添加');
 }
 
 function albumContextMenuItems(album, { includeView = true } = {}) {
   const items = [];
   if (includeView) {
     items.push({ icon: icons.contextView, label: '查看', action: () => openAlbumDetail(album) });
-    items.push('-');
   }
   items.push(
-    { icon: icons.albumContextEdit, label: '编辑', action: () => openEditAlbumModal(album) },
-    { icon: icons.albumContextAdd, label: '添加', action: () => addSelectedMediaToAlbum(album) },
+    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealAlbumInFinder(album.id) },
     { icon: icons.albumContextDownload, label: '下载', action: () => triggerDownload(`/api/media/albums/${album.id}/download`) },
-    '-',
-    { icon: icons.albumContextDelete, label: '删除', danger: true, action: () => deleteAlbum(album) },
   );
   return items;
 }
@@ -6711,7 +6957,7 @@ function showAlbumContextMenu(x, y, album, options = {}) {
 }
 
 async function addSinglePhotoToAlbum(photoId) {
-  openAlbumPickerModal([photoId]);
+  showToast('文件夹相册暂不支持手动添加');
 }
 
 function updatePhotoFavoriteInCollections(photoId, favorite) {
@@ -6995,7 +7241,7 @@ function ensureCurrentViewEmptyState() {
     }
     case 'album-detail': {
       const container = $('#album-groups');
-      if (container && !container.querySelector('.photo-thumb') && state.albumPhotos.length === 0) {
+      if (container && !container.querySelector('.photo-thumb') && state.albumPhotos.length === 0 && !albumDirectChildCount(state.currentAlbum)) {
         container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.empty.albumMedia', '相册里还没有媒体'))}</p></div>`;
       }
       updateLoadMoreUI('load-more', state.albumHasMore);
@@ -7104,11 +7350,10 @@ async function focusPendingTimelinePhoto() {
 async function renderAlbums() {
   $('#topbar-title').textContent = '相册';
   $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
-    renderTopbarGlassButton({ id: 'new-album-btn', icon: icons.topbarNewAlbum, label: '新建相册', variant: 'accent' }),
+    renderTopbarGlassButton({ id: 'new-album-btn', icon: icons.topbarNewAlbum, label: '新建相册暂不可用', variant: 'accent', disabled: true }),
   ]);
   $('#topbar-meta').innerHTML = renderAlbumViewModeControl();
   $('#topbar-actions').innerHTML = '';
-  $('#new-album-btn').addEventListener('click', openCreateAlbumModal);
   $('#album-view-grid-btn').addEventListener('click', () => {
     state.albumViewMode = 'grid';
     renderAlbums();
@@ -7132,7 +7377,7 @@ async function renderAlbums() {
 }
 
 async function ensureAlbumsLoaded() {
-  if (state.albumsLoaded && Array.isArray(state.albums) && state.albums.length) return state.albums;
+  if (state.albumsLoaded && Array.isArray(state.albums)) return state.albums;
   state.albums = await api.get('/api/media/albums');
   state.albumsLoaded = true;
   return state.albums;
@@ -7141,39 +7386,110 @@ async function ensureAlbumsLoaded() {
 function renderAlbumGrid() {
   const wrap = $('#album-grid-wrap');
   if (!wrap) return;
-  if (!state.albums || !state.albums.length) {
-    wrap.innerHTML = `<div class="empty">${icons.album}<p>${escapeHTML(copyText('app.empty.albums', '还没有相册，点击左上角新建'))}</p></div>`;
+  const albums = albumChildrenForParent('');
+  if (!albums.length) {
+    wrap.innerHTML = `<div class="empty">${icons.album}<p>${escapeHTML(copyText('app.empty.albums', '还没有文件夹相册'))}</p></div>`;
     return;
   }
   const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
-  state.albums.forEach(a => grid.appendChild(makeAlbumCard(a)));
+  albums.forEach(a => grid.appendChild(makeAlbumCard(a)));
   wrap.innerHTML = '';
   wrap.appendChild(grid);
 }
 
 function isFolderAlbum(album) {
-  return (album && album.description || '').trim() === '自动从文件夹导入';
+  return String(album && album.source_kind || '').trim() === 'folder'
+    || String(album && album.description || '').trim() === '自动从文件夹导入';
+}
+
+function normalizeAlbumPath(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/^\/|\/$/g, '');
+}
+
+function folderAlbumPath(album) {
+  if (!isFolderAlbum(album)) return '';
+  return normalizeAlbumPath(album.source_rel_path || album.name || '');
+}
+
+function albumDisplayTitle(album) {
+  if (!album) return '';
+  const path = folderAlbumPath(album);
+  if (!path) return String(album.name || '').trim() || '相册';
+  const parts = path.split('/').filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function albumRelativeAddress(album) {
+  const path = folderAlbumPath(album);
+  return path || String(album && album.description || '').trim();
+}
+
+function albumParentPath(album) {
+  const path = folderAlbumPath(album);
+  if (!path || !path.includes('/')) return '';
+  return path.split('/').slice(0, -1).join('/');
+}
+
+function compareAlbumsByPath(a, b) {
+  return albumRelativeAddress(a).localeCompare(albumRelativeAddress(b), 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+}
+
+function albumChildrenForParent(parentPath = '') {
+  const target = normalizeAlbumPath(parentPath);
+  return (state.albums || [])
+    .filter(album => {
+      if (!isFolderAlbum(album)) return false;
+      return albumParentPath(album) === target;
+    })
+    .sort(compareAlbumsByPath);
+}
+
+function albumSiblingList(album = state.currentAlbum) {
+  if (!album) return [];
+  return albumChildrenForParent(isFolderAlbum(album) ? albumParentPath(album) : '');
+}
+
+function albumDirectChildCount(album) {
+  if (!album || !isFolderAlbum(album)) return 0;
+  return albumChildrenForParent(folderAlbumPath(album)).length;
+}
+
+function albumItemCount(album) {
+  return Math.max(0, Number(album && album.photo_count) || 0) + albumDirectChildCount(album);
+}
+
+function findAlbumByPath(path = '') {
+  const target = normalizeAlbumPath(path);
+  if (!target) return null;
+  return (state.albums || []).find(album => folderAlbumPath(album) === target) || null;
+}
+
+function parentAlbumFor(album) {
+  return findAlbumByPath(albumParentPath(album));
 }
 
 function makeAlbumCard(album) {
   const albumKind = isFolderAlbum(album) ? 'folder' : 'user';
   const albumKindLabel = albumKind === 'folder' ? '文件夹' : '自建';
   const albumKindIcon = albumKind === 'folder' ? icons.albumCardFolder : icons.albumCardUser;
-  const rawDescription = String(album.description || '').trim();
-  const description = albumKind === 'folder' && rawDescription === '自动从文件夹导入'
-    ? '自动从文件夹导入'
-    : rawDescription || '还没有相册描述';
+  const title = albumDisplayTitle(album);
+  const description = albumRelativeAddress(album) || '相对地址不可用';
+  const itemCount = albumItemCount(album);
   const card = el('div', `album-card album-card-${albumKind}${state.albumViewMode === 'list' ? ' list' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const coverHtml = album.cover_uuid
-    ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(album.name)}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
+    ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(title)}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
     : `<div class="album-cover-empty">${icons.photo}</div>`;
   card.innerHTML = `
 	<div class="album-cover">${coverHtml}</div>
 	<div class="album-info">
-	  <div class="album-name">${escapeHTML(album.name)}</div>
+	  <div class="album-name" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
     <div class="album-subtitle">${escapeHTML(description)}</div>
-    <div class="album-count-row">${icons.albumCardCount || icons.photo}<span>${album.photo_count || 0} 个项目</span></div>
+    <div class="album-count-row">${icons.albumCardCount || icons.photo}<span>${itemCount} 个项目</span></div>
   </div>`;
   const kind = el('span', 'album-kind', albumKindIcon);
   kind.title = albumKindLabel;
@@ -7193,9 +7509,12 @@ function makeAlbumCard(album) {
 
 // ── 相册详情 ──────────────────────────────────────────
 async function openAlbumDetail(album) {
+  await ensureAlbumsLoaded().catch(() => {});
   saveViewScroll();
   const nextID = Number(album && album.id);
   const prevID = Number(state.currentAlbumID || 0);
+  const cached = (state.albums || []).find(item => Number(item && item.id) === nextID);
+  if (cached) album = { ...album, ...cached };
   state.currentAlbum = album;
   state.currentAlbumID = album.id;
   state.lastAlbumDetailID = album.id;
@@ -7207,11 +7526,11 @@ async function openAlbumDetail(album) {
   }
   state.view = 'album-detail';
   setHashView('album-detail', album.id);
-  $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
+  syncNavActiveView('album-detail');
   renderAlbumDetail();
 }
 function adjacentAlbum(offset) {
-  const albums = state.albums || [];
+  const albums = albumSiblingList(state.currentAlbum);
   const index = albums.findIndex(item => Number(item.id) === Number(state.currentAlbumID));
   if (index < 0) return null;
   return albums[index + offset] || null;
@@ -7248,39 +7567,60 @@ async function renderAlbumDetail() {
     switchView('albums');
     return;
   }
-  $('#topbar-title').textContent = album.name;
-  $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
-    countLabel: '条已选',
-    extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
-  });
+  const albumTitle = albumDisplayTitle(album);
+  const albumAddress = albumRelativeAddress(album);
+  const childAlbums = albumChildrenForParent(folderAlbumPath(album));
+  $('#topbar-title').textContent = albumTitle;
+  $('#topbar-meta').innerHTML = childAlbums.length
+    ? renderAlbumViewModeControl()
+    : renderSelectionBarMarkup({
+      countLabel: '条已选',
+      extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
+    });
   $('#topbar-actions').innerHTML = '';
-  bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
+  if (!childAlbums.length) {
+    bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
+  }
 
   $('#content').innerHTML = `
 <div class="album-detail-pill" id="album-detail-pill">
   <button class="album-detail-back-btn" id="album-detail-back-btn" type="button" title="返回相册" aria-label="返回相册">${icons.topbarBackAlbums}</button>
-  <span class="album-detail-title" title="${escapeHTML(album.name)}">${escapeHTML(album.name)}</span>
+  <span class="album-detail-title" title="${escapeHTML(albumAddress || albumTitle)}">${escapeHTML(albumTitle)}</span>
 </div>
-<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">
-  ${renderAlbumDetailBottomActionControls()}
-</div>
-<div id="album-groups"></div><div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
-  bindMediaKindFilterControl();
-  $$('[data-album-detail-sort]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const next = normalizeAlbumDetailSort(btn.dataset.albumDetailSort);
-      if (next === state.albumDetailSort) return;
-      state.albumDetailSort = next;
-      localStorage.setItem(albumDetailSortStorageKey, next);
-      state.albumPhotos = [];
-      state.albumCursor = '';
-      state.albumHasMore = true;
-      state.albumDetailLoadedKey = '';
-      state.viewScrollPositions[viewScrollKeyFor('album-detail', album.id)] = 0;
+${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">${renderAlbumDetailBottomActionControls()}</div>`}
+<div id="album-child-wrap"></div><div id="album-groups"></div><div class="load-more" id="load-more" ${childAlbums.length ? 'style="display:none"' : ''}><div class="spinner"></div>加载中…</div>`;
+  renderAlbumChildGrid(childAlbums);
+  if (childAlbums.length) {
+    $('#album-view-grid-btn')?.addEventListener('click', () => {
+      state.albumViewMode = 'grid';
       renderAlbumDetail();
     });
+    $('#album-view-list-btn')?.addEventListener('click', () => {
+      state.albumViewMode = 'list';
+      renderAlbumDetail();
+    });
+  } else {
+    bindMediaKindFilterControl();
+    $$('[data-album-detail-sort]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const next = normalizeAlbumDetailSort(btn.dataset.albumDetailSort);
+        if (next === state.albumDetailSort) return;
+        state.albumDetailSort = next;
+        localStorage.setItem(albumDetailSortStorageKey, next);
+        state.albumPhotos = [];
+        state.albumCursor = '';
+        state.albumHasMore = true;
+        state.albumDetailLoadedKey = '';
+        state.viewScrollPositions[viewScrollKeyFor('album-detail', album.id)] = 0;
+        renderAlbumDetail();
+      });
+    });
+  }
+  $('#album-detail-back-btn')?.addEventListener('click', () => {
+    const parent = parentAlbumFor(album);
+    if (parent) openAlbumDetail(parent);
+    else switchView('albums');
   });
-  $('#album-detail-back-btn')?.addEventListener('click', () => switchView('albums'));
   $('#album-detail-pill')?.addEventListener('contextmenu', e => {
     e.preventDefault();
     showAlbumContextMenu(e.clientX, e.clientY, album, { includeView: false });
@@ -7290,10 +7630,23 @@ async function renderAlbumDetail() {
     showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false });
   });
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
-  const detailStateKey = `${album.id}:${state.albumDetailSort}:${state.mediaKindFilter}`;
+  const detailStateKey = `${album.id}:${state.albumDetailSort}:${state.mediaKindFilter}:${childAlbums.map(item => item.id).join(',')}`;
+  if (childAlbums.length) {
+    state.albumPhotos = [];
+    state.albumCursor = '';
+    state.albumHasMore = false;
+    state.albumLoading = false;
+    state.albumDetailLoadedKey = detailStateKey;
+    renderAlbumGroups([]);
+    updateLoadMoreUI('load-more', false);
+    restoreViewScroll('album-detail', album.id);
+    return;
+  }
   if (state.albumDetailLoadedKey === detailStateKey && !hasPendingAlbumFocus) {
     renderAlbumGroups(state.albumPhotos);
+    updateLoadMoreUI('load-more', state.albumHasMore);
     observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
+    maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
     restoreViewScroll('album-detail', album.id);
     return;
   }
@@ -7304,7 +7657,21 @@ async function renderAlbumDetail() {
   state.albumDetailLoadedKey = detailStateKey;
   const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
   observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
+  maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   if (!hasPendingAlbumFocus || !focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
+}
+
+function renderAlbumChildGrid(albums = []) {
+  const wrap = $('#album-child-wrap');
+  if (!wrap) return;
+  if (!albums.length) {
+    wrap.innerHTML = '';
+    return;
+  }
+  const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
+  albums.forEach(album => grid.appendChild(makeAlbumCard(album)));
+  wrap.innerHTML = '';
+  wrap.appendChild(grid);
 }
 function syncAlbumState(updatedAlbum) {
   if (!updatedAlbum || !updatedAlbum.id) return;
@@ -7351,6 +7718,7 @@ async function loadMoreAlbumPhotos() {
   finally {
     state.albumLoading = false;
     updateLoadMoreUI('load-more', state.albumHasMore);
+    observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
     maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   }
 }
@@ -7386,6 +7754,10 @@ function renderAlbumGroups(newPhotos) {
   const container = $('#album-groups');
   if (!container) return;
   if (state.albumPhotos.length === 0 && newPhotos.length === 0) {
+    if (albumDirectChildCount(state.currentAlbum)) {
+      container.innerHTML = '';
+      return;
+    }
     container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.empty.albumMedia', '相册里还没有媒体'))}</p></div>`;
     return;
   }
@@ -8035,7 +8407,7 @@ function exitLightboxToContext() {
     state.currentAlbumID = returnAlbumID;
     state.view = 'album-detail';
     setHashView('album-detail', returnAlbumID);
-    $$('.nav-item[data-view]').forEach(a => a.classList.toggle('active', a.dataset.view === 'albums'));
+    syncNavActiveView('album-detail');
     renderAlbumDetail();
     return;
   }

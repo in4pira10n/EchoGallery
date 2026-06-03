@@ -90,6 +90,180 @@ func TestListAlbumsForPhoto_Success(t *testing.T) {
 	}
 }
 
+func TestListAlbumsForPhoto_UsesCurrentSourceRelPathAfterMove(t *testing.T) {
+	db := newTestDB(t)
+	oldAlbum := &storage.Album{
+		Name:          "old",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "old",
+		CreatedBy:     1,
+		CreatedAt:     time.Now().Add(-time.Hour),
+	}
+	newAlbum := &storage.Album{
+		Name:          "new",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "new",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateAlbum(oldAlbum); err != nil {
+		t.Fatalf("创建旧相册失败: %v", err)
+	}
+	if err := db.CreateAlbum(newAlbum); err != nil {
+		t.Fatalf("创建新相册失败: %v", err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "moved-video"
+	photo.MediaKind = storage.MediaKindVideo
+	photo.MimeType = "video/mp4"
+	photo.SourceRelPath = "new/video.mp4"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存移动后媒体失败: %v", err)
+	}
+	if err := db.AddPhotoToAlbum(oldAlbum.ID, photo.ID, 1); err != nil {
+		t.Fatalf("添加旧相册残留关系失败: %v", err)
+	}
+
+	albums, err := db.ListAlbumsForPhoto(photo.ID, 1)
+	if err != nil {
+		t.Fatalf("查询媒体所在相册失败: %v", err)
+	}
+	if len(albums) != 1 || albums[0].ID != newAlbum.ID {
+		t.Fatalf("期望按当前 source_rel_path 定位到新相册，得到 %#v", albums)
+	}
+}
+
+func TestListAlbumsForPhoto_LegacyFolderAlbumUsesNameAsPath(t *testing.T) {
+	db := newTestDB(t)
+	legacyAlbum := &storage.Album{
+		Name:        "legacy/folder",
+		Description: "自动从文件夹导入",
+		CreatedBy:   1,
+		CreatedAt:   time.Now(),
+	}
+	if err := db.CreateAlbum(legacyAlbum); err != nil {
+		t.Fatalf("创建旧版文件夹相册失败: %v", err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "legacy-folder-photo"
+	photo.SourceRelPath = "legacy/folder/photo.jpg"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存旧版相册媒体失败: %v", err)
+	}
+
+	albums, err := db.ListAlbumsForPhoto(photo.ID, 1)
+	if err != nil {
+		t.Fatalf("查询媒体所在旧版相册失败: %v", err)
+	}
+	if len(albums) != 1 || albums[0].ID != legacyAlbum.ID {
+		t.Fatalf("期望旧版文件夹相册按 name 定位，得到 %#v", albums)
+	}
+}
+
+func TestListAlbumPhotos_FolderAlbumUsesCurrentSourceRelPath(t *testing.T) {
+	db := newTestDB(t)
+	album := &storage.Album{
+		Name:          "new",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "new",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateAlbum(album); err != nil {
+		t.Fatalf("创建文件夹相册失败: %v", err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "moved-video-in-folder"
+	photo.MediaKind = storage.MediaKindVideo
+	photo.MimeType = "video/mp4"
+	photo.SourceRelPath = "new/video.mp4"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存移动后媒体失败: %v", err)
+	}
+	nested := makePhoto(1, time.Now().Add(time.Minute))
+	nested.UUID = "nested-video"
+	nested.MediaKind = storage.MediaKindVideo
+	nested.MimeType = "video/mp4"
+	nested.SourceRelPath = "new/child/video.mp4"
+	if err := db.SavePhoto(nested); err != nil {
+		t.Fatalf("保存下级媒体失败: %v", err)
+	}
+
+	page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{AlbumID: album.ID, UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询文件夹相册媒体失败: %v", err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
+		t.Fatalf("期望只按当前文件夹 source_rel_path 返回直接媒体，得到 %#v", page.Photos)
+	}
+}
+
+func TestListAlbumPhotos_LegacyFolderAlbumUsesNameAsPath(t *testing.T) {
+	db := newTestDB(t)
+	legacyAlbum := &storage.Album{
+		Name:        "legacy/folder",
+		Description: "自动从文件夹导入",
+		CreatedBy:   1,
+		CreatedAt:   time.Now(),
+	}
+	if err := db.CreateAlbum(legacyAlbum); err != nil {
+		t.Fatalf("创建旧版文件夹相册失败: %v", err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "legacy-folder-direct-photo"
+	photo.SourceRelPath = "legacy/folder/photo.jpg"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存旧版相册直接媒体失败: %v", err)
+	}
+	nested := makePhoto(1, time.Now().Add(time.Minute))
+	nested.UUID = "legacy-folder-nested-photo"
+	nested.SourceRelPath = "legacy/folder/child/photo.jpg"
+	if err := db.SavePhoto(nested); err != nil {
+		t.Fatalf("保存旧版相册下级媒体失败: %v", err)
+	}
+
+	page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{AlbumID: legacyAlbum.ID, UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询旧版文件夹相册媒体失败: %v", err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
+		t.Fatalf("期望旧版文件夹相册返回直接媒体，得到 %#v", page.Photos)
+	}
+}
+
+func TestListAlbumPhotos_LegacyFolderAlbumKeepsPhotosWithoutSourcePath(t *testing.T) {
+	db := newTestDB(t)
+	legacyAlbum := &storage.Album{
+		Name:        "legacy/folder",
+		Description: "自动从文件夹导入",
+		CreatedBy:   1,
+		CreatedAt:   time.Now(),
+	}
+	if err := db.CreateAlbum(legacyAlbum); err != nil {
+		t.Fatalf("创建旧版文件夹相册失败: %v", err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "legacy-photo-without-source-path"
+	photo.SourceRelPath = ""
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存旧版无源路径媒体失败: %v", err)
+	}
+	if err := db.AddPhotoToAlbum(legacyAlbum.ID, photo.ID, 1); err != nil {
+		t.Fatalf("添加旧版相册关联失败: %v", err)
+	}
+
+	page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{AlbumID: legacyAlbum.ID, UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询旧版无源路径相册媒体失败: %v", err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
+		t.Fatalf("期望保留旧版 album_photos 关联中的无源路径媒体，得到 %#v", page.Photos)
+	}
+}
+
 func TestUpdateAlbum_Success(t *testing.T) {
 	db := newTestDB(t)
 	album := &storage.Album{Name: "旧名字", CreatedBy: 1, CreatedAt: time.Now()}
@@ -296,5 +470,69 @@ func TestAlbumCoverUUID(t *testing.T) {
 	got, _ = db.GetAlbumByID(album.ID, 1)
 	if got.CoverUUID != "" {
 		t.Errorf("软删除后 CoverUUID 应为空，得到 %s", got.CoverUUID)
+	}
+}
+
+func TestFolderAlbumCoverUUIDFallsBackToDescendantPhoto(t *testing.T) {
+	db := newTestDB(t)
+	parent := &storage.Album{
+		Name:          "1",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "1",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateAlbum(parent); err != nil {
+		t.Fatalf("创建父级文件夹相册失败: %v", err)
+	}
+	child := &storage.Album{
+		Name:          "1/2",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "1/2",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateAlbum(child); err != nil {
+		t.Fatalf("创建子级文件夹相册失败: %v", err)
+	}
+	p := makePhoto(1, time.Now())
+	p.UUID = "descendant-cover-uuid"
+	p.SourceRelPath = "1/2/photo.jpg"
+	if err := db.SavePhoto(p); err != nil {
+		t.Fatalf("保存子级照片失败: %v", err)
+	}
+	if err := db.AddPhotoToAlbum(child.ID, p.ID, 1); err != nil {
+		t.Fatalf("加入子级相册失败: %v", err)
+	}
+	if err := db.RefreshFolderAlbumCovers(1); err != nil {
+		t.Fatalf("刷新文件夹相册封面失败: %v", err)
+	}
+
+	got, err := db.GetAlbumByID(parent.ID, 1)
+	if err != nil {
+		t.Fatalf("查询父级相册失败: %v", err)
+	}
+	if got.CoverUUID != "descendant-cover-uuid" {
+		t.Fatalf("期望父级相册递归使用子级照片封面，得到 %q", got.CoverUUID)
+	}
+	if got.PhotoCount != 0 {
+		t.Fatalf("父级相册不应把子级照片计入直接媒体数量，得到 %d", got.PhotoCount)
+	}
+
+	albums, err := db.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册列表失败: %v", err)
+	}
+	var listedParent *storage.Album
+	for _, album := range albums {
+		if album.ID == parent.ID {
+			listedParent = album
+			break
+		}
+	}
+	if listedParent == nil || listedParent.CoverUUID != "descendant-cover-uuid" {
+		t.Fatalf("相册列表也应递归使用子级照片封面，得到 %#v", listedParent)
 	}
 }

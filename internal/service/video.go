@@ -87,7 +87,7 @@ func (s *PhotoService) MediaPath(photo *storage.Photo) string {
 }
 
 func (s *PhotoService) PosterPath(photo *storage.Photo) string {
-	return media.PosterPath(s.thumbnailPath, photo.UUID)
+	return media.PosterPath(s.managedThumbnailRoot(), photo.UUID)
 }
 
 func (s *PhotoService) RefreshVideoThumbnails(userID int64) (*VideoThumbnailRefreshResult, error) {

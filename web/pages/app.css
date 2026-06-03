@@ -838,6 +838,10 @@ body:has(#album-grid-wrap) .content {
   padding: 132px 20px 132px;
 }
 
+body:has(#album-child-wrap .album-grid) .content {
+  padding: 132px 20px 132px;
+}
+
 .album-detail-pill {
   position: fixed;
   left: 32px;
@@ -1417,14 +1421,18 @@ body:has(#album-grid-wrap) .content {
 }
 
 .photo-thumb.keyboard-focused {
-  outline: 3px solid var(--accent);
-  outline-offset: -3px;
-  box-shadow: 0 0 0 4px var(--accent-faint), 0 12px 30px var(--accent-soft);
+  outline: 4px solid color-mix(in srgb, var(--accent) 88%, white 12%);
+  outline-offset: -4px;
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, .82),
+    0 0 0 3px color-mix(in srgb, var(--accent) 58%, transparent),
+    0 14px 34px color-mix(in srgb, var(--accent) 32%, rgba(0, 0, 0, .16));
 }
 
 .photo-thumb-focus {
-  outline: 3px solid var(--accent);
-  outline-offset: -3px;
+  outline: 4px solid color-mix(in srgb, var(--accent) 88%, white 12%);
+  outline-offset: -4px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 42%, transparent);
   animation: thumb-focus-pulse 1.6s ease;
 }
 
@@ -1595,14 +1603,27 @@ body.selection-mode .date-select-all {
   padding: 16px;
 }
 
+.album-card:not(.list) .album-info {
+  flex: 0 0 104px;
+  height: 104px;
+  overflow: hidden;
+}
+
 .album-name {
+  display: -webkit-box;
   width: calc(100% - 44px);
   font-weight: 600;
-  font-size: 15px;
-  line-height: 20px;
-  white-space: nowrap;
+  font-size: 16px;
+  line-height: 21px;
+  min-height: 0;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   letter-spacing: 0;
   color: var(--text);
 }
@@ -1613,7 +1634,7 @@ body.selection-mode .date-select-all {
 
 .album-subtitle {
   display: -webkit-box;
-  margin-top: 8px;
+  margin-top: 5px;
   color: var(--text2);
   font-size: 12px;
   line-height: 18px;
@@ -1715,15 +1736,15 @@ body.selection-mode .date-select-all {
 
 .album-card.list .album-name {
   display: -webkit-box;
-  min-height: 60px;
+  min-height: 0;
   white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   overflow-wrap: anywhere;
   word-break: break-word;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .album-card.list .album-count-row {
@@ -2106,6 +2127,7 @@ body.selection-mode .date-select-all {
 .lightbox-video {
   max-width: 100%;
   max-height: 100%;
+  object-fit: contain;
   border-radius: 0;
   background: #000;
   transform-origin: center center;
@@ -3447,6 +3469,7 @@ body.lightbox-page-lock {
 }
 
 .settings-panel-application,
+.settings-panel-batch-workflow,
 .settings-panel-share {
   grid-column: 1 / -1;
 }
@@ -3482,6 +3505,10 @@ body.lightbox-page-lock {
 
 .settings-panel-application {
   overflow: hidden;
+}
+
+.settings-panel-batch-workflow {
+  padding: 20px;
 }
 
 .settings-application-grid {
@@ -3892,16 +3919,20 @@ body.lightbox-page-lock {
   padding: 24px;
   border: 0;
   border-radius: 24px;
-  background: color-mix(in srgb, var(--card) 76%, var(--bg));
-  box-shadow: 0 10px 28px rgba(0, 0, 0, .06);
+  background: color-mix(in srgb, var(--card) 92%, var(--bg2));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, .16) inset,
+    0 12px 30px rgba(0, 0, 0, .08);
   overflow: hidden;
   cursor: grab;
   transition: transform .16s ease, box-shadow .16s ease, background .16s ease, opacity .16s ease;
 }
 
 .settings-library-row.active {
-  background: color-mix(in srgb, var(--library-accent) 12%, var(--card));
-  box-shadow: 0 12px 30px color-mix(in srgb, var(--library-accent) 18%, rgba(0, 0, 0, .08));
+  background: color-mix(in srgb, var(--library-accent) 17%, var(--card));
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, .18) inset,
+    0 14px 34px color-mix(in srgb, var(--library-accent) 22%, rgba(0, 0, 0, .10));
 }
 
 .settings-library-row:hover {
@@ -4248,19 +4279,6 @@ body.lightbox-page-lock {
   flex-wrap: wrap;
 }
 
-.settings-batch-build-stack {
-  display: grid;
-  gap: 16px;
-  margin-top: 16px;
-}
-
-@media (min-width: 1180px) {
-  .settings-batch-build-stack {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
-  }
-}
-
 .settings-batch-build-panel {
   padding: 16px;
   border: 1px solid var(--border);
@@ -4276,8 +4294,25 @@ body.lightbox-page-lock {
   grid-column: 1 / -1;
 }
 
+.settings-panel-batch-workflow #settings-library-batch-workflow .settings-batch-build-panel {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.settings-panel-batch-workflow .settings-batch-build-head h3 {
+  margin: 0 0 6px;
+}
+
 .settings-batch-build-master-toggles {
   margin-top: 14px;
+}
+
+.settings-batch-build-master-toggles.is-disabled {
+  opacity: .48;
+  pointer-events: none;
+  filter: saturate(.75);
 }
 
 .settings-batch-build-head {
@@ -4340,6 +4375,18 @@ body.lightbox-page-lock {
   gap: 8px;
 }
 
+.settings-batch-workflow-selection-list.is-disabled {
+  opacity: .52;
+  pointer-events: none;
+  filter: saturate(.75);
+}
+
+@media (min-width: 1180px) {
+  .settings-panel-batch-workflow .settings-batch-workflow-selection-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .settings-batch-build-select-row {
   display: flex;
   align-items: center;
@@ -4398,6 +4445,24 @@ body.lightbox-page-lock {
   width: 0;
   border-radius: inherit;
   background: color-mix(in srgb, var(--accent) 78%, white);
+  transition: width .24s ease;
+}
+
+.settings-batch-workflow-progress {
+  margin-top: 14px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text2) 9%, transparent);
+}
+
+.settings-batch-workflow-progress span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 62%, white), color-mix(in srgb, var(--accent) 86%, white));
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
   transition: width .24s ease;
 }
 
@@ -4575,6 +4640,7 @@ body.lightbox-page-lock {
   }
 
   .settings-panel-application,
+  .settings-panel-batch-workflow,
   .settings-panel-display,
   .settings-panel-playback,
   .settings-panel-experimental,
@@ -4704,6 +4770,11 @@ body.lightbox-page-lock {
 
   .content {
     padding: 132px 0 132px;
+  }
+
+  body:has(#album-grid-wrap) .content,
+  body:has(#album-child-wrap .album-grid) .content {
+    padding: 132px 20px 132px;
   }
 
   .floating-search-btn {
@@ -5117,7 +5188,8 @@ body.lightbox-page-lock {
     padding: 132px 20px 132px;
   }
 
-  body:has(#album-grid-wrap) .content {
+  body:has(#album-grid-wrap) .content,
+  body:has(#album-child-wrap .album-grid) .content {
     padding: 132px 20px 132px;
   }
 

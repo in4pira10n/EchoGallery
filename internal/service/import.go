@@ -111,10 +111,10 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		if err != nil {
 			return err
 		}
-		sourceRelPath = filepath.Clean(sourceRelPath)
+		sourceRelPath = filepath.ToSlash(filepath.Clean(sourceRelPath))
 		seenSourcePaths[sourceRelPath] = true
-		if albumName := folderAlbumNameForSourceRelPath(sourceRelPath); albumName != "" {
-			seenFolderAlbums[albumName] = true
+		for _, albumPath := range folderAlbumPathsForSourceRelPath(sourceRelPath) {
+			seenFolderAlbums[albumPath] = true
 		}
 		totalCandidates++
 		if progress != nil && (totalCandidates <= 12 || totalCandidates%32 == 0) {
@@ -203,6 +203,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		return summary, err
 	}
 	summary.Pruned += pruned
+	if err := s.ensureFolderAlbums(uploadedBy, seenFolderAlbums, albumCache); err != nil {
+		return summary, err
+	}
 	if err := s.pruneMissingFolderAlbums(uploadedBy, seenFolderAlbums); err != nil {
 		return summary, err
 	}
@@ -210,6 +213,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		if err := s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache); err != nil {
 			return summary, err
 		}
+	}
+	if err := s.repo.RefreshFolderAlbumCovers(uploadedBy); err != nil {
+		return summary, err
 	}
 	summary.Skipped += relocatedCandidates
 
@@ -314,19 +320,43 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 
 	summary.Imported += int(importedCount)
 	summary.Skipped += int(skippedCount)
+	if err := s.repo.RefreshFolderAlbumCovers(uploadedBy); err != nil {
+		return summary, err
+	}
 	s.warmImportedThumbnails(importedPhotos)
 	return summary, nil
 }
 
 func folderAlbumNameForSourceRelPath(sourceRelPath string) string {
-	if sourceRelPath == "" {
+	paths := folderAlbumPathsForSourceRelPath(sourceRelPath)
+	if len(paths) == 0 {
 		return ""
+	}
+	return paths[len(paths)-1]
+}
+
+func folderAlbumPathsForSourceRelPath(sourceRelPath string) []string {
+	if sourceRelPath == "" {
+		return nil
 	}
 	dir := filepath.Dir(sourceRelPath)
 	if dir == "." || dir == "" {
-		return ""
+		return nil
 	}
-	return filepath.ToSlash(filepath.Clean(dir))
+	dir = filepath.ToSlash(filepath.Clean(dir))
+	if dir == "." || dir == "" {
+		return nil
+	}
+	parts := strings.Split(dir, "/")
+	paths := make([]string, 0, len(parts))
+	for index := range parts {
+		part := strings.TrimSpace(parts[index])
+		if part == "" || part == "." {
+			continue
+		}
+		paths = append(paths, strings.Join(parts[:index+1], "/"))
+	}
+	return paths
 }
 
 func (s *PhotoService) pruneMissingSourceMedia(ctx context.Context, uploadedBy int64, sourceIndex map[string]storage.SourceMediaInfo, seenSourcePaths map[string]bool) (int, error) {
@@ -335,7 +365,7 @@ func (s *PhotoService) pruneMissingSourceMedia(ctx context.Context, uploadedBy i
 		if err := ctx.Err(); err != nil {
 			return pruned, err
 		}
-		if sourceRelPath == "" || seenSourcePaths[filepath.Clean(sourceRelPath)] {
+		if sourceRelPath == "" || seenSourcePaths[filepath.ToSlash(filepath.Clean(sourceRelPath))] {
 			continue
 		}
 		if err := s.repo.HardDeletePhoto(existing.ID, uploadedBy); err != nil {
@@ -527,6 +557,13 @@ func (s *PhotoService) loadAlbumCache(uploadedBy int64) (map[string]int64, error
 	}
 	cache := make(map[string]int64, len(albums))
 	for _, album := range albums {
+		if album == nil {
+			continue
+		}
+		if path := autoFolderAlbumPath(album); path != "" {
+			cache[path] = album.ID
+			continue
+		}
 		cache[album.Name] = album.ID
 	}
 	return cache, nil
@@ -536,28 +573,75 @@ func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, up
 	if photo == nil || photo.SourceRelPath == "" {
 		return nil
 	}
-	albumName := folderAlbumNameForSourceRelPath(photo.SourceRelPath)
-	if albumName == "" {
+	albumPaths := folderAlbumPathsForSourceRelPath(photo.SourceRelPath)
+	if len(albumPaths) == 0 {
 		return nil
 	}
+	leafAlbumID := int64(0)
+	for _, albumPath := range albumPaths {
+		albumID, ok := albumCache[albumPath]
+		if !ok {
+			album := &storage.Album{
+				Name:          albumPath,
+				Description:   folderAlbumDescription,
+				SourceKind:    folderAlbumSourceKind,
+				SourceRelPath: albumPath,
+				CreatedBy:     uploadedBy,
+				CreatedAt:     time.Now(),
+			}
+			if err := s.repo.CreateAlbum(album); err != nil {
+				return err
+			}
+			albumID = album.ID
+			albumCache[albumPath] = albumID
+		}
+		leafAlbumID = albumID
+	}
+	if leafAlbumID == 0 {
+		return nil
+	}
+	albums, err := s.repo.ListAlbumsForPhoto(photo.ID, uploadedBy)
+	if err != nil {
+		return err
+	}
+	leafPath := albumPaths[len(albumPaths)-1]
+	for _, album := range albums {
+		if !isAutoFolderAlbum(album) {
+			continue
+		}
+		if autoFolderAlbumPath(album) == leafPath {
+			continue
+		}
+		if err := s.repo.RemovePhotoFromAlbum(album.ID, photo.ID, uploadedBy); err != nil {
+			return err
+		}
+	}
+	return s.repo.AddPhotoToAlbum(leafAlbumID, photo.ID, uploadedBy)
+}
 
-	albumID, ok := albumCache[albumName]
-	if !ok {
+func (s *PhotoService) ensureFolderAlbums(uploadedBy int64, seenFolderAlbums map[string]bool, albumCache map[string]int64) error {
+	for albumPath := range seenFolderAlbums {
+		albumPath = filepath.ToSlash(filepath.Clean(albumPath))
+		if albumPath == "." || albumPath == "" {
+			continue
+		}
+		if _, ok := albumCache[albumPath]; ok {
+			continue
+		}
 		album := &storage.Album{
-			Name:          albumName,
+			Name:          albumPath,
 			Description:   folderAlbumDescription,
 			SourceKind:    folderAlbumSourceKind,
-			SourceRelPath: albumName,
+			SourceRelPath: albumPath,
 			CreatedBy:     uploadedBy,
 			CreatedAt:     time.Now(),
 		}
 		if err := s.repo.CreateAlbum(album); err != nil {
 			return err
 		}
-		albumID = album.ID
-		albumCache[albumName] = albumID
+		albumCache[albumPath] = album.ID
 	}
-	return s.repo.AddPhotoToAlbum(albumID, photo.ID, uploadedBy)
+	return nil
 }
 
 func (s *PhotoService) pruneMissingFolderAlbums(uploadedBy int64, seenFolderAlbums map[string]bool) error {
@@ -567,6 +651,9 @@ func (s *PhotoService) pruneMissingFolderAlbums(uploadedBy int64, seenFolderAlbu
 	}
 	for _, album := range albums {
 		if !isAutoFolderAlbum(album) {
+			if err := s.repo.DeleteAlbum(album.ID, uploadedBy); err != nil {
+				return err
+			}
 			continue
 		}
 		albumPath := autoFolderAlbumPath(album)

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +35,7 @@ type PhotoService struct {
 	sourcePath         string
 	dataPath           string
 	thumbnailPath      string
+	thumbnailLibraryID string
 	thumbnailSize      int
 	trashPath          string
 	syncThumbnail      bool // 测试用：同步生成缩略图
@@ -347,8 +350,16 @@ func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string)
 	if photo == nil {
 		return false
 	}
-	for _, path := range s.thumbnailSatisfyingPaths(photo, tier) {
-		if resolveManagedFile(path) {
+	targetPath := s.ThumbnailPath(photo)
+	if resolveManagedFile(targetPath) {
+		s.cleanupRedundantThumbnailFiles(photo)
+		return true
+	}
+	for _, legacyPath := range []string{s.legacyShardedThumbnailPath(photo), s.legacyFlatThumbnailPath(photo)} {
+		if legacyPath == "" || legacyPath == targetPath || !resolveManagedFile(legacyPath) {
+			continue
+		}
+		if err := relocateManagedThumbnailFile(legacyPath, targetPath); err == nil {
 			s.cleanupRedundantThumbnailFiles(photo)
 			return true
 		}
@@ -360,25 +371,8 @@ func resolveManagedFile(path string) bool {
 	if path == "" {
 		return false
 	}
-	if _, err := os.Stat(path); err == nil {
-		return true
-	}
-	legacyPath := legacyThumbnailJPEGPath(path)
-	return legacyPath != path && fileExists(legacyPath)
-}
-
-func legacyThumbnailJPEGPath(path string) string {
-	return strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	if _, err := os.Stat(path); err == nil {
-		return true
-	}
-	return false
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (s *PhotoService) generateThumbnailForPhoto(photo *storage.Photo) error {
@@ -428,6 +422,10 @@ func (s *PhotoService) SetThumbnailRoot(path string) {
 	if path = filepath.Clean(path); path != "" && path != "." {
 		s.thumbnailPath = path
 	}
+}
+
+func (s *PhotoService) SetThumbnailLibraryID(id string) {
+	s.thumbnailLibraryID = normalizeThumbnailLibraryID(id)
 }
 
 func (s *PhotoService) SetThumbnailSize(size int) {
@@ -560,7 +558,42 @@ func (s *PhotoService) ThumbnailPath(photo *storage.Photo) string {
 	if photo != nil && photo.MediaKind == storage.MediaKindVideo {
 		return s.PosterPath(photo)
 	}
-	return filepath.Join(s.thumbnailPath, photo.UUID+".webp")
+	return imgpkg.ThumbnailShardPath(s.managedThumbnailRoot(), photo.UUID)
+}
+
+func (s *PhotoService) managedThumbnailRoot() string {
+	if s == nil || s.thumbnailLibraryID == "" {
+		return s.thumbnailPath
+	}
+	return filepath.Join(s.thumbnailPath, s.thumbnailLibraryID)
+}
+
+func normalizeThumbnailLibraryID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
+}
+
+func (s *PhotoService) legacyShardedThumbnailPath(photo *storage.Photo) string {
+	if photo == nil {
+		return ""
+	}
+	return imgpkg.ThumbnailShardPath(s.thumbnailPath, photo.UUID)
+}
+
+func (s *PhotoService) legacyFlatThumbnailPath(photo *storage.Photo) string {
+	if photo == nil {
+		return ""
+	}
+	return imgpkg.ThumbnailFlatPath(s.thumbnailPath, photo.UUID)
 }
 
 func (s *PhotoService) legacyThumbnailPreviewPath(photo *storage.Photo) string {
@@ -590,6 +623,19 @@ func (s *PhotoService) ThumbnailCandidates(photo *storage.Photo) []string {
 	}
 	return []string{
 		s.ThumbnailPath(photo),
+		s.legacyShardedThumbnailPath(photo),
+		s.legacyFlatThumbnailPath(photo),
+	}
+}
+
+func (s *PhotoService) thumbnailCleanupPaths(photo *storage.Photo) []string {
+	if photo == nil {
+		return nil
+	}
+	return []string{
+		s.ThumbnailPath(photo),
+		s.legacyShardedThumbnailPath(photo),
+		s.legacyFlatThumbnailPath(photo),
 		s.legacyThumbnailPreviewPath(photo),
 		s.legacyThumbnailBuildPreviewPath(photo),
 		s.LegacyThumbnailPath(photo),
@@ -600,36 +646,85 @@ func (s *PhotoService) thumbnailSatisfyingPaths(photo *storage.Photo, tier strin
 	if photo == nil {
 		return nil
 	}
-	return []string{s.ThumbnailPath(photo), s.LegacyThumbnailPath(photo)}
-}
-
-func removeThumbnailFile(path string) {
-	if strings.TrimSpace(path) == "" {
-		return
-	}
-	_ = os.Remove(path)
-	legacy := legacyThumbnailJPEGPath(path)
-	if legacy != path {
-		_ = os.Remove(legacy)
-	}
+	return []string{s.ThumbnailPath(photo), s.legacyShardedThumbnailPath(photo), s.legacyFlatThumbnailPath(photo)}
 }
 
 func (s *PhotoService) cleanupRedundantThumbnailFiles(photo *storage.Photo) {
+	_ = s.cleanupThumbnailArtifacts(photo, resolveManagedFile(s.ThumbnailPath(photo)), false)
+}
+
+func (s *PhotoService) cleanupRedundantThumbnailFilesCount(photo *storage.Photo, fullExists bool) int {
+	return s.cleanupThumbnailArtifacts(photo, fullExists, false)
+}
+
+func (s *PhotoService) cleanupThumbnailArtifacts(photo *storage.Photo, fullExists bool, forceLegacyCleanup bool) int {
 	if photo == nil {
-		return
+		return 0
 	}
 	fullPath := s.ThumbnailPath(photo)
+	legacyShardedPath := s.legacyShardedThumbnailPath(photo)
+	legacyFlatPath := s.legacyFlatThumbnailPath(photo)
 	previewPath := s.legacyThumbnailPreviewPath(photo)
 	buildPreviewPath := s.legacyThumbnailBuildPreviewPath(photo)
 	legacyFullPath := s.LegacyThumbnailPath(photo)
-	fullExists := resolveManagedFile(fullPath)
+	cleaned := 0
 	if fullExists {
-		removeThumbnailFile(previewPath)
-		removeThumbnailFile(buildPreviewPath)
-		if fullPath != legacyFullPath {
-			_ = os.Remove(legacyFullPath)
+		if legacyShardedPath != "" && legacyShardedPath != fullPath {
+			if removeThumbnailFileIfExists(legacyShardedPath) {
+				cleaned++
+			}
+		}
+		if legacyFlatPath != "" && legacyFlatPath != fullPath {
+			if removeThumbnailFileIfExists(legacyFlatPath) {
+				cleaned++
+			}
 		}
 	}
+	if fullExists || forceLegacyCleanup {
+		if removeThumbnailFileIfExists(previewPath) {
+			cleaned++
+		}
+		if removeThumbnailFileIfExists(buildPreviewPath) {
+			cleaned++
+		}
+		if (fullExists || forceLegacyCleanup) && removeThumbnailFileIfExists(legacyFullPath) {
+			cleaned++
+		}
+	}
+	return cleaned
+}
+
+func relocateManagedThumbnailFile(srcPath string, destPath string) error {
+	if strings.TrimSpace(srcPath) == "" || strings.TrimSpace(destPath) == "" || srcPath == destPath {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
+	if err := os.Rename(srcPath, destPath); err == nil {
+		return nil
+	} else if linkErr, ok := err.(*os.LinkError); !ok || !errors.Is(linkErr.Err, syscall.EXDEV) {
+		return err
+	}
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dest, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer dest.Close()
+	if _, err := io.Copy(dest, src); err != nil {
+		_ = os.Remove(destPath)
+		return err
+	}
+	if err := dest.Sync(); err != nil {
+		_ = os.Remove(destPath)
+		return err
+	}
+	return os.Remove(srcPath)
 }
 
 // ManagedMediaRelPath 返回应用内部托管媒体文件的相对路径。

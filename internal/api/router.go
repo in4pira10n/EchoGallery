@@ -107,6 +107,7 @@ type videoRegistrar interface {
 	SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	PermanentlyDeletePhoto(id int64, userID int64) error
 	PlayWithSystemPlayer(id int64, userID int64) error
+	RevealAlbumInFinder(id int64, userID int64) error
 	RevealInFinder(id int64, userID int64) error
 	RestorePhoto(id int64, userID int64) error
 	RefreshVideoThumbnails(userID int64) (*service.VideoThumbnailRefreshResult, error)
@@ -119,6 +120,7 @@ type videoRegistrar interface {
 	MediaPath(photo *storage.Photo) string
 	PosterPath(photo *storage.Photo) string
 	ThumbnailPath(photo *storage.Photo) string
+	ThumbnailCandidates(photo *storage.Photo) []string
 }
 
 type mediaDownloadRequest struct {
@@ -273,6 +275,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/albums/:id/detail", authMiddleware(cfg), handleGetAlbumDetail(cfg, registrar))
 		media.GET("/albums/:id/download", authMiddleware(cfg), handleDownloadAlbumMedia(cfg, registrar))
 		media.GET("/albums/:id", authMiddleware(cfg), handleListAlbumMedia(cfg, registrar))
+		media.POST("/albums/:id/reveal", authMiddleware(cfg), handleRevealAlbumInFinder(cfg, registrar))
 		media.POST("/albums/:id", authMiddleware(cfg), handleAddMediaToAlbum(cfg, registrar))
 		media.PUT("/albums/:id", authMiddleware(cfg), handleUpdateAlbumMedia(cfg, registrar))
 		media.DELETE("/albums/:id", authMiddleware(cfg), handleDeleteAlbumMedia(cfg, registrar))
@@ -475,6 +478,30 @@ func handleRevealMediaInFinder(cfg *config.Config, registrar videoRegistrar) gin
 			return
 		}
 		if err := registrar.RevealInFinder(id, userID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "已在文件管理器中定位"})
+	}
+}
+
+func handleRevealAlbumInFinder(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "相册 ID 无效"})
+			return
+		}
+		if err := registrar.RevealAlbumInFinder(id, userID); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1115,20 +1142,9 @@ func handleServePhotoFile(cfg *config.Config, registrar videoRegistrar) gin.Hand
 	}
 }
 
-func legacyJPEGPath(path string) string {
-	base := strings.TrimSuffix(path, filepath.Ext(path))
-	return base + ".jpg"
-}
-
 func resolveExistingThumbnailPath(preferredPath string) string {
 	if _, err := os.Stat(preferredPath); err == nil {
 		return preferredPath
-	}
-	legacyPath := legacyJPEGPath(preferredPath)
-	if legacyPath != preferredPath {
-		if _, err := os.Stat(legacyPath); err == nil {
-			return legacyPath
-		}
 	}
 	return ""
 }
@@ -1146,9 +1162,7 @@ func thumbnailCandidatePaths(registrar videoRegistrar, photo *storage.Photo) []s
 	if registrar == nil || photo == nil {
 		return nil
 	}
-	return []string{
-		registrar.ThumbnailPath(photo),
-	}
+	return registrar.ThumbnailCandidates(photo)
 }
 
 func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, photo *storage.Photo) (string, error) {
@@ -1488,6 +1502,14 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 }
 
 func activeLibraryIndex(cfg *config.Config) int {
+	activeID := strings.TrimSpace(cfg.ActiveLibraryID)
+	if activeID != "" {
+		for index, library := range cfg.Libraries {
+			if strings.TrimSpace(library.ID) == activeID {
+				return index
+			}
+		}
+	}
 	active := config.NormalizeStoragePath(cfg.StoragePath)
 	for index, library := range cfg.Libraries {
 		if config.NormalizeStoragePath(library.Path) == active {
@@ -1583,7 +1605,7 @@ func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin
 				c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
 				return
 			}
-			thumbPath := resolveExistingThumbnailPath(registrar.ThumbnailPath(photo))
+			thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 			if thumbPath == "" {
 				thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
 					return generateThumbnailOnDemand(cfg, registrar, photo)
@@ -1755,7 +1777,7 @@ func handleServePoster(cfg *config.Config, registrar videoRegistrar) gin.Handler
 			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
 			return
 		}
-		posterPath := resolveExistingThumbnailPath(registrar.PosterPath(photo))
+		posterPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 		if posterPath == "" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "poster 不存在"})
 			return

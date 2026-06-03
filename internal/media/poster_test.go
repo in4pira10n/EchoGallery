@@ -15,7 +15,7 @@ import (
 
 func TestPosterPath(t *testing.T) {
 	got := PosterPath("/tmp/storage", "video-1")
-	want := filepath.Join("/tmp/storage", "video-1.webp")
+	want := filepath.Join("/tmp/storage", "vi", "de", "video-1.webp")
 	if got != want {
 		t.Fatalf("期望 %s，得到 %s", want, got)
 	}

@@ -9,6 +9,7 @@ import (
 )
 
 type LibraryBatchBuildLibraryStatus struct {
+	ID        string `json:"id,omitempty"`
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	Status    string `json:"status"`
@@ -21,28 +22,33 @@ type LibraryBatchBuildLibraryStatus struct {
 }
 
 type LibraryBatchBuildStatus struct {
-	Status              string                           `json:"status"`
-	Message             string                           `json:"message"`
-	SelectedPaths       []string                         `json:"selected_paths,omitempty"`
-	CurrentLibraryName  string                           `json:"current_library_name,omitempty"`
-	CurrentLibraryPath  string                           `json:"current_library_path,omitempty"`
-	CurrentLibraryIndex int                              `json:"current_library_index"`
-	TotalLibraries      int                              `json:"total_libraries"`
-	CompletedLibraries  int                              `json:"completed_libraries"`
-	FailedLibraries     int                              `json:"failed_libraries"`
-	CurrentPhase        string                           `json:"current_phase,omitempty"`
-	CurrentDone         int                              `json:"current_done"`
-	CurrentTotal        int                              `json:"current_total"`
-	CurrentPercent      float64                          `json:"current_percent"`
-	LowResourceMode     bool                             `json:"low_resource_mode"`
-	AggressiveMode      bool                             `json:"aggressive_mode"`
-	ExitAfterComplete   bool                             `json:"exit_after_complete"`
-	StartedAt           string                           `json:"started_at,omitempty"`
-	UpdatedAt           string                           `json:"updated_at,omitempty"`
-	FinishedAt          string                           `json:"finished_at,omitempty"`
-	ElapsedSeconds      int64                            `json:"elapsed_seconds"`
-	Libraries           []LibraryBatchBuildLibraryStatus `json:"libraries,omitempty"`
-	Error               string                           `json:"error,omitempty"`
+	Status               string                           `json:"status"`
+	Message              string                           `json:"message"`
+	SelectedLibraryIDs   []string                         `json:"selected_library_ids,omitempty"`
+	SelectedPaths        []string                         `json:"selected_paths,omitempty"`
+	SelectionConfigured  bool                             `json:"selection_configured,omitempty"`
+	MoveLegacyThumbnails bool                             `json:"move_legacy_thumbnails,omitempty"`
+	CleanThumbnailFiles  bool                             `json:"clean_thumbnail_files,omitempty"`
+	CurrentLibraryID     string                           `json:"current_library_id,omitempty"`
+	CurrentLibraryName   string                           `json:"current_library_name,omitempty"`
+	CurrentLibraryPath   string                           `json:"current_library_path,omitempty"`
+	CurrentLibraryIndex  int                              `json:"current_library_index"`
+	TotalLibraries       int                              `json:"total_libraries"`
+	CompletedLibraries   int                              `json:"completed_libraries"`
+	FailedLibraries      int                              `json:"failed_libraries"`
+	CurrentPhase         string                           `json:"current_phase,omitempty"`
+	CurrentDone          int                              `json:"current_done"`
+	CurrentTotal         int                              `json:"current_total"`
+	CurrentPercent       float64                          `json:"current_percent"`
+	LowResourceMode      bool                             `json:"low_resource_mode"`
+	AggressiveMode       bool                             `json:"aggressive_mode"`
+	ExitAfterComplete    bool                             `json:"exit_after_complete"`
+	StartedAt            string                           `json:"started_at,omitempty"`
+	UpdatedAt            string                           `json:"updated_at,omitempty"`
+	FinishedAt           string                           `json:"finished_at,omitempty"`
+	ElapsedSeconds       int64                            `json:"elapsed_seconds"`
+	Libraries            []LibraryBatchBuildLibraryStatus `json:"libraries,omitempty"`
+	Error                string                           `json:"error,omitempty"`
 }
 
 type LibraryBatchBuildHooks struct {
@@ -50,7 +56,7 @@ type LibraryBatchBuildHooks struct {
 	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
-	SetSelection         func(cfg *config.Config, username string, selectedPaths []string) (LibraryBatchBuildStatus, error)
+	SetSelection         func(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (LibraryBatchBuildStatus, error)
 }
 
 type libraryBatchBuildExitRequest struct {
@@ -58,11 +64,14 @@ type libraryBatchBuildExitRequest struct {
 }
 
 type libraryBatchBuildStartRequest struct {
-	Aggressive bool `json:"aggressive"`
+	Aggressive           bool `json:"aggressive"`
+	MoveLegacyThumbnails bool `json:"move_legacy_thumbnails"`
+	CleanThumbnailFiles  bool `json:"clean_thumbnail_files"`
 }
 
 type libraryBatchBuildSelectionRequest struct {
-	SelectedPaths []string `json:"selected_paths"`
+	SelectedLibraryIDs []string `json:"selected_library_ids"`
+	SelectedPaths      []string `json:"selected_paths"`
 }
 
 func handleGetLibraryBatchBuildStatus(cfg *config.Config, hooks LibraryBatchBuildHooks) gin.HandlerFunc {
@@ -156,7 +165,7 @@ func handleSetLibraryBatchBuildSelection(cfg *config.Config, hooks LibraryBatchB
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
-		status, err := hooks.SetSelection(cfg, currentUsername(c), req.SelectedPaths)
+		status, err := hooks.SetSelection(cfg, currentUsername(c), req.SelectedLibraryIDs, req.SelectedPaths)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

@@ -10,10 +10,10 @@ import (
 
 type LibraryBatchThumbnailBuildHooks struct {
 	Status               func(profile *config.Profile, username string) LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (LibraryBatchBuildStatus, error)
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
-	SetSelection         func(cfg *config.Config, username string, selectedPaths []string) (LibraryBatchBuildStatus, error)
+	SetSelection         func(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (LibraryBatchBuildStatus, error)
 }
 
 func handleGetLibraryBatchThumbnailBuildStatus(cfg *config.Config, hooks LibraryBatchThumbnailBuildHooks) gin.HandlerFunc {
@@ -52,7 +52,7 @@ func handleStartLibraryBatchThumbnailBuild(cfg *config.Config, hooks LibraryBatc
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.MoveLegacyThumbnails, req.CleanThumbnailFiles)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -107,7 +107,7 @@ func handleSetLibraryBatchThumbnailBuildSelection(cfg *config.Config, hooks Libr
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
-		status, err := hooks.SetSelection(cfg, currentUsername(c), req.SelectedPaths)
+		status, err := hooks.SetSelection(cfg, currentUsername(c), req.SelectedLibraryIDs, req.SelectedPaths)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

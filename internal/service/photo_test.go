@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/jpeg"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	imgpkg "echogallery/internal/image"
 	"echogallery/internal/media"
 	"echogallery/internal/storage"
 )
@@ -162,6 +164,211 @@ func TestThumbnailExistsForTier_DoesNotUseLegacyPreviewOnly(t *testing.T) {
 	}
 }
 
+func TestThumbnailExistsForTier_MigratesLegacyFlatWebPToShardedPath(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	photo := &storage.Photo{UUID: "thumb-legacy-1", MediaKind: storage.MediaKindImage}
+
+	legacyPath := svc.legacyFlatThumbnailPath(photo)
+	shardedPath := svc.ThumbnailPath(photo)
+
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("legacy-webp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
+		t.Fatal("旧平铺 webp 缩略图应当被迁移后继续复用")
+	}
+	if _, err := os.Stat(shardedPath); err != nil {
+		t.Fatalf("迁移后新的分片缩略图应存在: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("迁移后旧平铺缩略图应被移除，得到 err=%v", err)
+	}
+}
+
+func TestThumbnailExistsForTier_MigratesLegacySharedShardToLibraryScopedPath(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	svc.SetThumbnailLibraryID("lib_a")
+	photo := &storage.Photo{UUID: "thumb-legacy-library-1", MediaKind: storage.MediaKindImage}
+
+	legacyPath := svc.legacyShardedThumbnailPath(photo)
+	scopedPath := svc.ThumbnailPath(photo)
+
+	if legacyPath == scopedPath {
+		t.Fatal("设置 library_id 后旧分片路径与新资源库路径不应相同")
+	}
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("legacy-sharded-webp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
+		t.Fatal("旧共享分片缩略图应当被迁移到资源库 ID 目录后继续复用")
+	}
+	if _, err := os.Stat(scopedPath); err != nil {
+		t.Fatalf("迁移后的资源库缩略图应存在: %v", err)
+	}
+	if !strings.Contains(scopedPath, filepath.Join("lib_a")) {
+		t.Fatalf("期望新缩略图路径包含资源库 ID 目录，得到 %s", scopedPath)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("迁移后旧共享分片缩略图应被移除，得到 err=%v", err)
+	}
+}
+
+func TestMaintainThumbnailsContext_MovesLegacyAndCleansLegacyFiles(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	repo := svc.repo.(*mockRepo)
+	photo := &storage.Photo{UUID: "thumb-maint-1", MediaKind: storage.MediaKindImage, UploadedBy: 1}
+	if err := repo.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := svc.legacyFlatThumbnailPath(photo)
+	shardedPath := svc.ThumbnailPath(photo)
+	previewPath := svc.legacyThumbnailPreviewPath(photo)
+	buildPreviewPath := svc.legacyThumbnailBuildPreviewPath(photo)
+	legacyJPEGPath := svc.LegacyThumbnailPath(photo)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("legacy-webp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previewPath, []byte("preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildPreviewPath, []byte("build-preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyJPEGPath, []byte("legacy-jpg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := svc.MaintainThumbnailsContext(context.Background(), 1, ThumbnailMaintenanceOptions{
+		MoveLegacyThumbnails: true,
+		CleanThumbnailFiles:  true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("整理缩略图失败: %v", err)
+	}
+	if summary.Moved != 1 {
+		t.Fatalf("期望移动 1 个旧缩略图，得到 %d", summary.Moved)
+	}
+	if summary.Cleaned != 3 {
+		t.Fatalf("期望清理 3 个旧文件，得到 %d", summary.Cleaned)
+	}
+	if _, err := os.Stat(shardedPath); err != nil {
+		t.Fatalf("迁移后的分片缩略图应存在: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("旧平铺 webp 应被移走，得到 err=%v", err)
+	}
+	if _, err := os.Stat(previewPath); !os.IsNotExist(err) {
+		t.Fatalf("preview 应被清理，得到 err=%v", err)
+	}
+	if _, err := os.Stat(buildPreviewPath); !os.IsNotExist(err) {
+		t.Fatalf("build-preview 应被清理，得到 err=%v", err)
+	}
+	if _, err := os.Stat(legacyJPEGPath); !os.IsNotExist(err) {
+		t.Fatalf("旧 jpg 应被清理，得到 err=%v", err)
+	}
+}
+
+func TestMaintainThumbnailsContext_CleanOnlyKeepsLegacyFlatWebP(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	repo := svc.repo.(*mockRepo)
+	photo := &storage.Photo{UUID: "thumb-maint-2", MediaKind: storage.MediaKindImage, UploadedBy: 1}
+	if err := repo.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := svc.legacyFlatThumbnailPath(photo)
+	previewPath := svc.legacyThumbnailPreviewPath(photo)
+	buildPreviewPath := svc.legacyThumbnailBuildPreviewPath(photo)
+	legacyJPEGPath := svc.LegacyThumbnailPath(photo)
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("legacy-webp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previewPath, []byte("preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(buildPreviewPath, []byte("build-preview"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyJPEGPath, []byte("legacy-jpg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := svc.MaintainThumbnailsContext(context.Background(), 1, ThumbnailMaintenanceOptions{
+		CleanThumbnailFiles: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("整理缩略图失败: %v", err)
+	}
+	if summary.Moved != 0 {
+		t.Fatalf("未启用移动时不应迁移旧平铺 webp，得到 %d", summary.Moved)
+	}
+	if summary.Cleaned != 3 {
+		t.Fatalf("期望清理 3 个旧文件，得到 %d", summary.Cleaned)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("未启用移动时旧平铺 webp 应保留: %v", err)
+	}
+	if _, err := os.Stat(previewPath); !os.IsNotExist(err) {
+		t.Fatalf("preview 应被清理，得到 err=%v", err)
+	}
+	if _, err := os.Stat(buildPreviewPath); !os.IsNotExist(err) {
+		t.Fatalf("build-preview 应被清理，得到 err=%v", err)
+	}
+	if _, err := os.Stat(legacyJPEGPath); !os.IsNotExist(err) {
+		t.Fatalf("旧 jpg 应被清理，得到 err=%v", err)
+	}
+}
+
+func TestMaintainThumbnailsContext_CleanNeverRemovesLibraryIDDirs(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	svc.SetThumbnailLibraryID("lib_keep")
+	keepDir := filepath.Join(svc.thumbnailPath, "lib_keep")
+	staleDir := filepath.Join(svc.thumbnailPath, "lib_stale")
+	legacyShardDir := filepath.Join(svc.thumbnailPath, "ab")
+	for _, dir := range []string{keepDir, staleDir, legacyShardDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "thumb.webp"), []byte("thumb"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summary, err := svc.MaintainThumbnailsContext(context.Background(), 1, ThumbnailMaintenanceOptions{
+		CleanThumbnailFiles: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("清理缩略图失败: %v", err)
+	}
+	if summary.Cleaned != 0 {
+		t.Fatalf("没有媒体文件时不应清理任何缩略图文件或目录，得到 %d", summary.Cleaned)
+	}
+	if _, err := os.Stat(keepDir); err != nil {
+		t.Fatalf("有效 library_id 目录应保留: %v", err)
+	}
+	if _, err := os.Stat(staleDir); err != nil {
+		t.Fatalf("清理文件不应删除其它 library_id 目录: %v", err)
+	}
+	if _, err := os.Stat(legacyShardDir); err != nil {
+		t.Fatalf("旧分片目录也不应被当作 library_id 删除: %v", err)
+	}
+}
+
 func TestUpload_FallbackTime(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	data := createJPEGBytes(100, 100)
@@ -226,7 +433,10 @@ func TestThumbnailPath_VideoUsesSharedThumbnailDirectory(t *testing.T) {
 	if got != want {
 		t.Fatalf("期望视频缩略图路径与海报路径一致，got=%s want=%s", got, want)
 	}
-	if !strings.HasSuffix(got, "video-uuid.webp") {
+	if want := imgpkg.ThumbnailShardPath(svc.thumbnailPath, photo.UUID); got != want {
+		t.Fatalf("期望视频缩略图使用分片目录，got=%s want=%s", got, want)
+	}
+	if !strings.HasSuffix(got, filepath.Join("vi", "de", "video-uuid.webp")) {
 		t.Fatalf("期望视频缩略图为 webp 文件，得到 %s", got)
 	}
 }

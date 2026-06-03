@@ -193,6 +193,125 @@ func TestSaveToPath_OmitsProfileFieldsFromConfigJSON(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizeLibraries_AssignsStableIDsAndPrefersActiveLibraryID(t *testing.T) {
+	cfg := &Config{
+		StoragePath:     "/tmp/library-b",
+		ActiveLibraryID: "LIB_B",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a"},
+			{Name: "资源库 B", Path: "/tmp/library-b", ID: "LIB_B"},
+		},
+	}
+
+	cfg.normalizeLibraries()
+
+	if len(cfg.Libraries) != 2 {
+		t.Fatalf("期望保留 2 个资源库，得到 %d", len(cfg.Libraries))
+	}
+	if cfg.Libraries[0].ID == "" {
+		t.Fatalf("期望旧资源库自动补齐 library_id")
+	}
+	if cfg.Libraries[1].ID != "lib_b" {
+		t.Fatalf("期望规范化已有 library_id，得到 %q", cfg.Libraries[1].ID)
+	}
+	if cfg.ActiveLibraryID != "lib_b" {
+		t.Fatalf("期望优先使用 ActiveLibraryID，得到 %q", cfg.ActiveLibraryID)
+	}
+	if cfg.StoragePath != "/tmp/library-b" {
+		t.Fatalf("期望 ActiveLibraryID 对应的路径成为当前资源库，得到 %q", cfg.StoragePath)
+	}
+}
+
+func TestConfigNormalizeLibraries_LegacyLibraryIDIsDeterministic(t *testing.T) {
+	cfgA := &Config{
+		StoragePath: "/tmp/library-a",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a"},
+		},
+	}
+	cfgB := &Config{
+		StoragePath: "/tmp/library-a",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a"},
+		},
+	}
+
+	cfgA.normalizeLibraries()
+	cfgB.normalizeLibraries()
+
+	if cfgA.Libraries[0].ID == "" {
+		t.Fatal("期望旧资源库补齐稳定 library_id")
+	}
+	if cfgA.Libraries[0].ID != cfgB.Libraries[0].ID {
+		t.Fatalf("期望相同路径反复规范化得到同一个 library_id，得到 %q 和 %q", cfgA.Libraries[0].ID, cfgB.Libraries[0].ID)
+	}
+}
+
+func TestConfigNormalizeLibraries_StoragePathOnlyLibraryIDIsDeterministic(t *testing.T) {
+	cfgA := &Config{StoragePath: "/tmp/library-a"}
+	cfgB := &Config{StoragePath: "/tmp/library-a"}
+
+	cfgA.normalizeLibraries()
+	cfgB.normalizeLibraries()
+
+	if len(cfgA.Libraries) != 1 || len(cfgB.Libraries) != 1 {
+		t.Fatalf("期望从 storage_path 补齐单个资源库，得到 %d 和 %d", len(cfgA.Libraries), len(cfgB.Libraries))
+	}
+	if cfgA.Libraries[0].ID == "" {
+		t.Fatal("期望 storage_path-only 旧配置补齐稳定 library_id")
+	}
+	if cfgA.Libraries[0].ID != cfgB.Libraries[0].ID {
+		t.Fatalf("期望 storage_path-only 旧配置反复规范化得到同一个 library_id，得到 %q 和 %q", cfgA.Libraries[0].ID, cfgB.Libraries[0].ID)
+	}
+}
+
+func TestConfigNormalizeLibraries_DuplicateIDFallbackIsDeterministic(t *testing.T) {
+	cfgA := &Config{
+		StoragePath: "/tmp/library-a",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a", ID: "lib_same"},
+			{Name: "资源库 B", Path: "/tmp/library-b", ID: "lib_same"},
+		},
+	}
+	cfgB := &Config{
+		StoragePath: "/tmp/library-a",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a", ID: "lib_same"},
+			{Name: "资源库 B", Path: "/tmp/library-b", ID: "lib_same"},
+		},
+	}
+
+	cfgA.normalizeLibraries()
+	cfgB.normalizeLibraries()
+
+	if cfgA.Libraries[1].ID == "" || cfgA.Libraries[1].ID == "lib_same" {
+		t.Fatalf("期望重复 id 使用稳定兜底 id，得到 %q", cfgA.Libraries[1].ID)
+	}
+	if cfgA.Libraries[1].ID != cfgB.Libraries[1].ID {
+		t.Fatalf("期望重复 id 兜底稳定，得到 %q 和 %q", cfgA.Libraries[1].ID, cfgB.Libraries[1].ID)
+	}
+}
+
+func TestConfigNormalizeLibraries_FallsBackToPathWhenActiveLibraryIDMissing(t *testing.T) {
+	cfg := &Config{
+		ActiveLibraryID: "missing",
+		StoragePath:     "/tmp/library-b",
+		Libraries: []Library{
+			{Name: "资源库 A", Path: "/tmp/library-a", ID: "lib_a"},
+			{Name: "资源库 B", Path: "/tmp/library-b", ID: "lib_b"},
+		},
+	}
+
+	cfg.normalizeLibraries()
+
+	if cfg.ActiveLibraryID != "lib_b" {
+		t.Fatalf("期望在 id 缺失时回退到 storage_path 对应资源库，得到 %q", cfg.ActiveLibraryID)
+	}
+	if cfg.StoragePath != "/tmp/library-b" {
+		t.Fatalf("期望保持 storage_path 对应的活动资源库，得到 %q", cfg.StoragePath)
+	}
+}
+
 func TestDatabasePath_IsStablePerStoragePath(t *testing.T) {
 	dir := t.TempDir()
 	cfg1 := validConfig()

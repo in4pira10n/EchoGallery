@@ -19,6 +19,12 @@ type albumPhotoCursor struct {
 	ID   int64     `json:"i"`
 }
 
+const legacyFolderAlbumDescription = "自动从文件夹导入"
+
+func normalizeAlbumSourcePath(value string) string {
+	return strings.Trim(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/")
+}
+
 func normalizeAlbumPhotoSort(sort string) string {
 	switch strings.TrimSpace(strings.ToLower(sort)) {
 	case "name":
@@ -140,6 +146,11 @@ func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 // ListAlbumsForPhoto 查询包含指定图片/视频的相册。
 func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
 	rows, err := s.db.Query(`
+		WITH target_photo AS (
+			SELECT id, source_rel_path
+			FROM photos
+			WHERE id = ? AND uploaded_by = ? AND deleted_at IS NULL
+		)
 		SELECT a.id, a.name, a.description, a.cover_photo_id, a.source_kind, a.source_rel_path, a.created_by, a.created_at,
 		       COUNT(p.id) as photo_count,
 		       COALESCE(
@@ -150,13 +161,31 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 		          WHERE ap2.album_id = a.id AND ph.deleted_at IS NULL
 		          ORDER BY ph.taken_at DESC LIMIT 1)
 		       ) as cover_uuid
-		FROM albums a
-		INNER JOIN album_photos target_ap ON target_ap.album_id = a.id AND target_ap.photo_id = ?
-		INNER JOIN photos target_photo ON target_photo.id = target_ap.photo_id
-			AND target_photo.uploaded_by = ? AND target_photo.deleted_at IS NULL
+		FROM target_photo
+		INNER JOIN albums a ON a.created_by = ?
+		LEFT JOIN album_photos target_ap ON target_ap.album_id = a.id AND target_ap.photo_id = target_photo.id
 		LEFT JOIN album_photos ap ON ap.album_id = a.id
 		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
-		WHERE a.created_by = ?
+		WHERE (
+			(
+				target_ap.photo_id IS NOT NULL
+				AND (
+					NOT (a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))
+					OR target_photo.source_rel_path = ''
+					OR (
+						(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
+						AND target_photo.source_rel_path LIKE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/%'
+						AND instr(substr(target_photo.source_rel_path, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 2), '/') = 0
+					)
+				)
+			)
+			OR (
+				(a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))
+				AND (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
+				AND target_photo.source_rel_path LIKE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/%'
+				AND instr(substr(target_photo.source_rel_path, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 2), '/') = 0
+			)
+		)
 		GROUP BY a.id
 		ORDER BY a.created_at DESC`, photoID, userID, userID)
 	if err != nil {
@@ -189,6 +218,30 @@ func (s *DB) UpdateAlbum(album *storage.Album) error {
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("相册不存在")
+	}
+	return nil
+}
+
+// RefreshFolderAlbumCovers 刷新文件夹相册封面，避免每次查询相册列表时递归计算。
+func (s *DB) RefreshFolderAlbumCovers(userID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE albums AS a
+		SET cover_photo_id = COALESCE(
+			(SELECT ph.id FROM photos ph
+			 INNER JOIN album_photos ap ON ap.photo_id = ph.id
+			 WHERE ap.album_id = a.id AND ph.deleted_at IS NULL
+			 ORDER BY ph.taken_at DESC, ph.id DESC LIMIT 1),
+			(SELECT ph.id FROM photos ph
+			 WHERE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
+			   AND ph.uploaded_by = a.created_by
+			   AND ph.deleted_at IS NULL
+			   AND substr(ph.source_rel_path, 1, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 1) = (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/'
+			 ORDER BY ph.taken_at DESC, ph.id DESC LIMIT 1)
+		)
+		WHERE a.created_by = ?
+		  AND (a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))`, userID)
+	if err != nil {
+		return fmt.Errorf("刷新文件夹相册封面失败: %w", err)
 	}
 	return nil
 }
@@ -243,8 +296,44 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 		limit = 30
 	}
 	sort := normalizeAlbumPhotoSort(params.Sort)
-	where := "ap.album_id = ? AND p.uploaded_by = ? AND p.deleted_at IS NULL"
-	args := []interface{}{params.AlbumID, params.UserID}
+	var sourceKind string
+	var description string
+	var sourceRelPath string
+	var name string
+	if err := s.db.QueryRow(`
+		SELECT name, source_kind, description, source_rel_path
+		FROM albums
+		WHERE id = ? AND created_by = ?`, params.AlbumID, params.UserID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
+		if err == sql.ErrNoRows {
+			return &storage.PhotoPage{}, nil
+		}
+		return nil, fmt.Errorf("查询相册失败: %w", err)
+	}
+	isFolderAlbum := sourceKind == "folder" || (sourceKind == "" && description == legacyFolderAlbumDescription)
+	sourceRelPath = normalizeAlbumSourcePath(sourceRelPath)
+	if isFolderAlbum && sourceRelPath == "" {
+		sourceRelPath = normalizeAlbumSourcePath(name)
+	}
+	where := "p.uploaded_by = ? AND p.deleted_at IS NULL"
+	args := []interface{}{params.UserID}
+	joinClause := ""
+	if isFolderAlbum && sourceRelPath != "" {
+		where += ` AND (
+			(p.source_rel_path LIKE ? AND instr(substr(p.source_rel_path, ?), '/') = 0)
+			OR (
+				p.source_rel_path = ''
+				AND EXISTS (
+					SELECT 1 FROM album_photos legacy_ap
+					WHERE legacy_ap.album_id = ? AND legacy_ap.photo_id = p.id
+				)
+			)
+		)`
+		args = append(args, sourceRelPath+"/%", len(sourceRelPath)+2, params.AlbumID)
+	} else {
+		joinClause = "JOIN album_photos ap ON ap.photo_id = p.id"
+		where += " AND ap.album_id = ?"
+		args = append(args, params.AlbumID)
+	}
 	if params.MediaKind != "" {
 		where += " AND p.media_kind = ?"
 		args = append(args, params.MediaKind)
@@ -287,7 +376,7 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
 			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
 			FROM photos p
-			JOIN album_photos ap ON ap.photo_id = p.id
+			`+joinClause+`
 			WHERE `+where+`
 			ORDER BY `+orderBy+`
 			LIMIT ?`, queryArgs...)

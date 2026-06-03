@@ -451,9 +451,11 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 	}
 
 	var total int
-	countQuery := "SELECT COUNT(*) FROM photos WHERE " + where
-	if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("统计搜索结果失败: %w", err)
+	if params.IncludeTotal {
+		countQuery := "SELECT COUNT(*) FROM photos WHERE " + where
+		if err := s.db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+			return nil, fmt.Errorf("统计搜索结果失败: %w", err)
+		}
 	}
 
 	if params.Cursor != "" {
@@ -485,7 +487,9 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 	if err != nil {
 		return nil, err
 	}
-	page.Total = total
+	if params.IncludeTotal {
+		page.Total = total
+	}
 	return page, nil
 }
 

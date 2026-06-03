@@ -85,6 +85,9 @@ type Repository interface {
 	// UpdateAlbum 更新相册信息（名称、描述、封面）
 	UpdateAlbum(album *Album) error
 
+	// RefreshFolderAlbumCovers 刷新文件夹相册封面，优先使用直接媒体，其次递归使用下级文件夹媒体。
+	RefreshFolderAlbumCovers(userID int64) error
+
 	// DeleteAlbum 删除相册（不删除图片本身）
 	DeleteAlbum(id int64, userID int64) error
 

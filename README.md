@@ -192,7 +192,7 @@ http://127.0.0.1:8080
 - [x] `New Feature` 搜索和筛选结果支持打包下载全部
 - [x] `Future Plan` 全局搜索
 - [x] `Enhancement` 去掉灯箱顶部、底部栏的黑色遮罩，将圆角矩形元素使用半透明 + 背景模糊处理，加强照片大图浏览沉浸感
-- [x] `New Feature` 按住 `Ctrl`（Windows）或 `Command`（Mac）会将缩放等级暂时调满并聚焦鼠标当前区域
+- [x] `New Feature` 按住 `Alt` / `Option` 会将缩放等级暂时调满并聚焦鼠标当前区域
 - [x] `Fix` 隐藏侧栏后不需要留出一小部分侧栏
 - [x] `Enhancement` 将“扫描与构建资源库”页面也显示在前端并使用进度条同步状态以及 ETA
 - [x] `Enhancement` 支持“扫描与构建资源库”后退出应用；适合无人值守的较大资源库数据库构建

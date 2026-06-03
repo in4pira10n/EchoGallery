@@ -1,6 +1,7 @@
 package config
 
 import (
+	crand "crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -77,6 +79,7 @@ type configDefaultsProbe struct {
 }
 
 type Library struct {
+	ID          string `json:"id,omitempty"`
 	Name        string `json:"name"`
 	Path        string `json:"path"`
 	LogoAsset   string `json:"logo_asset,omitempty"`
@@ -86,6 +89,7 @@ type Library struct {
 type persistedConfig struct {
 	Port            int          `json:"port"`
 	ActiveProfile   string       `json:"active_profile,omitempty"`
+	ActiveLibraryID string       `json:"active_library_id,omitempty"`
 	StoragePath     string       `json:"storage_path,omitempty"`
 	Libraries       []Library    `json:"libraries,omitempty"`
 	ThumbnailDir    string       `json:"thumbnail_dir,omitempty"`
@@ -102,6 +106,7 @@ type persistedConfig struct {
 type Config struct {
 	Port            int         `json:"port"`
 	ActiveProfile   string      `json:"active_profile,omitempty"`
+	ActiveLibraryID string      `json:"active_library_id,omitempty"`
 	StoragePath     string      `json:"storage_path"`
 	Libraries       []Library   `json:"libraries,omitempty"`
 	ThumbnailDir    string      `json:"thumbnail_dir"`
@@ -346,6 +351,7 @@ func (c *Config) persisted() persistedConfig {
 		Workshop:      c.Workshop,
 	}
 	if cfg.ActiveProfile == "" {
+		cfg.ActiveLibraryID = strings.TrimSpace(c.ActiveLibraryID)
 		cfg.StoragePath = c.StoragePath
 		cfg.Libraries = append([]Library(nil), c.Libraries...)
 		cfg.ThumbnailDir = c.ThumbnailDir
@@ -360,13 +366,16 @@ func (c *Config) persisted() persistedConfig {
 
 func (c *Config) normalizeLibraries() {
 	if len(c.Libraries) == 0 && strings.TrimSpace(c.StoragePath) != "" {
+		usedIDs := make(map[string]struct{}, 1)
 		c.Libraries = []Library{{
+			ID:   ensureLibraryIDForPath("", c.StoragePath, usedIDs),
 			Name: defaultLibraryName(0),
 			Path: c.StoragePath,
 		}}
 	}
 
 	seen := make(map[string]struct{}, len(c.Libraries))
+	usedIDs := make(map[string]struct{}, len(c.Libraries))
 	normalized := make([]Library, 0, len(c.Libraries))
 	for _, lib := range c.Libraries {
 		path := strings.TrimSpace(lib.Path)
@@ -382,7 +391,9 @@ func (c *Config) normalizeLibraries() {
 		if name == "" {
 			name = defaultLibraryName(len(normalized))
 		}
+		id := ensureLibraryIDForPath(lib.ID, path, usedIDs)
 		normalized = append(normalized, Library{
+			ID:          id,
 			Name:        name,
 			Path:        path,
 			LogoAsset:   strings.TrimSpace(lib.LogoAsset),
@@ -391,8 +402,20 @@ func (c *Config) normalizeLibraries() {
 	}
 	c.Libraries = normalized
 
+	activeID := normalizeLibraryID(c.ActiveLibraryID)
+	if activeID != "" {
+		for _, lib := range c.Libraries {
+			if lib.ID == activeID {
+				c.ActiveLibraryID = lib.ID
+				c.StoragePath = lib.Path
+				return
+			}
+		}
+	}
+	c.ActiveLibraryID = activeID
 	if strings.TrimSpace(c.StoragePath) == "" && len(c.Libraries) > 0 {
 		c.StoragePath = c.Libraries[0].Path
+		c.ActiveLibraryID = c.Libraries[0].ID
 	}
 	if c.StoragePath == "" {
 		return
@@ -400,12 +423,98 @@ func (c *Config) normalizeLibraries() {
 	activeKey := NormalizeStoragePath(c.StoragePath)
 	for _, lib := range c.Libraries {
 		if NormalizeStoragePath(lib.Path) == activeKey {
+			c.ActiveLibraryID = lib.ID
 			c.StoragePath = lib.Path
 			return
 		}
 	}
 	if len(c.Libraries) > 0 {
+		c.ActiveLibraryID = c.Libraries[0].ID
 		c.StoragePath = c.Libraries[0].Path
+	}
+}
+
+func normalizeLibraryID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func newLibraryID() string {
+	var raw [8]byte
+	if _, err := crand.Read(raw[:]); err != nil {
+		sum := sha1.Sum([]byte(fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())))
+		return "lib_" + hex.EncodeToString(sum[:6])
+	}
+	return "lib_" + hex.EncodeToString(raw[:])
+}
+
+func libraryIDFromPath(path string) string {
+	normalized := NormalizeStoragePath(path)
+	if normalized == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(normalized))
+	return "lib_" + hex.EncodeToString(sum[:6])
+}
+
+func ensureLibraryID(id string, used map[string]struct{}) string {
+	normalized := normalizeLibraryID(id)
+	if normalized != "" {
+		if _, exists := used[normalized]; !exists {
+			used[normalized] = struct{}{}
+			return normalized
+		}
+	}
+	for {
+		candidate := newLibraryID()
+		if _, exists := used[candidate]; exists {
+			continue
+		}
+		used[candidate] = struct{}{}
+		return candidate
+	}
+}
+
+func ensureLibraryIDForPath(id string, path string, used map[string]struct{}) string {
+	normalized := normalizeLibraryID(id)
+	if normalized != "" {
+		if _, exists := used[normalized]; !exists {
+			used[normalized] = struct{}{}
+			return normalized
+		}
+	}
+	candidate := normalizeLibraryID(libraryIDFromPath(path))
+	if candidate != "" {
+		return reserveLibraryIDCandidate(candidate, used)
+	}
+	return ensureLibraryID("", used)
+}
+
+func reserveLibraryIDCandidate(candidate string, used map[string]struct{}) string {
+	candidate = normalizeLibraryID(candidate)
+	if candidate == "" {
+		return ensureLibraryID("", used)
+	}
+	if _, exists := used[candidate]; !exists {
+		used[candidate] = struct{}{}
+		return candidate
+	}
+	for i := 2; ; i++ {
+		next := fmt.Sprintf("%s_%d", candidate, i)
+		if _, exists := used[next]; exists {
+			continue
+		}
+		used[next] = struct{}{}
+		return next
 	}
 }
 

@@ -30,6 +30,29 @@ func TestProbeVideoWithRunner_Success(t *testing.T) {
 	}
 }
 
+func TestProbeVideoWithRunner_AppliesDisplayMatrixRotation(t *testing.T) {
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return []byte(`{
+			"streams": [{
+				"codec_type":"video",
+				"codec_name":"h264",
+				"width":1080,
+				"height":1920,
+				"side_data_list":[{"side_data_type":"Display Matrix","rotation":90}]
+			}],
+			"format": {"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"592.126"}
+		}`), nil
+	}
+
+	meta, err := probeVideoWithRunner("rotated.mp4", runner)
+	if err != nil {
+		t.Fatalf("期望成功，得到错误: %v", err)
+	}
+	if meta.Width != 1920 || meta.Height != 1080 {
+		t.Fatalf("期望按 Display Matrix 修正为 1920x1080，得到 %+v", meta)
+	}
+}
+
 func TestProbeVideoWithRunner_FFprobeUnavailable(t *testing.T) {
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return nil, exec.ErrNotFound

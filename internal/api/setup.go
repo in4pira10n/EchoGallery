@@ -313,6 +313,13 @@ func persistRecoveredLibrarySelection(cfg *config.Config) error {
 	}
 	profile.StoragePath = cfg.StoragePath
 	profile.Libraries = append([]config.Library(nil), cfg.Libraries...)
+	profile.ActiveLibraryID = ""
+	for _, library := range profile.Libraries {
+		if config.NormalizeStoragePath(library.Path) == config.NormalizeStoragePath(profile.StoragePath) {
+			profile.ActiveLibraryID = library.ID
+			break
+		}
+	}
 	if err := config.SaveProfile(cfg, username, profile); err != nil {
 		return err
 	}

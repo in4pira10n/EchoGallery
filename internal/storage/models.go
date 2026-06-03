@@ -122,6 +122,7 @@ type SearchPhotosParams struct {
 	Limit        int
 	MediaKind    string
 	OnlyFavorite bool
+	IncludeTotal bool
 }
 
 // RandomPhotosParams 查询乱序相册媒体参数。

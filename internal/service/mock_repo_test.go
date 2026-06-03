@@ -285,6 +285,34 @@ func (m *mockRepo) UpdateAlbum(album *storage.Album) error {
 	return nil
 }
 
+func (m *mockRepo) RefreshFolderAlbumCovers(userID int64) error {
+	for _, album := range m.albums {
+		if album == nil || album.CreatedBy != userID || !isAutoFolderAlbum(album) {
+			continue
+		}
+		var newest *storage.Photo
+		for _, photo := range m.photos {
+			if photo == nil || photo.UploadedBy != userID || photo.DeletedAt != nil {
+				continue
+			}
+			albumPath := autoFolderAlbumPath(album)
+			if albumPath == "" || !(strings.HasPrefix(photo.SourceRelPath, albumPath+"/")) {
+				continue
+			}
+			if newest == nil || photo.TakenAt.After(newest.TakenAt) || (photo.TakenAt.Equal(newest.TakenAt) && photo.ID > newest.ID) {
+				newest = photo
+			}
+		}
+		if newest != nil {
+			id := newest.ID
+			album.CoverPhotoID = &id
+		} else {
+			album.CoverPhotoID = nil
+		}
+	}
+	return nil
+}
+
 func (m *mockRepo) DeleteAlbum(id int64, userID int64) error {
 	a, ok := m.albums[id]
 	if !ok || a.CreatedBy != userID {

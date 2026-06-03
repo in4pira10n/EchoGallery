@@ -140,14 +140,18 @@ func TestImportExistingPhotos_CreatesAlbumsFromFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查询相册失败: %v", err)
 	}
-	if len(albums) != 1 {
-		t.Fatalf("期望生成 1 个相册，得到 %d", len(albums))
+	if len(albums) != 2 {
+		t.Fatalf("期望生成 2 个层级相册，得到 %d", len(albums))
 	}
-	if albums[0].Name != "旅行/第一天" {
-		t.Fatalf("期望相册名为 旅行/第一天，得到 %s", albums[0].Name)
+	albumByPath := make(map[string]*storage.Album, len(albums))
+	for _, album := range albums {
+		albumByPath[autoFolderAlbumPath(album)] = album
+	}
+	if albumByPath["旅行"] == nil || albumByPath["旅行/第一天"] == nil {
+		t.Fatalf("期望生成 旅行 与 旅行/第一天 两级相册，得到 %+v", albums)
 	}
 
-	page, err := svc.GetAlbumMedia(storage.ListAlbumPhotosParams{AlbumID: albums[0].ID, UserID: 1, Limit: 10})
+	page, err := svc.GetAlbumMedia(storage.ListAlbumPhotosParams{AlbumID: albumByPath["旅行/第一天"].ID, UserID: 1, Limit: 10})
 	if err != nil {
 		t.Fatalf("查询相册媒体失败: %v", err)
 	}
@@ -232,6 +236,9 @@ func TestImportExistingPhotos_ReusesExistingRecordWhenFolderMoves(t *testing.T) 
 	originalUUID := original.UUID
 	originalID := original.ID
 	thumbPath := svc.ThumbnailPath(original)
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(thumbPath, []byte("thumb"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +282,92 @@ func TestImportExistingPhotos_ReusesExistingRecordWhenFolderMoves(t *testing.T) 
 	if err != nil {
 		t.Fatalf("查询相册失败: %v", err)
 	}
-	if len(albums) != 1 || albums[0].Name != "新目录" {
+	if len(albums) != 1 || autoFolderAlbumPath(albums[0]) != "新目录" {
 		t.Fatalf("期望自动文件夹相册同步迁移到新目录，得到 %+v", albums)
+	}
+}
+
+func TestImportExistingPhotos_RemovesMovedPhotoFromOldFolderAlbum(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	oldDir := filepath.Join(svc.sourcePath, "旧目录")
+	newDir := filepath.Join(svc.sourcePath, "新目录")
+	if err := os.MkdirAll(oldDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "A.jpg"), createJPEGBytes(80, 80), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "B.jpg"), createJPEGBytes(80, 80), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	var movedPhotoID int64
+	for _, photo := range page.Photos {
+		if photo.OriginalName == "A.jpg" {
+			movedPhotoID = photo.ID
+			break
+		}
+	}
+	if movedPhotoID == 0 {
+		t.Fatal("未找到待迁移媒体")
+	}
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(oldDir, "A.jpg"), filepath.Join(newDir, "A.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("目录变动后导入失败: %v", err)
+	}
+	albums, err := svc.ListAlbumsForPhoto(movedPhotoID, 1)
+	if err != nil {
+		t.Fatalf("查询媒体相册失败: %v", err)
+	}
+	paths := make(map[string]bool, len(albums))
+	for _, album := range albums {
+		paths[autoFolderAlbumPath(album)] = true
+	}
+	if paths["旧目录"] {
+		t.Fatalf("移动后的媒体不应继续保留在旧目录相册，得到 %+v", albums)
+	}
+	if !paths["新目录"] {
+		t.Fatalf("移动后的媒体应加入新目录相册，得到 %+v", albums)
+	}
+}
+
+func TestImportExistingPhotos_DeletesUserCreatedAlbums(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	repo := svc.repo.(*mockRepo)
+	customAlbum, err := svc.CreateAlbum("用户自建", "旧相册", 1)
+	if err != nil {
+		t.Fatalf("创建用户相册失败: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(svc.sourcePath, "真实文件夹"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(svc.sourcePath, "真实文件夹", "A.jpg"), createJPEGBytes(80, 80), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("导入失败: %v", err)
+	}
+	if album, _ := repo.GetAlbumByID(customAlbum.ID, 1); album != nil {
+		t.Fatalf("扫描后用户自建相册应被删除，得到 %+v", album)
+	}
+	albums, err := svc.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册失败: %v", err)
+	}
+	if len(albums) != 1 || autoFolderAlbumPath(albums[0]) != "真实文件夹" {
+		t.Fatalf("只应展示实际文件夹相册，得到 %+v", albums)
 	}
 }
 

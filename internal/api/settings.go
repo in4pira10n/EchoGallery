@@ -18,6 +18,7 @@ import (
 
 type settingsResponse struct {
 	Port                          int               `json:"port"`
+	ActiveLibraryID               string            `json:"active_library_id,omitempty"`
 	StoragePath                   string            `json:"storage_path"`
 	Libraries                     []libraryResponse `json:"libraries"`
 	ThumbnailDir                  string            `json:"thumbnail_dir"`
@@ -47,6 +48,7 @@ type settingsResponse struct {
 
 type settingsUpdateRequest struct {
 	Port                          int              `json:"port"`
+	ActiveLibraryID               string           `json:"active_library_id,omitempty"`
 	StoragePath                   string           `json:"storage_path"`
 	Libraries                     []config.Library `json:"libraries"`
 	ThumbnailDir                  string           `json:"thumbnail_dir"`
@@ -86,6 +88,7 @@ type refreshLibraryLogosResult struct {
 
 type libraryResponse struct {
 	Index        int    `json:"index"`
+	ID           string `json:"id,omitempty"`
 	Name         string `json:"name"`
 	Path         string `json:"path"`
 	LogoAsset    string `json:"logo_asset,omitempty"`
@@ -111,6 +114,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile) settings
 	}
 	return settingsResponse{
 		Port:                          cfg.Port,
+		ActiveLibraryID:               profile.ActiveLibraryID,
 		StoragePath:                   profile.StoragePath,
 		Libraries:                     buildLibraryResponses(profile),
 		ThumbnailDir:                  profile.ThumbnailDir,
@@ -144,6 +148,7 @@ func buildLibraryResponses(profile *config.Profile) []libraryResponse {
 	for index, library := range profile.Libraries {
 		item := libraryResponse{
 			Index:       index,
+			ID:          library.ID,
 			Name:        library.Name,
 			Path:        library.Path,
 			LogoAsset:   library.LogoAsset,
@@ -183,6 +188,7 @@ func handleUpdateSettings(cfg *config.Config) gin.HandlerFunc {
 		prevThumbnailDir := strings.TrimSpace(prevProfile.ThumbnailDir)
 		prevThumbnailSize := prevProfile.ThumbnailSize
 		nextProfile := &config.Profile{
+			ActiveLibraryID: req.ActiveLibraryID,
 			StoragePath:     req.StoragePath,
 			Libraries:       append([]config.Library(nil), req.Libraries...),
 			ThumbnailDir:    req.ThumbnailDir,

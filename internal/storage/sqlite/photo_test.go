@@ -423,7 +423,7 @@ func TestSearchPhotos_FiltersAndPaginates(t *testing.T) {
 		t.Fatalf("软删除媒体失败: %v", err)
 	}
 
-	page, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "mountain", Limit: 1})
+	page, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "mountain", Limit: 1, IncludeTotal: true})
 	if err != nil {
 		t.Fatalf("搜索失败: %v", err)
 	}
@@ -432,6 +432,14 @@ func TestSearchPhotos_FiltersAndPaginates(t *testing.T) {
 	}
 	if page.Photos[0].ID != items[0].ID {
 		t.Fatalf("返回了错误的媒体 ID: %d", page.Photos[0].ID)
+	}
+
+	fastPage, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "mountain", Limit: 1})
+	if err != nil {
+		t.Fatalf("快速搜索失败: %v", err)
+	}
+	if fastPage.Total != 0 {
+		t.Fatalf("快速搜索不应强制统计总数，得到 total=%d", fastPage.Total)
 	}
 
 	videoPage, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "video", Limit: 10})

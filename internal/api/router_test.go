@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"echogallery/internal/config"
+	imgpkg "echogallery/internal/image"
 	"echogallery/internal/service"
 	"echogallery/internal/storage"
 )
@@ -58,6 +59,7 @@ type stubRegistrar struct {
 	startVideoThumbnailRefresh     func(userID int64) (service.VideoThumbnailRefreshStatus, error)
 	getVideoThumbnailRefreshStatus func(userID int64) service.VideoThumbnailRefreshStatus
 	cancelVideoThumbnailRefresh    func(userID int64) (service.VideoThumbnailRefreshStatus, error)
+	revealAlbumInFinder            func(id int64, userID int64) error
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
 	setPhotoFavorite               func(id int64, userID int64, favorite bool) error
@@ -182,11 +184,30 @@ func (s stubRegistrar) MediaPath(photo *storage.Photo) string {
 }
 
 func (s stubRegistrar) PosterPath(photo *storage.Photo) string {
+	if s.posterPath == nil {
+		return ""
+	}
 	return s.posterPath(photo)
 }
 
 func (s stubRegistrar) ThumbnailPath(photo *storage.Photo) string {
-	return s.thumbnailPath(photo)
+	if s.thumbnailPath != nil {
+		return s.thumbnailPath(photo)
+	}
+	if photo != nil && photo.MediaKind == storage.MediaKindVideo && s.posterPath != nil {
+		return s.posterPath(photo)
+	}
+	return ""
+}
+
+func (s stubRegistrar) ThumbnailCandidates(photo *storage.Photo) []string {
+	if photo == nil {
+		return nil
+	}
+	if path := s.ThumbnailPath(photo); path != "" {
+		return []string{path}
+	}
+	return nil
 }
 
 func (s stubRegistrar) PermanentlyDeletePhoto(id int64, userID int64) error {
@@ -229,6 +250,13 @@ func (s stubRegistrar) RevealInFinder(id int64, userID int64) error {
 	return s.revealInFinder(id, userID)
 }
 
+func (s stubRegistrar) RevealAlbumInFinder(id int64, userID int64) error {
+	if s.revealAlbumInFinder != nil {
+		return s.revealAlbumInFinder(id, userID)
+	}
+	return nil
+}
+
 func (s stubRegistrar) RestorePhoto(id int64, userID int64) error {
 	return s.restorePhoto(id, userID)
 }
@@ -242,10 +270,10 @@ func okRegistrar() stubRegistrar {
 		return filepath.Join(tTempStoragePath, photo.UUID+".mp4")
 	}
 	posterFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".posters", photo.UUID+".webp")
+		return imgpkg.ThumbnailShardPath(filepath.Join(tTempStoragePath, ".thumbnails"), photo.UUID)
 	}
 	thumbnailFilePath := func(photo *storage.Photo) string {
-		return filepath.Join(tTempStoragePath, ".thumbnails", photo.UUID+".webp")
+		return imgpkg.ThumbnailShardPath(filepath.Join(tTempStoragePath, ".thumbnails"), photo.UUID)
 	}
 	return stubRegistrar{addPhoto: func(albumID int64, photoID int64, userID int64) error {
 		return nil
@@ -1422,10 +1450,10 @@ func TestServeThumbnailFile_Success(t *testing.T) {
 	storageDir := t.TempDir()
 	cfg.StoragePath = storageDir
 	thumbDir := filepath.Join(storageDir, ".thumbnails")
-	if err := os.MkdirAll(thumbDir, 0755); err != nil {
+	thumbFile := imgpkg.ThumbnailShardPath(thumbDir, "shared")
+	if err := os.MkdirAll(filepath.Dir(thumbFile), 0755); err != nil {
 		t.Fatalf("创建缩略图目录失败: %v", err)
 	}
-	thumbFile := filepath.Join(thumbDir, "shared.jpg")
 	if err := os.WriteFile(thumbFile, []byte("thumb-data"), 0644); err != nil {
 		t.Fatalf("创建测试缩略图失败: %v", err)
 	}
@@ -1457,7 +1485,7 @@ func TestServeThumbnailFile_Success(t *testing.T) {
 		permanentlyDeletePhoto: okRegistrar().permanentlyDeletePhoto,
 		posterPath:             okRegistrar().posterPath,
 		restorePhoto:           okRegistrar().restorePhoto,
-		thumbnailPath:          func(photo *storage.Photo) string { return filepath.Join(thumbDir, photo.UUID+".webp") },
+		thumbnailPath:          func(photo *storage.Photo) string { return imgpkg.ThumbnailShardPath(thumbDir, photo.UUID) },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/thumbnails/shared.jpg", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
@@ -2574,11 +2602,12 @@ func TestServePoster_Success(t *testing.T) {
 	cfg := testConfig()
 	storageDir := t.TempDir()
 	cfg.StoragePath = storageDir
-	posterFile := filepath.Join(storageDir, ".posters", "video-1.jpg")
+	posterRoot := filepath.Join(storageDir, ".thumbnails")
+	posterFile := imgpkg.ThumbnailShardPath(posterRoot, "video-1")
 	if err := os.MkdirAll(filepath.Dir(posterFile), 0755); err != nil {
 		t.Fatalf("创建 poster 目录失败: %v", err)
 	}
-	if err := os.WriteFile(posterFile, []byte("jpg"), 0644); err != nil {
+	if err := os.WriteFile(posterFile, []byte("webp"), 0644); err != nil {
 		t.Fatalf("创建测试 poster 失败: %v", err)
 	}
 	router := NewRouter(cfg, stubRegistrar{
@@ -2587,7 +2616,7 @@ func TestServePoster_Success(t *testing.T) {
 			return &storage.Photo{UUID: uuid, OriginalName: "demo.mp4", MediaKind: storage.MediaKindVideo, MimeType: "video/mp4", UploadedBy: userID}, nil
 		},
 		mediaPath:  func(photo *storage.Photo) string { return filepath.Join(storageDir, photo.UUID+".mp4") },
-		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".webp") },
+		posterPath: func(photo *storage.Photo) string { return imgpkg.ThumbnailShardPath(posterRoot, photo.UUID) },
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/posters/video-1", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
@@ -2598,7 +2627,7 @@ func TestServePoster_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，得到 %d", w.Code)
 	}
-	if body := w.Body.String(); body != "jpg" {
+	if body := w.Body.String(); body != "webp" {
 		t.Fatalf("返回内容不正确: %s", body)
 	}
 }
@@ -2612,8 +2641,10 @@ func TestServePoster_Returns404WhenMissing(t *testing.T) {
 		getByUUID: func(uuid string, userID int64) (*storage.Photo, error) {
 			return &storage.Photo{UUID: uuid, OriginalName: "demo.mp4", MediaKind: storage.MediaKindVideo, MimeType: "video/mp4", UploadedBy: userID}, nil
 		},
-		mediaPath:  func(photo *storage.Photo) string { return filepath.Join(storageDir, photo.UUID+".mp4") },
-		posterPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, ".posters", photo.UUID+".webp") },
+		mediaPath: func(photo *storage.Photo) string { return filepath.Join(storageDir, photo.UUID+".mp4") },
+		posterPath: func(photo *storage.Photo) string {
+			return imgpkg.ThumbnailShardPath(filepath.Join(storageDir, ".thumbnails"), photo.UUID)
+		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/media/posters/video-1", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})

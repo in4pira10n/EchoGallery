@@ -26,10 +26,13 @@ type commandRunner func(ctx context.Context, name string, args ...string) ([]byt
 
 type ffprobeOutput struct {
 	Streams []struct {
-		CodecType string `json:"codec_type"`
-		CodecName string `json:"codec_name"`
-		Width     int    `json:"width"`
-		Height    int    `json:"height"`
+		CodecType    string `json:"codec_type"`
+		CodecName    string `json:"codec_name"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
+		SideDataList []struct {
+			Rotation int `json:"rotation"`
+		} `json:"side_data_list"`
 	} `json:"streams"`
 	Format struct {
 		FormatName string `json:"format_name"`
@@ -71,6 +74,9 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 		}
 		meta.Width = stream.Width
 		meta.Height = stream.Height
+		if videoStreamRotatedSideways(stream.SideDataList) {
+			meta.Width, meta.Height = meta.Height, meta.Width
+		}
 		meta.CodecName = stream.CodecName
 		break
 	}
@@ -92,6 +98,21 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 	}
 
 	return meta, nil
+}
+
+func videoStreamRotatedSideways(sideData []struct {
+	Rotation int `json:"rotation"`
+}) bool {
+	for _, item := range sideData {
+		rotation := item.Rotation % 360
+		if rotation < 0 {
+			rotation += 360
+		}
+		if rotation == 90 || rotation == 270 {
+			return true
+		}
+	}
+	return false
 }
 
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
