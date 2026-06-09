@@ -47,6 +47,9 @@ func TestPersistRecoveredLibrarySelection_UpdatesActiveProfile(t *testing.T) {
 	if profile.Libraries[1].Path != newLibrary {
 		t.Fatalf("期望新增资源库写入 Profile，得到 %+v", profile.Libraries)
 	}
+	if profile.ActiveLibraryID == "" {
+		t.Fatal("期望恢复资源库后写入 active_library_id")
+	}
 	if cfg.ActiveProfile != "alice" {
 		t.Fatalf("期望保持 active_profile=alice，得到 %s", cfg.ActiveProfile)
 	}
@@ -77,5 +80,8 @@ func TestPersistRecoveredLibrarySelection_UsesFirstUserWhenActiveProfileMissing(
 	}
 	if profile.StoragePath != library {
 		t.Fatalf("期望 Profile 写入恢复资源库，得到 %s", profile.StoragePath)
+	}
+	if profile.ActiveLibraryID == "" {
+		t.Fatal("期望默认用户 Profile 写入 active_library_id")
 	}
 }

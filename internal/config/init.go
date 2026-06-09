@@ -41,7 +41,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 
 	jwtSecret, err := generateSecret(32)
 	if err != nil {
-		return nil, fmt.Errorf("生成 JWT Secret 失败: %w", err)
+		return nil, fmt.Errorf("failed to generate JWT secret: %w", err)
 	}
 
 	cfg := &Config{
@@ -76,7 +76,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 	return cfg, nil
 }
 
-// runInitWizard 运行命令行初始化向导
+// runInitWizard runs the command-line initialization wizard.
 func runInitWizard() (*Config, error) {
 	return runInitWizardWithReader(bufio.NewReader(os.Stdin), os.Stdout)
 }
@@ -88,13 +88,12 @@ func runInitWizardWithReader(reader *bufio.Reader, out io.Writer) (*Config, erro
 	println := func(msg string) {
 		fmt.Fprintln(out, msg)
 	}
-	println("未找到配置文件，开始初始化...")
+	println("No config file found. Starting initialization...")
 	println("-----------------------------------")
 
-	// 输入端口
-	port, err := promptIntWithWriter(reader, out, "请输入服务端口", 8080, func(v int) error {
+	port, err := promptIntWithWriter(reader, out, "Server port", 8080, func(v int) error {
 		if v <= 0 || v > 65535 {
-			return fmt.Errorf("端口号必须在 1-65535 之间")
+			return fmt.Errorf("port must be between 1 and 65535")
 		}
 		return nil
 	})
@@ -102,36 +101,34 @@ func runInitWizardWithReader(reader *bufio.Reader, out io.Writer) (*Config, erro
 		return nil, err
 	}
 
-	// 输入存储路径
-	storagePath, err := promptStringWithWriter(reader, out, "请输入图片存储路径", "./photos")
+	storagePath, err := promptStringWithWriter(reader, out, "Media storage path", "./photos")
 	if err != nil {
 		return nil, err
 	}
 
-	// 自动创建存储目录
 	storagePath = strings.TrimSpace(storagePath)
 	if err := os.MkdirAll(storagePath, 0755); err != nil {
-		return nil, fmt.Errorf("创建存储目录失败: %w", err)
+		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
-	printf("存储目录已就绪: %s\n", storagePath)
+	printf("Storage directory ready: %s\n", storagePath)
 
 	println("")
-	println("接下来创建默认管理员用户")
+	println("Create the default administrator account")
 	println("-----------------------------------")
-	username, err := promptStringWithWriter(reader, out, "请输入默认用户名", "admin")
+	username, err := promptStringWithWriter(reader, out, "Default username", "admin")
 	if err != nil {
 		return nil, err
 	}
 	var password string
 	for {
-		printf("请输入默认密码 [至少6位]: ")
+		printf("Default password [at least 6 characters]: ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, fmt.Errorf("读取输入失败: %w", err)
+			return nil, fmt.Errorf("failed to read input: %w", err)
 		}
 		password = strings.TrimSpace(input)
 		if len(password) < 6 {
-			println("输入无效: 密码长度不能少于6位")
+			println("Invalid input: password must be at least 6 characters")
 			continue
 		}
 		break
@@ -147,7 +144,7 @@ func runInitWizardWithReader(reader *bufio.Reader, out io.Writer) (*Config, erro
 	})
 }
 
-// promptString 提示用户输入字符串，支持默认值
+// promptString prompts for a string and supports a default value.
 func promptString(reader *bufio.Reader, prompt, defaultVal string) (string, error) {
 	return promptStringWithWriter(reader, os.Stdout, prompt, defaultVal)
 }
@@ -156,11 +153,11 @@ func promptStringWithWriter(reader *bufio.Reader, out io.Writer, prompt, default
 	if defaultVal == "" {
 		fmt.Fprintf(out, "%s: ", prompt)
 	} else {
-		fmt.Fprintf(out, "%s [默认: %s]: ", prompt, defaultVal)
+		fmt.Fprintf(out, "%s [default: %s]: ", prompt, defaultVal)
 	}
 	input, err := reader.ReadString('\n')
 	if err != nil {
-		return "", fmt.Errorf("读取输入失败: %w", err)
+		return "", fmt.Errorf("failed to read input: %w", err)
 	}
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -169,17 +166,17 @@ func promptStringWithWriter(reader *bufio.Reader, out io.Writer, prompt, default
 	return input, nil
 }
 
-// promptInt 提示用户输入整数，支持默认值和校验
+// promptInt prompts for an integer and supports a default value plus validation.
 func promptInt(reader *bufio.Reader, prompt string, defaultVal int, validate func(int) error) (int, error) {
 	return promptIntWithWriter(reader, os.Stdout, prompt, defaultVal, validate)
 }
 
 func promptIntWithWriter(reader *bufio.Reader, out io.Writer, prompt string, defaultVal int, validate func(int) error) (int, error) {
 	for {
-		fmt.Fprintf(out, "%s [默认: %d]: ", prompt, defaultVal)
+		fmt.Fprintf(out, "%s [default: %d]: ", prompt, defaultVal)
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			return 0, fmt.Errorf("读取输入失败: %w", err)
+			return 0, fmt.Errorf("failed to read input: %w", err)
 		}
 		input = strings.TrimSpace(input)
 		if input == "" {
@@ -187,12 +184,12 @@ func promptIntWithWriter(reader *bufio.Reader, out io.Writer, prompt string, def
 		}
 		v, err := strconv.Atoi(input)
 		if err != nil {
-			fmt.Fprintln(out, "请输入有效的整数")
+			fmt.Fprintln(out, "Please enter a valid integer")
 			continue
 		}
 		if validate != nil {
 			if err := validate(v); err != nil {
-				fmt.Fprintf(out, "输入无效: %v\n", err)
+				fmt.Fprintf(out, "Invalid input: %v\n", err)
 				continue
 			}
 		}

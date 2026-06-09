@@ -41,9 +41,27 @@ type libraryBatchBuildTask struct {
 	idleMessage string
 	persistFn   func(status api.LibraryBatchBuildStatus)
 
+	buildThumbnailsAfterScan bool
+	autoThumbnailAggressive  bool
+	autoMoveLegacyThumbnails bool
+	autoCleanThumbnailFiles  bool
+	autoBuildPlaybackCaches  bool
+
 	mu          sync.Mutex
 	status      api.LibraryBatchBuildStatus
 	lastPersist time.Time
+}
+
+type batchCLIProgressReporter struct {
+	title       string
+	task        *libraryBatchBuildTask
+	done        chan struct{}
+	stopped     chan struct{}
+	stopOnce    sync.Once
+	interactive bool
+	lastLineLen int
+	lastLine    string
+	lastLog     time.Time
 }
 
 type libraryBatchBuildManager struct {
@@ -52,6 +70,7 @@ type libraryBatchBuildManager struct {
 	shutdownAfterDone func() error
 	defaultExitAfter  bool
 	idleMessage       string
+	afterScanComplete func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error
 }
 
 type libraryBatchThumbnailBuildManager struct {
@@ -164,6 +183,344 @@ func (t *libraryBatchBuildTask) persist(force bool) {
 	status := t.status
 	t.mu.Unlock()
 	t.persistFn(status)
+}
+
+func startBatchCLIProgress(title string, task *libraryBatchBuildTask) *batchCLIProgressReporter {
+	if task == nil {
+		return nil
+	}
+	reporter := &batchCLIProgressReporter{
+		title:       title,
+		task:        task,
+		done:        make(chan struct{}),
+		stopped:     make(chan struct{}),
+		interactive: stdoutIsTerminal(),
+	}
+	go reporter.run()
+	return reporter
+}
+
+func (p *batchCLIProgressReporter) Stop() {
+	if p == nil {
+		return
+	}
+	p.stopOnce.Do(func() {
+		close(p.done)
+		<-p.stopped
+	})
+}
+
+func (p *batchCLIProgressReporter) run() {
+	defer close(p.stopped)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	p.render(false)
+	for {
+		select {
+		case <-p.done:
+			p.render(true)
+			return
+		case <-ticker.C:
+			p.render(false)
+		}
+	}
+}
+
+var cliProgressMu sync.Mutex
+
+func (p *batchCLIProgressReporter) render(final bool) {
+	if p == nil || p.task == nil {
+		return
+	}
+	if !p.interactive && !final && !p.lastLog.IsZero() && time.Since(p.lastLog) < 10*time.Second {
+		return
+	}
+	status := p.task.snapshot()
+	line := formatBatchCLIProgressLine(p.title, status)
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if !final && p.interactive && line == p.lastLine {
+		return
+	}
+	cliProgressMu.Lock()
+	defer cliProgressMu.Unlock()
+	if p.interactive {
+		padding := ""
+		if p.lastLineLen > len(line) {
+			padding = strings.Repeat(" ", p.lastLineLen-len(line))
+		}
+		fmt.Fprintf(os.Stdout, "\r%s%s", line, padding)
+		p.lastLineLen = len(line)
+		if final || isBatchTerminalStatus(status.Status) {
+			fmt.Fprint(os.Stdout, "\n")
+			p.lastLineLen = 0
+			p.lastLine = ""
+		} else {
+			p.lastLine = line
+		}
+		return
+	}
+	fmt.Fprintln(os.Stdout, line)
+	p.lastLog = time.Now()
+}
+
+func stdoutIsTerminal() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func formatBatchCLIProgressLine(title string, status api.LibraryBatchBuildStatus) string {
+	percent := batchOverallPercent(status)
+	done, total := batchProgressCounts(status)
+	width := 18
+	filled := int(percent / 100 * float64(width))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	phase := batchPhaseLabel(status.CurrentPhase)
+	currentName := strings.TrimSpace(status.CurrentLibraryName)
+	if currentName == "" && status.CurrentLibraryIndex > 0 && status.CurrentLibraryIndex <= len(status.Libraries) {
+		currentName = strings.TrimSpace(status.Libraries[status.CurrentLibraryIndex-1].Name)
+	}
+	if currentName == "" {
+		currentName = "waiting"
+	}
+	detail := batchCurrentDetail(status)
+	eta := batchETA(status, percent)
+	message := libraryBatchBuildStatusLabel(status.Status)
+	line := fmt.Sprintf("%s %5.1f%% [%s%s] %d/%d | %s | %s",
+		title,
+		percent,
+		strings.Repeat("#", filled),
+		strings.Repeat("-", width-filled),
+		done,
+		total,
+		phase,
+		currentName,
+	)
+	if detail != "" {
+		line += " | " + detail
+	}
+	if eta > 0 && !isBatchTerminalStatus(status.Status) {
+		line += " | ETA " + formatSecondsCompact(eta)
+	}
+	if isBatchTerminalStatus(status.Status) {
+		line += " | " + message
+	}
+	return line
+}
+
+func batchProgressCounts(status api.LibraryBatchBuildStatus) (int, int) {
+	total := status.TotalLibraries
+	if total <= 0 {
+		total = len(status.Libraries)
+	}
+	if total <= 0 {
+		total = 1
+	}
+	done := status.CompletedLibraries + status.FailedLibraries
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		done = total
+	}
+	if status.CurrentLibraryIndex > done && !isBatchTerminalStatus(status.Status) {
+		done = status.CurrentLibraryIndex
+	}
+	if done > total {
+		done = total
+	}
+	return done, total
+}
+
+func batchOverallPercent(status api.LibraryBatchBuildStatus) float64 {
+	total := status.TotalLibraries
+	if total <= 0 {
+		total = len(status.Libraries)
+	}
+	if total <= 0 {
+		if isBatchTerminalStatus(status.Status) {
+			return 100
+		}
+		return 0
+	}
+	if status.Status == "completed" {
+		return 100
+	}
+	completedUnits := float64(status.CompletedLibraries + status.FailedLibraries)
+	currentIndex := status.CurrentLibraryIndex
+	if currentIndex > 0 {
+		base := currentIndex - 1
+		if float64(base) > completedUnits {
+			completedUnits = float64(base)
+		}
+		if !isBatchTerminalStatus(status.Status) {
+			completedUnits += clampFloat(status.CurrentPercent, 0, 100) / 100
+		}
+	}
+	percent := completedUnits / float64(total) * 100
+	return clampFloat(percent, 0, 100)
+}
+
+func batchCurrentDetail(status api.LibraryBatchBuildStatus) string {
+	if status.CurrentTotal > 0 {
+		return fmt.Sprintf("%d/%d", status.CurrentDone, status.CurrentTotal)
+	}
+	if status.CurrentDone > 0 {
+		return fmt.Sprintf("found %d", status.CurrentDone)
+	}
+	return strings.TrimSpace(status.CurrentPhase)
+}
+
+func batchETA(status api.LibraryBatchBuildStatus, percent float64) int64 {
+	if percent <= 0 || percent >= 100 {
+		return 0
+	}
+	startedAt, err := time.Parse(time.RFC3339, status.StartedAt)
+	if err != nil || startedAt.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(startedAt).Seconds()
+	if elapsed < 3 {
+		return 0
+	}
+	return int64(elapsed * (100 - percent) / percent)
+}
+
+func batchPhaseLabel(phase string) string {
+	switch strings.TrimSpace(phase) {
+	case "scan":
+		return "scan"
+	case "thumbnails":
+		return "thumbnails"
+	case "migrate":
+		return "migrate legacy"
+	case "cleanup":
+		return "cleanup"
+	case "maintenance":
+		return "maintenance"
+	case "playback":
+		return "playback cache"
+	default:
+		return "preparing"
+	}
+}
+
+func libraryBatchBuildStatusLabel(status string) string {
+	switch strings.TrimSpace(status) {
+	case "running":
+		return "running"
+	case "cancelling":
+		return "cancelling"
+	case "cancelled":
+		return "cancelled"
+	case "completed":
+		return "completed"
+	case "failed":
+		return "failed"
+	default:
+		return "idle"
+	}
+}
+
+func isBatchTerminalStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func formatSecondsCompact(seconds int64) string {
+	if seconds <= 0 {
+		return "calculating"
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+func renderCLIProgressLine(line string, interactive bool, lastLine *string, lastLen *int, final bool) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	cliProgressMu.Lock()
+	defer cliProgressMu.Unlock()
+	if interactive {
+		padding := ""
+		if lastLen != nil && *lastLen > len(line) {
+			padding = strings.Repeat(" ", *lastLen-len(line))
+		}
+		fmt.Fprintf(os.Stdout, "\r%s%s", line, padding)
+		if lastLen != nil {
+			*lastLen = len(line)
+		}
+		if final {
+			fmt.Fprint(os.Stdout, "\n")
+			if lastLen != nil {
+				*lastLen = 0
+			}
+			if lastLine != nil {
+				*lastLine = ""
+			}
+		} else if lastLine != nil {
+			*lastLine = line
+		}
+		return
+	}
+	fmt.Fprintln(os.Stdout, line)
+}
+
+func formatSimpleCLIProgressLine(title string, done, total int) string {
+	if total <= 0 {
+		return strings.TrimSpace(title)
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		done = total
+	}
+	percent := float64(done) / float64(total) * 100
+	width := 18
+	filled := int(percent / 100 * float64(width))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	return fmt.Sprintf("%s %5.1f%% [%s%s] %d/%d",
+		title,
+		percent,
+		strings.Repeat("#", filled),
+		strings.Repeat("-", width-filled),
+		done,
+		total,
+	)
 }
 
 type batchTaskKind string
@@ -313,6 +670,7 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 		SelectionConfigured:  selectionConfigured,
 		MoveLegacyThumbnails: state.MoveLegacyThumbnails,
 		CleanThumbnailFiles:  state.CleanThumbnailFiles,
+		BuildPlaybackCaches:  state.BuildPlaybackCaches,
 		CurrentLibraryID:     state.CurrentLibraryID,
 		CurrentLibraryName:   state.CurrentLibraryName,
 		CurrentLibraryPath:   state.CurrentLibraryPath,
@@ -363,6 +721,7 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 		Message:              status.Message,
 		MoveLegacyThumbnails: status.MoveLegacyThumbnails,
 		CleanThumbnailFiles:  status.CleanThumbnailFiles,
+		BuildPlaybackCaches:  status.BuildPlaybackCaches,
 		CurrentLibraryID:     status.CurrentLibraryID,
 		CurrentLibraryName:   status.CurrentLibraryName,
 		CurrentLibraryPath:   status.CurrentLibraryPath,
@@ -621,14 +980,14 @@ func (m *libraryBatchBuildManager) Status(profile *config.Profile, username stri
 	return loadPersistedBatchStatus(profile, batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量扫描参数无效")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch scan parameters")
 	}
 	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
 	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
 	if len(libraries) == 0 {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可扫描的资源库")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("no libraries are available for batch scan")
 	}
 	m.mu.Lock()
 	defaultExitAfter := m.defaultExitAfter
@@ -644,6 +1003,11 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task := newLibraryBatchBuildTask(libraries, effectiveLowResource, aggressive, cancel)
 	task.username = username
 	task.idleMessage = m.idleMessage
+	task.buildThumbnailsAfterScan = buildThumbnailsAfterScan
+	task.autoThumbnailAggressive = aggressive
+	task.autoMoveLegacyThumbnails = moveLegacyThumbnails
+	task.autoCleanThumbnailFiles = cleanThumbnailFiles
+	task.autoBuildPlaybackCaches = buildPlaybackCaches
 	task.persistFn = func(status api.LibraryBatchBuildStatus) {
 		_ = saveBatchTaskState(cfg, username, batchTaskKindScan, status)
 	}
@@ -657,6 +1021,9 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, true)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
+	if buildThumbnailsAfterScan {
+		_, _ = saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, task.status.SelectedLibraryIDs, task.status.SelectedPaths)
+	}
 	m.task = task
 	cfgSnapshot := *cfg
 	cfgSnapshot.ApplyProfile(profile)
@@ -738,14 +1105,14 @@ func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, user
 	return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("批量缩略图参数无效")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch thumbnail parameters")
 	}
 	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
 	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
 	if len(libraries) == 0 {
-		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("当前没有可构建缩略图的资源库")
+		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("no libraries are available for batch thumbnail build")
 	}
 	m.mu.Lock()
 	defaultExitAfter := m.defaultExitAfter
@@ -773,11 +1140,13 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	task.status.SelectionConfigured = true
 	task.status.MoveLegacyThumbnails = moveLegacyThumbnails
 	task.status.CleanThumbnailFiles = cleanThumbnailFiles
+	task.status.BuildPlaybackCaches = buildPlaybackCaches
 	rerunCompleted := true
-	if (moveLegacyThumbnails || cleanThumbnailFiles) &&
+	if (moveLegacyThumbnails || cleanThumbnailFiles || buildPlaybackCaches) &&
 		selectedStatus.Status == "completed" &&
 		selectedStatus.MoveLegacyThumbnails == moveLegacyThumbnails &&
-		selectedStatus.CleanThumbnailFiles == cleanThumbnailFiles {
+		selectedStatus.CleanThumbnailFiles == cleanThumbnailFiles &&
+		selectedStatus.BuildPlaybackCaches == buildPlaybackCaches {
 		rerunCompleted = false
 	}
 	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, rerunCompleted)
@@ -874,6 +1243,8 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
 	service.SetBatchAggressiveMode(task.snapshot().AggressiveMode)
 	defer service.SetBatchAggressiveMode(false)
+	progress := startBatchCLIProgress("Batch library scan", task)
+	defer progress.Stop()
 	sleepGuard := startBestEffortSleepInhibitor("batch library scan")
 	if sleepGuard != nil {
 		defer sleepGuard.Stop()
@@ -964,7 +1335,15 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		status.Message = fmt.Sprintf("批量扫描完成，已处理 %d 个资源库", status.CompletedLibraries)
 	})
 	task.persist(true)
-	if snapshot := task.snapshot(); snapshot.ExitAfterComplete && m.shutdownAfterDone != nil {
+	progress.Stop()
+	finalSnapshot := task.snapshot()
+	if finalSnapshot.Status == "completed" && task.buildThumbnailsAfterScan && m.afterScanComplete != nil {
+		fmt.Println("Batch library scan completed. Starting batch thumbnail build...")
+		if err := m.afterScanComplete(cfg, task.username, userID, task.autoThumbnailAggressive, task.autoMoveLegacyThumbnails, task.autoCleanThumbnailFiles, task.autoBuildPlaybackCaches); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to start batch thumbnail build: %v\n", err)
+		}
+	}
+	if finalSnapshot.ExitAfterComplete && !task.buildThumbnailsAfterScan && m.shutdownAfterDone != nil {
 		_ = m.shutdownAfterDone()
 	}
 }
@@ -1043,6 +1422,8 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
 	service.SetBatchAggressiveMode(task.snapshot().AggressiveMode)
 	defer service.SetBatchAggressiveMode(false)
+	progress := startBatchCLIProgress("Batch thumbnail build", task)
+	defer progress.Stop()
 	sleepGuard := startBestEffortSleepInhibitor("batch thumbnail build")
 	if sleepGuard != nil {
 		defer sleepGuard.Stop()
@@ -1127,12 +1508,13 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		}
 
 		thumbStatus, cancelled := waitThumbnailBuildTask(ctx, svc, task, index, library, userID, "正在为资源库 %s 构建缩略图")
-		_ = repo.Close()
 		if cancelled {
+			_ = repo.Close()
 			m.cancelTask(task, index)
 			return
 		}
 		if thumbStatus.Status != "completed" {
+			_ = repo.Close()
 			failureMessage := strings.TrimSpace(thumbStatus.Error)
 			if failureMessage == "" {
 				failureMessage = strings.TrimSpace(thumbStatus.Message)
@@ -1140,13 +1522,59 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			m.failLibrary(task, index, fmt.Errorf("%s", failureMessage))
 			continue
 		}
+		playbackStatus := service.PlaybackCacheBuildStatus{}
+		if snapshot.BuildPlaybackCaches {
+			playbackStatus = svc.BuildPlaybackCachesSyncContext(ctx, userID, func(progress service.PlaybackCacheBuildStatus) bool {
+				task.mutate(func(status *api.LibraryBatchBuildStatus) {
+					status.Message = progress.Message
+					status.CurrentLibraryID = library.ID
+					status.CurrentLibraryIndex = index + 1
+					status.CurrentLibraryName = library.Name
+					status.CurrentLibraryPath = library.Path
+					status.CurrentPhase = "playback"
+					status.CurrentDone = progress.Done
+					status.CurrentTotal = progress.Total
+					if progress.Total > 0 {
+						status.CurrentPercent = float64(progress.Done) / float64(progress.Total) * 100
+					} else {
+						status.CurrentPercent = 0
+					}
+					status.Libraries[index].Status = "building"
+					status.Libraries[index].Message = progress.Message
+					status.Libraries[index].Imported = progress.Generated
+					status.Libraries[index].Failed = progress.Failed
+				})
+				task.persist(false)
+				return ctx.Err() == nil
+			})
+			if ctx.Err() != nil || playbackStatus.Status == "cancelled" {
+				_ = repo.Close()
+				m.cancelTask(task, index)
+				return
+			}
+			if playbackStatus.Status == "failed" {
+				_ = repo.Close()
+				failureMessage := strings.TrimSpace(playbackStatus.Error)
+				if failureMessage == "" {
+					failureMessage = strings.TrimSpace(playbackStatus.Message)
+				}
+				m.failLibrary(task, index, fmt.Errorf("%s", failureMessage))
+				continue
+			}
+		}
+		_ = repo.Close()
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.CompletedLibraries++
 			status.Libraries[index].Generated = thumbStatus.Generated
 			status.Libraries[index].Skipped = thumbStatus.Skipped
-			status.Libraries[index].Failed = thumbStatus.Failed
+			status.Libraries[index].Imported = playbackStatus.Generated
+			status.Libraries[index].Failed = thumbStatus.Failed + playbackStatus.Failed
 			status.Libraries[index].Status = "completed"
-			status.Libraries[index].Message = thumbStatus.Message
+			if snapshot.BuildPlaybackCaches {
+				status.Libraries[index].Message = fmt.Sprintf("%s；播放缓存 %d，跳过 %d", thumbStatus.Message, playbackStatus.Generated, playbackStatus.Skipped)
+			} else {
+				status.Libraries[index].Message = thumbStatus.Message
+			}
 			status.Message = fmt.Sprintf("资源库 %s 缩略图构建完成", library.Name)
 			status.CurrentDone = thumbStatus.Done
 			status.CurrentTotal = thumbStatus.Total
@@ -1490,22 +1918,32 @@ func main() {
 		switch os.Args[1] {
 		case "adduser":
 			if err := config.RunAddUserWizard(); err != nil {
-				fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 			return
 		case "deluser":
 			if len(os.Args) < 3 {
-				fmt.Fprintln(os.Stderr, "用法: Echogallery deluser <username>")
+				fmt.Fprintln(os.Stderr, "Usage: EchoGallery deluser <username>")
 				os.Exit(1)
 			}
 			if err := config.RunDeleteUserWizard(os.Args[2]); err != nil {
-				fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "moduser":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Usage: EchoGallery moduser <username>")
+				os.Exit(1)
+			}
+			if err := config.RunModifyUserWizard(os.Args[2]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "未知命令: %s\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -1520,12 +1958,12 @@ func main() {
 			})
 			return
 		}
-		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("配置加载成功，服务将运行在端口 %d\n", cfg.Port)
-	fmt.Printf("图片存储路径: %s\n", cfg.StoragePath)
+	fmt.Printf("Config loaded. Server will run on port %d\n", cfg.Port)
+	fmt.Printf("Storage path: %s\n", cfg.StoragePath)
 
 	if strings.TrimSpace(cfg.StoragePath) == "" && len(cfg.Libraries) == 0 {
 		startSetupServer(api.SetupState{
@@ -1538,38 +1976,38 @@ func main() {
 
 	dbPath, err := cfg.DatabasePath()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 计算数据库路径失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve database path: %v\n", err)
 		os.Exit(1)
 	}
 	managedDataDir, err := cfg.ManagedDataDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 计算应用数据目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve app data directory: %v\n", err)
 		os.Exit(1)
 	}
 	trashDir, err := cfg.TrashPath()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 计算回收站目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve trash directory: %v\n", err)
 		os.Exit(1)
 	}
 	thumbDir, err := cfg.ThumbnailStoragePath()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 计算缩略图目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve thumbnail directory: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 创建数据库目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to create database directory: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.MkdirAll(managedDataDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 创建应用数据目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to create app data directory: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.MkdirAll(trashDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 创建回收站目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to create trash directory: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 创建缩略图目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to create thumbnail directory: %v\n", err)
 		os.Exit(1)
 	}
 	repo, err := sqlite.New(dbPath)
@@ -1628,13 +2066,21 @@ func main() {
 	buildState := newLibraryBuildState(shutdownCurrentProcess)
 	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess)
 	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess)
+	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return err
+		}
+		_, err = batchThumbnailBuildManager.Start(cfg, profile, username, userID, aggressive, moveLegacyThumbnails, cleanThumbnailFiles, buildPlaybackCaches)
+		return err
+	}
 	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to start HTTP server: %v\n", err)
 		os.Exit(1)
 	}
 	if actualPort != cfg.Port {
-		fmt.Printf("端口 %d 已被占用，已自动切换到 %d\n", cfg.Port, actualPort)
+		fmt.Printf("Port %d is already in use. Switched to %d\n", cfg.Port, actualPort)
 		cfg.Port = actualPort
 	}
 
@@ -1657,15 +2103,15 @@ func main() {
 	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
-		fmt.Printf("HTTP 服务已启动: http://%s%s\n", host, addr)
+		fmt.Printf("HTTP server started: http://%s%s\n", host, addr)
 	} else {
-		fmt.Printf("HTTP 服务已启动: http://127.0.0.1%s\n", addr)
+		fmt.Printf("HTTP server started: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 {
 		go runLibraryBuild(rootCtx, photoService, buildState)
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: HTTP 服务启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: HTTP server failed: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -1682,21 +2128,21 @@ func startSetupServer(state api.SetupState) {
 	}
 	listener, actualPort, err := listenTCPWithFallback(port)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to start setup server: %v\n", err)
 		os.Exit(1)
 	}
 	if actualPort != port {
-		fmt.Printf("设置端口 %d 已被占用，已自动切换到 %d\n", port, actualPort)
+		fmt.Printf("Setup port %d is already in use. Switched to %d\n", port, actualPort)
 	}
 	state.Port = actualPort
 	addr := fmt.Sprintf(":%d", actualPort)
 	app := api.NewSetupRouterWithStatic(webFS, state, restartCurrentProcess)
-	fmt.Printf("EchoGallery 设置服务已启动: http://127.0.0.1%s\n", addr)
+	fmt.Printf("EchoGallery setup server started: http://127.0.0.1%s\n", addr)
 	if host := preferredLANIP(); host != "" {
-		fmt.Printf("局域网访问地址: http://%s%s\n", host, addr)
+		fmt.Printf("LAN access URL: http://%s%s\n", host, addr)
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 设置服务启动失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: setup server failed: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -1706,38 +2152,46 @@ func runLibraryBuild(ctx context.Context, photoService *service.PhotoService, bu
 	buildState.SetCancel(cancelBuild)
 	defer buildState.clearCancel()
 	defer cancelBuild()
-	buildState.start("正在发现资源库中的媒体文件")
+	buildState.start("Discovering media files in the library")
+	interactive := stdoutIsTerminal()
+	lastLine := ""
+	lastLineLen := 0
+	lastRender := time.Time{}
 	summary, err := photoService.ImportExistingPhotosContext(buildCtx, 1, func(done, total int) {
 		buildState.progress(done, total)
 		if total == 0 {
 			return
 		}
-		const width = 28
-		filled := done * width / total
-		if filled < 0 {
-			filled = 0
+		now := time.Now()
+		if interactive && done != total && !lastRender.IsZero() && now.Sub(lastRender) < 120*time.Millisecond {
+			return
 		}
-		if filled > width {
-			filled = width
+		if !interactive && done != total && !lastRender.IsZero() && now.Sub(lastRender) < 8*time.Second {
+			return
 		}
-		fmt.Printf("\r资源库扫描中 [%s%s] %d/%d", strings.Repeat("#", filled), strings.Repeat("-", width-filled), done, total)
-		if done == total {
-			fmt.Print("\n")
+		line := formatSimpleCLIProgressLine("Library scan", done, total)
+		if interactive && done != total && line == lastLine {
+			return
 		}
+		renderCLIProgressLine(line, interactive, &lastLine, &lastLineLen, done == total)
+		lastRender = now
 	})
 	if errors.Is(err, context.Canceled) {
-		fmt.Println("\n资源库扫描已取消")
+		if interactive && lastLineLen > 0 {
+			renderCLIProgressLine(lastLine, interactive, &lastLine, &lastLineLen, true)
+		}
+		fmt.Println("Library scan cancelled")
 		buildState.cancel()
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "错误: 导入历史图片失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to import existing media: %v\n", err)
 	}
 	if summary != nil && summary.Imported > 0 {
-		fmt.Printf("已导入 %d 张历史图片\n", summary.Imported)
+		fmt.Printf("Imported %d existing media items\n", summary.Imported)
 	}
 	if summary != nil && summary.Pruned > 0 {
-		fmt.Printf("已清理 %d 条失效媒体记录\n", summary.Pruned)
+		fmt.Printf("Pruned %d missing media records\n", summary.Pruned)
 	}
 	buildState.finish(summary, err)
 }
@@ -1765,7 +2219,7 @@ func serveWithGracefulShutdown(ctx context.Context, listener net.Listener, handl
 }
 
 func shutdownHTTPServer(server *http.Server, errCh <-chan error) error {
-	fmt.Println("\n正在关闭 EchoGallery...")
+	fmt.Println("\nShutting down EchoGallery...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -1805,7 +2259,7 @@ func listenTCPWithFallback(preferredPort int) (net.Listener, int, error) {
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
 		listener.Close()
-		return nil, 0, fmt.Errorf("无法解析监听端口: %T", listener.Addr())
+		return nil, 0, fmt.Errorf("failed to resolve listener port: %T", listener.Addr())
 	}
 	return listener, addr.Port, nil
 }
@@ -1830,13 +2284,13 @@ func restartCurrentProcess() error {
 			cmd.Stderr = os.Stderr
 			cmd.Env = env
 			if err := cmd.Start(); err != nil {
-				fmt.Fprintf(os.Stderr, "错误: 重启 EchoGallery 失败: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: failed to restart EchoGallery: %v\n", err)
 				os.Exit(1)
 			}
 			os.Exit(0)
 		}
 		if err := syscall.Exec(exe, args, env); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 重启 EchoGallery 失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: failed to restart EchoGallery: %v\n", err)
 			os.Exit(1)
 		}
 	}()

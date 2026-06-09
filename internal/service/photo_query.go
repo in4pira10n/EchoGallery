@@ -280,8 +280,8 @@ func (s *PhotoService) RestorePhoto(id int64, userID int64) error {
 }
 
 // SetPhotoFavorite 设置收藏状态
-func (s *PhotoService) SetPhotoFavorite(id int64, userID int64, favorite bool) error {
-	return s.repo.SetPhotoFavorite(id, userID, favorite)
+func (s *PhotoService) SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error {
+	return s.repo.SetPhotoFavorite(id, userID, favorite, superFavorite)
 }
 
 // PermanentlyDeletePhoto 彻底删除单张回收站图片，并清理磁盘文件。

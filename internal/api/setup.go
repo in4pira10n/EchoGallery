@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -57,9 +56,11 @@ type setupSelectLibraryRequest struct {
 func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() error) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(compactGinLogger(), gin.Recovery())
 	r.GET("/static/*filepath", gin.WrapH(buildStaticHandler(staticFS)))
 	r.GET("/pages/*filepath", gin.WrapH(buildPagesHandler(staticFS)))
+	r.GET("/manifest.webmanifest", handleWebManifest(staticFS))
+	r.GET("/sw.js", handleServiceWorker(staticFS))
 
 	ctrl := &setupController{state: state, restart: restart, staticFS: staticFS}
 	r.GET("/", ctrl.handleSetupPage())
@@ -70,7 +71,7 @@ func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() e
 	r.POST("/api/setup/select-library", ctrl.handleSelectLibrary())
 	r.POST("/api/auth/login", ctrl.handleSetupLogin())
 	r.POST("/api/auth/register", ctrl.handleSetupRegister())
-	r.POST("/api/auth/logout", handleLogout())
+	r.POST("/api/auth/logout", handleLogout(&config.Config{Port: state.Port}))
 
 	r.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
@@ -129,7 +130,7 @@ func (s *setupController) handleSetupLogin() gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "生成令牌失败"})
 			return
 		}
-		http.SetCookie(c.Writer, &http.Cookie{Name: authCookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(7 * 24 * time.Hour)})
+		setAuthCookie(c.Writer, cfg, token)
 		if strings.TrimSpace(profile.StoragePath) == "" && len(profile.Libraries) == 0 {
 			c.JSON(http.StatusOK, gin.H{
 				"message":  "已切换到该用户，请继续完成初始化。",
@@ -253,7 +254,13 @@ func (s *setupController) handleSelectLibrary() gin.HandlerFunc {
 				if name == "" {
 					name = fmt.Sprintf("资源库 %d", i+1)
 				}
-				libraries = append(libraries, config.Library{Name: name, Path: path, LogoAsset: library.LogoAsset, AccentColor: library.AccentColor})
+				libraries = append(libraries, config.Library{
+					ID:          library.ID,
+					Name:        name,
+					Path:        path,
+					LogoAsset:   library.LogoAsset,
+					AccentColor: library.AccentColor,
+				})
 			}
 			cfg.Libraries = libraries
 			if selected == "" && req.Selected >= 0 && req.Selected < len(req.Libraries) {
@@ -268,6 +275,7 @@ func (s *setupController) handleSelectLibrary() gin.HandlerFunc {
 		for _, library := range cfg.Libraries {
 			if config.NormalizeStoragePath(library.Path) == config.NormalizeStoragePath(selected) {
 				cfg.StoragePath = library.Path
+				cfg.ActiveLibraryID = library.ID
 				found = true
 				break
 			}

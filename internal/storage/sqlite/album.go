@@ -373,7 +373,7 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	queryArgs = append(queryArgs, limit+1)
 	rows, err := s.db.Query(`
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
-			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
 			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
 			FROM photos p
 			`+joinClause+`

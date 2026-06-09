@@ -4,43 +4,46 @@ import "time"
 
 // Photo 图片模型
 type Photo struct {
-	ID             int64      `json:"id"`
-	UUID           string     `json:"uuid"`          // 对应磁盘文件名（不含扩展名）
-	OriginalName   string     `json:"original_name"` // 用户上传时的原始文件名
-	MediaKind      string     `json:"media_kind"`    // image 或 video
-	MimeType       string     `json:"mime_type"`     // image/jpeg 等
-	Size           int64      `json:"size"`          // 文件大小（字节）
-	Width          int        `json:"width"`
-	Height         int        `json:"height"`
-	DurationMS     int64      `json:"duration_ms"`
-	IsFavorite     bool       `json:"is_favorite"`
-	StorageRelPath string     `json:"-"` // 应用内部实际存储的相对路径
-	SourceRelPath  string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
-	EXIF           *PhotoEXIF `json:"exif,omitempty"`
-	SourceModUnix  int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
-	RandomSortKey  int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
-	TakenAt        time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
-	UploadedAt     time.Time  `json:"uploaded_at"`
-	UploadedBy     int64      `json:"uploaded_by"` // 关联 users.id
-	DeletedAt      *time.Time `json:"deleted_at"`  // nil 表示未删除
-	DeletedBy      *int64     `json:"deleted_by"`  // nil 表示未删除
+	ID              int64      `json:"id"`
+	UUID            string     `json:"uuid"`          // 对应磁盘文件名（不含扩展名）
+	OriginalName    string     `json:"original_name"` // 用户上传时的原始文件名
+	MediaKind       string     `json:"media_kind"`    // image 或 video
+	MimeType        string     `json:"mime_type"`     // image/jpeg 等
+	Size            int64      `json:"size"`          // 文件大小（字节）
+	Width           int        `json:"width"`
+	Height          int        `json:"height"`
+	DurationMS      int64      `json:"duration_ms"`
+	IsFavorite      bool       `json:"is_favorite"`
+	IsSuperFavorite bool       `json:"is_super_favorite"`
+	StorageRelPath  string     `json:"-"` // 应用内部实际存储的相对路径
+	SourceRelPath   string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
+	EXIF            *PhotoEXIF `json:"exif,omitempty"`
+	SourceModUnix   int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
+	RandomSortKey   int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
+	TakenAt         time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
+	UploadedAt      time.Time  `json:"uploaded_at"`
+	UploadedBy      int64      `json:"uploaded_by"` // 关联 users.id
+	DeletedAt       *time.Time `json:"deleted_at"`  // nil 表示未删除
+	DeletedBy       *int64     `json:"deleted_by"`  // nil 表示未删除
 }
 
 // PhotoEXIF 保存可展示的 EXIF 字段。
 type PhotoEXIF struct {
-	Make         string    `json:"make,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	Orientation  int       `json:"orientation,omitempty"`
-	TakenAt      time.Time `json:"taken_at,omitempty"`
-	Width        int       `json:"width,omitempty"`
-	Height       int       `json:"height,omitempty"`
-	FNumber      string    `json:"f_number,omitempty"`
-	ExposureTime string    `json:"exposure_time,omitempty"`
-	ISOSpeed     int       `json:"iso_speed,omitempty"`
-	FocalLength  string    `json:"focal_length,omitempty"`
-	Latitude     float64   `json:"latitude,omitempty"`
-	Longitude    float64   `json:"longitude,omitempty"`
-	HasGPS       bool      `json:"has_gps,omitempty"`
+	Make           string    `json:"make,omitempty"`
+	Model          string    `json:"model,omitempty"`
+	Orientation    int       `json:"orientation,omitempty"`
+	TakenAt        time.Time `json:"taken_at,omitempty"`
+	Width          int       `json:"width,omitempty"`
+	Height         int       `json:"height,omitempty"`
+	FNumber        string    `json:"f_number,omitempty"`
+	ExposureTime   string    `json:"exposure_time,omitempty"`
+	ISOSpeed       int       `json:"iso_speed,omitempty"`
+	FocalLength    string    `json:"focal_length,omitempty"`
+	Latitude       float64   `json:"latitude,omitempty"`
+	Longitude      float64   `json:"longitude,omitempty"`
+	HasGPS         bool      `json:"has_gps,omitempty"`
+	VideoCodec     string    `json:"video_codec,omitempty"`
+	VideoFrameRate float64   `json:"video_frame_rate,omitempty"`
 }
 
 const (
@@ -64,10 +67,18 @@ type Album struct {
 
 // VideoPlaybackPreference 保存单个视频的播放偏好。
 type VideoPlaybackPreference struct {
-	PhotoID   int64     `json:"photo_id"`
-	Volume    float64   `json:"volume"`
-	Muted     bool      `json:"muted"`
-	UpdatedAt time.Time `json:"updated_at"`
+	PhotoID    int64                   `json:"photo_id"`
+	Volume     float64                 `json:"volume"`
+	Muted      bool                    `json:"muted"`
+	ResumeTime int64                   `json:"resume_time,omitempty"`
+	Bookmarks  []VideoPlaybackBookmark `json:"bookmarks,omitempty"`
+	UpdatedAt  time.Time               `json:"updated_at"`
+}
+
+type VideoPlaybackBookmark struct {
+	Slot int    `json:"slot"`
+	Time int64  `json:"time"`
+	Name string `json:"name,omitempty"`
 }
 
 // AlbumPhoto 相册与图片的关联（多对多）

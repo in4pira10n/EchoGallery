@@ -50,6 +50,8 @@ type PhotoService struct {
 	thumbUrgent        map[string]struct{}
 	thumbBuildMu       sync.Mutex
 	thumbBuild         *thumbnailBuildTask
+	playbackBuildMu    sync.Mutex
+	playbackBuild      *playbackCacheBuildTask
 	videoThumbRefresh  *videoThumbnailRefreshTask
 }
 

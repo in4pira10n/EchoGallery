@@ -15,11 +15,12 @@ var ErrProbeUnavailable = errors.New("ffprobe 不可用")
 var ErrInvalidVideo = errors.New("无效的视频文件")
 
 type VideoMeta struct {
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
-	DurationMS int64  `json:"duration_ms"`
-	FormatName string `json:"format_name"`
-	CodecName  string `json:"codec_name"`
+	Width      int     `json:"width"`
+	Height     int     `json:"height"`
+	DurationMS int64   `json:"duration_ms"`
+	FormatName string  `json:"format_name"`
+	CodecName  string  `json:"codec_name"`
+	FrameRate  float64 `json:"frame_rate,omitempty"`
 }
 
 type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -30,6 +31,8 @@ type ffprobeOutput struct {
 		CodecName    string `json:"codec_name"`
 		Width        int    `json:"width"`
 		Height       int    `json:"height"`
+		AvgFrameRate string `json:"avg_frame_rate"`
+		RFrameRate   string `json:"r_frame_rate"`
 		SideDataList []struct {
 			Rotation int `json:"rotation"`
 		} `json:"side_data_list"`
@@ -78,6 +81,10 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 			meta.Width, meta.Height = meta.Height, meta.Width
 		}
 		meta.CodecName = stream.CodecName
+		meta.FrameRate = parseFFprobeFrameRate(stream.AvgFrameRate)
+		if meta.FrameRate <= 0 {
+			meta.FrameRate = parseFFprobeFrameRate(stream.RFrameRate)
+		}
 		break
 	}
 
@@ -100,6 +107,33 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 	return meta, nil
 }
 
+func parseFFprobeFrameRate(value string) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0/0" {
+		return 0
+	}
+	if strings.Contains(value, "/") {
+		parts := strings.SplitN(value, "/", 2)
+		if len(parts) != 2 {
+			return 0
+		}
+		numerator, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+		if err != nil {
+			return 0
+		}
+		denominator, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if err != nil || denominator == 0 {
+			return 0
+		}
+		return numerator / denominator
+	}
+	rate, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return rate
+}
+
 func videoStreamRotatedSideways(sideData []struct {
 	Rotation int `json:"rotation"`
 }) bool {
@@ -116,5 +150,5 @@ func videoStreamRotatedSideways(sideData []struct {
 }
 
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }

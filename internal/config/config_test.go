@@ -467,7 +467,7 @@ func TestRunInitWizardWithReader_InvalidPasswordRetries(t *testing.T) {
 	if cfg.Users[0].Username != "admin" {
 		t.Fatalf("期望默认用户名 admin，得到 %s", cfg.Users[0].Username)
 	}
-	if !bytes.Contains(output.Bytes(), []byte("密码长度不能少于6位")) {
+	if !bytes.Contains(output.Bytes(), []byte("password must be at least 6 characters")) {
 		t.Fatal("应提示密码长度不足并重试")
 	}
 }

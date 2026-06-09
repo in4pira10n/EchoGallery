@@ -404,6 +404,7 @@ func TestRegisterUploadedVideo_Success(t *testing.T) {
 			DurationMS: 54321,
 			FormatName: "mp4",
 			CodecName:  "h264",
+			FrameRate:  29.97,
 		},
 	})
 	if err != nil {
@@ -417,6 +418,9 @@ func TestRegisterUploadedVideo_Success(t *testing.T) {
 	}
 	if result.DurationMS != 54321 {
 		t.Fatalf("期望时长 54321，得到 %d", result.DurationMS)
+	}
+	if result.EXIF == nil || result.EXIF.VideoCodec != "h264" || result.EXIF.VideoFrameRate != 29.97 {
+		t.Fatalf("期望写入视频元数据，得到 %+v", result.EXIF)
 	}
 }
 

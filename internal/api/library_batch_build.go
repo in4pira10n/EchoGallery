@@ -29,6 +29,7 @@ type LibraryBatchBuildStatus struct {
 	SelectionConfigured  bool                             `json:"selection_configured,omitempty"`
 	MoveLegacyThumbnails bool                             `json:"move_legacy_thumbnails,omitempty"`
 	CleanThumbnailFiles  bool                             `json:"clean_thumbnail_files,omitempty"`
+	BuildPlaybackCaches  bool                             `json:"build_playback_caches,omitempty"`
 	CurrentLibraryID     string                           `json:"current_library_id,omitempty"`
 	CurrentLibraryName   string                           `json:"current_library_name,omitempty"`
 	CurrentLibraryPath   string                           `json:"current_library_path,omitempty"`
@@ -53,7 +54,7 @@ type LibraryBatchBuildStatus struct {
 
 type LibraryBatchBuildHooks struct {
 	Status               func(profile *config.Profile, username string) LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool) (LibraryBatchBuildStatus, error)
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
 	SetSelection         func(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (LibraryBatchBuildStatus, error)
@@ -64,9 +65,11 @@ type libraryBatchBuildExitRequest struct {
 }
 
 type libraryBatchBuildStartRequest struct {
-	Aggressive           bool `json:"aggressive"`
-	MoveLegacyThumbnails bool `json:"move_legacy_thumbnails"`
-	CleanThumbnailFiles  bool `json:"clean_thumbnail_files"`
+	Aggressive               bool `json:"aggressive"`
+	BuildThumbnailsAfterScan bool `json:"build_thumbnails_after_scan"`
+	MoveLegacyThumbnails     bool `json:"move_legacy_thumbnails"`
+	CleanThumbnailFiles      bool `json:"clean_thumbnail_files"`
+	BuildPlaybackCaches      bool `json:"build_playback_caches"`
 }
 
 type libraryBatchBuildSelectionRequest struct {
@@ -110,7 +113,7 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.BuildThumbnailsAfterScan, req.MoveLegacyThumbnails, req.CleanThumbnailFiles, req.BuildPlaybackCaches)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

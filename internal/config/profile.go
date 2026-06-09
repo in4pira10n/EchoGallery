@@ -51,6 +51,7 @@ type BatchTaskState struct {
 	Message              string                  `json:"message"`
 	MoveLegacyThumbnails bool                    `json:"move_legacy_thumbnails,omitempty"`
 	CleanThumbnailFiles  bool                    `json:"clean_thumbnail_files,omitempty"`
+	BuildPlaybackCaches  bool                    `json:"build_playback_caches,omitempty"`
 	CurrentLibraryID     string                  `json:"current_library_id,omitempty"`
 	CurrentLibraryName   string                  `json:"current_library_name,omitempty"`
 	CurrentLibraryPath   string                  `json:"current_library_path,omitempty"`
@@ -158,11 +159,11 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	}
 	var profile Profile
 	if err := json.Unmarshal(data, &profile); err != nil {
-		return nil, fmt.Errorf("解析 Profile 失败: %w", err)
+		return nil, fmt.Errorf("failed to parse profile: %w", err)
 	}
 	var probe profileDefaultsProbe
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("解析 Profile 默认值失败: %w", err)
+		return nil, fmt.Errorf("failed to parse profile defaults: %w", err)
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		profile.Preferences.LowResourceMode = false
@@ -190,7 +191,7 @@ func EnsureProfile(cfg *Config, username string) (*Profile, error) {
 
 func SaveProfile(cfg *Config, username string, profile *Profile) error {
 	if profile == nil {
-		return fmt.Errorf("Profile 不能为空")
+		return fmt.Errorf("profile cannot be nil")
 	}
 	next := *profile
 	next.Libraries = append([]Library(nil), profile.Libraries...)
@@ -208,14 +209,14 @@ func SaveProfile(cfg *Config, username string, profile *Profile) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("创建 Profile 目录失败: %w", err)
+		return fmt.Errorf("failed to create profile directory: %w", err)
 	}
 	data, err := json.MarshalIndent(&next, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化 Profile 失败: %w", err)
+		return fmt.Errorf("failed to serialize profile: %w", err)
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("写入 Profile 失败: %w", err)
+		return fmt.Errorf("failed to write profile: %w", err)
 	}
 	*profile = next
 	return nil

@@ -160,6 +160,7 @@ func TestSavePhoto_VideoFieldsPersisted(t *testing.T) {
 		Width:        1920,
 		Height:       1080,
 		DurationMS:   12345,
+		EXIF:         &storage.PhotoEXIF{VideoCodec: "h264", VideoFrameRate: 29.97},
 		TakenAt:      time.Now(),
 		UploadedAt:   time.Now(),
 		UploadedBy:   1,
@@ -177,6 +178,9 @@ func TestSavePhoto_VideoFieldsPersisted(t *testing.T) {
 	}
 	if got.MediaKind != storage.MediaKindVideo || got.DurationMS != 12345 {
 		t.Fatalf("视频字段未正确持久化: %+v", got)
+	}
+	if got.EXIF == nil || got.EXIF.VideoCodec != "h264" || got.EXIF.VideoFrameRate != 29.97 {
+		t.Fatalf("视频元数据未正确持久化: %+v", got.EXIF)
 	}
 }
 

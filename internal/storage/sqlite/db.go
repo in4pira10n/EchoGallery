@@ -78,6 +78,9 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("photos", "is_favorite", `ALTER TABLE photos ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("photos", "is_super_favorite", `ALTER TABLE photos ADD COLUMN is_super_favorite INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("albums", "source_kind", `ALTER TABLE albums ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -134,10 +137,18 @@ func (s *DB) migrate() error {
 		    user_id    INTEGER NOT NULL,
 		    volume     REAL    NOT NULL DEFAULT 1,
 		    muted      INTEGER NOT NULL DEFAULT 0,
+		    resume_time INTEGER NOT NULL DEFAULT 0,
+		    bookmarks_json TEXT NOT NULL DEFAULT '',
 		    updated_at DATETIME NOT NULL,
 		    PRIMARY KEY (photo_id, user_id),
 		    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
 		)`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("video_playback_preferences", "resume_time", `ALTER TABLE video_playback_preferences ADD COLUMN resume_time INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("video_playback_preferences", "bookmarks_json", `ALTER TABLE video_playback_preferences ADD COLUMN bookmarks_json TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	return nil
@@ -161,6 +172,7 @@ CREATE TABLE IF NOT EXISTS photos (
     source_mod_unix  INTEGER NOT NULL DEFAULT 0,
     random_sort_key  INTEGER NOT NULL DEFAULT 0,
     is_favorite   INTEGER NOT NULL DEFAULT 0,
+    is_super_favorite INTEGER NOT NULL DEFAULT 0,
     taken_at      DATETIME NOT NULL,
     uploaded_at   DATETIME NOT NULL,
     uploaded_by   INTEGER  NOT NULL,

@@ -52,6 +52,13 @@ type stubRegistrar struct {
 	searchMedia                    func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	getRandomMedia                 func(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
 	mediaPath                      func(photo *storage.Photo) string
+	browserPlaybackPath            func(photo *storage.Photo) (string, string, error)
+	listPlaybackCaches             func(userID int64) ([]service.PlaybackCacheEntry, error)
+	buildBrowserPlaybackCache      func(photoID int64, userID int64) (*service.PlaybackCacheEntry, error)
+	deletePlaybackCaches           func(userID int64, uuids []string) (int, error)
+	startPlaybackCacheBuild        func(userID int64) service.PlaybackCacheBuildStatus
+	getPlaybackCacheBuildStatus    func(userID int64) service.PlaybackCacheBuildStatus
+	cancelPlaybackCacheBuild       func(userID int64) service.PlaybackCacheBuildStatus
 	permanentlyDeletePhoto         func(id int64, userID int64) error
 	playWithSystemPlayer           func(id int64, userID int64) error
 	posterPath                     func(photo *storage.Photo) string
@@ -62,7 +69,7 @@ type stubRegistrar struct {
 	revealAlbumInFinder            func(id int64, userID int64) error
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
-	setPhotoFavorite               func(id int64, userID int64, favorite bool) error
+	setPhotoFavorite               func(id int64, userID int64, favorite bool, superFavorite bool) error
 	thumbnailPath                  func(photo *storage.Photo) string
 }
 
@@ -183,6 +190,55 @@ func (s stubRegistrar) MediaPath(photo *storage.Photo) string {
 	return s.mediaPath(photo)
 }
 
+func (s stubRegistrar) BrowserPlaybackPath(photo *storage.Photo) (string, string, error) {
+	if s.browserPlaybackPath != nil {
+		return s.browserPlaybackPath(photo)
+	}
+	return s.MediaPath(photo), photo.MimeType, nil
+}
+
+func (s stubRegistrar) ListPlaybackCaches(userID int64) ([]service.PlaybackCacheEntry, error) {
+	if s.listPlaybackCaches != nil {
+		return s.listPlaybackCaches(userID)
+	}
+	return nil, nil
+}
+
+func (s stubRegistrar) BuildBrowserPlaybackCache(photoID int64, userID int64) (*service.PlaybackCacheEntry, error) {
+	if s.buildBrowserPlaybackCache != nil {
+		return s.buildBrowserPlaybackCache(photoID, userID)
+	}
+	return nil, nil
+}
+
+func (s stubRegistrar) DeletePlaybackCaches(userID int64, uuids []string) (int, error) {
+	if s.deletePlaybackCaches != nil {
+		return s.deletePlaybackCaches(userID, uuids)
+	}
+	return 0, nil
+}
+
+func (s stubRegistrar) StartPlaybackCacheBuild(userID int64) service.PlaybackCacheBuildStatus {
+	if s.startPlaybackCacheBuild != nil {
+		return s.startPlaybackCacheBuild(userID)
+	}
+	return service.PlaybackCacheBuildStatus{Status: "running", Message: "ok"}
+}
+
+func (s stubRegistrar) GetPlaybackCacheBuildStatus(userID int64) service.PlaybackCacheBuildStatus {
+	if s.getPlaybackCacheBuildStatus != nil {
+		return s.getPlaybackCacheBuildStatus(userID)
+	}
+	return service.PlaybackCacheBuildStatus{Status: "idle", Message: "当前没有播放兼容缓存任务"}
+}
+
+func (s stubRegistrar) CancelPlaybackCacheBuild(userID int64) service.PlaybackCacheBuildStatus {
+	if s.cancelPlaybackCacheBuild != nil {
+		return s.cancelPlaybackCacheBuild(userID)
+	}
+	return service.PlaybackCacheBuildStatus{Status: "cancelled", Message: "已取消播放兼容缓存任务"}
+}
+
 func (s stubRegistrar) PosterPath(photo *storage.Photo) string {
 	if s.posterPath == nil {
 		return ""
@@ -261,8 +317,8 @@ func (s stubRegistrar) RestorePhoto(id int64, userID int64) error {
 	return s.restorePhoto(id, userID)
 }
 
-func (s stubRegistrar) SetPhotoFavorite(id int64, userID int64, favorite bool) error {
-	return s.setPhotoFavorite(id, userID, favorite)
+func (s stubRegistrar) SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error {
+	return s.setPhotoFavorite(id, userID, favorite, superFavorite)
 }
 
 func okRegistrar() stubRegistrar {
@@ -449,7 +505,7 @@ func okRegistrar() stubRegistrar {
 		return nil
 	}, restorePhoto: func(id int64, userID int64) error {
 		return nil
-	}, setPhotoFavorite: func(id int64, userID int64, favorite bool) error {
+	}, setPhotoFavorite: func(id int64, userID int64, favorite bool, superFavorite bool) error {
 		return nil
 	}, thumbnailPath: thumbnailFilePath}
 }
@@ -2299,6 +2355,38 @@ func TestLogin_Success(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("登录后应返回认证 cookie")
+	}
+}
+
+func TestLogin_UsesPortScopedCookie(t *testing.T) {
+	cfg := testConfig()
+	cfg.Port = 8081
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+	scopedName := authCookieNameForConfig(cfg)
+	foundScoped := false
+	clearedLegacy := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == scopedName && c.Value != "" {
+			foundScoped = true
+		}
+		if c.Name == authCookieName && c.MaxAge < 0 {
+			clearedLegacy = true
+		}
+	}
+	if !foundScoped {
+		t.Fatalf("登录后应返回端口隔离认证 cookie %q", scopedName)
+	}
+	if !clearedLegacy {
+		t.Fatal("登录后应清理旧的固定名称认证 cookie")
 	}
 }
 

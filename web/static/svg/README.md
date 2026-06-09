@@ -111,6 +111,7 @@ These icons are used on the left side of right-click context menu items:
 - `context-share.svg`: Share or manage existing share links.
 - `context-delete.svg`: Delete or permanently delete media.
 - `context-restore.svg`: Restore media from Trash.
+- `context-convert-playback.svg`: Convert an unsupported video into a browser-playable MP4 cache from the context menu.
 
 ## Conventions
 

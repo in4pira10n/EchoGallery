@@ -127,7 +127,7 @@ func configPath() (string, error) {
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("无法获取可执行文件路径: %w", err)
+		return "", fmt.Errorf("failed to get executable path: %w", err)
 	}
 	return filepath.Join(filepath.Dir(exe), configFileName), nil
 }
@@ -148,16 +148,16 @@ func loadFromPath(path string) (*Config, error) {
 		if os.IsNotExist(err) {
 			return nil, ErrConfigNotFound
 		}
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 	var probe configDefaultsProbe
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("解析配置默认值失败: %w", err)
+		return nil, fmt.Errorf("failed to parse config defaults: %w", err)
 	}
 	cfg.applyMissingDefaults(probe)
 
@@ -187,7 +187,7 @@ func (c *Config) applyActiveProfile() error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("加载活动 Profile 失败: %w", err)
+		return fmt.Errorf("failed to load active profile: %w", err)
 	}
 	c.ApplyProfile(profile)
 	return nil
@@ -216,10 +216,10 @@ func (c *Config) saveToPath(path string) error {
 	}
 	data, err := json.MarshalIndent(c.persisted(), "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化配置失败: %w", err)
+		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("写入配置文件失败: %w", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	return nil
 }
@@ -234,7 +234,7 @@ func (c *Config) validate() error {
 
 func (c *Config) validateGlobal() error {
 	if c.Port <= 0 || c.Port > 65535 {
-		return fmt.Errorf("无效的端口号: %d", c.Port)
+		return fmt.Errorf("invalid port: %d", c.Port)
 	}
 	c.normalizeLibraries()
 	c.ThumbnailDir = strings.TrimSpace(c.ThumbnailDir)
@@ -242,7 +242,7 @@ func (c *Config) validateGlobal() error {
 		c.ThumbnailSize = 512
 	}
 	if c.JWTSecret == "" {
-		return fmt.Errorf("jwt_secret 不能为空")
+		return fmt.Errorf("jwt_secret cannot be empty")
 	}
 	return nil
 }
@@ -252,7 +252,7 @@ func (c *Config) validateRuntime() error {
 		return nil
 	}
 	if strings.TrimSpace(c.StoragePath) == "" {
-		return fmt.Errorf("storage_path 不能为空")
+		return fmt.Errorf("storage_path cannot be empty")
 	}
 	return nil
 }
@@ -333,7 +333,7 @@ func (c *Config) ensureActiveProfilePersisted() error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("检查活动 Profile 失败: %w", err)
+		return fmt.Errorf("failed to inspect active profile: %w", err)
 	}
 	if strings.TrimSpace(c.StoragePath) == "" {
 		return nil
@@ -552,7 +552,7 @@ func defaultAppBaseDir() (string, error) {
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("无法获取可执行文件路径: %w", err)
+		return "", fmt.Errorf("failed to get executable path: %w", err)
 	}
 	return filepath.Dir(exe), nil
 }
@@ -626,4 +626,4 @@ func (c *Config) ThumbnailStoragePath() (string, error) {
 }
 
 // ErrConfigNotFound 配置文件不存在错误
-var ErrConfigNotFound = fmt.Errorf("配置文件不存在")
+var ErrConfigNotFound = fmt.Errorf("config file not found")

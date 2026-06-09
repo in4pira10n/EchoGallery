@@ -109,12 +109,14 @@ func (m *mockRepo) GetVideoPlaybackPreference(photoID int64, userID int64) (*sto
 	return pref, nil
 }
 
-func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*storage.VideoPlaybackPreference, error) {
+func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
 	pref := &storage.VideoPlaybackPreference{
-		PhotoID:   photoID,
-		Volume:    volume,
-		Muted:     muted,
-		UpdatedAt: time.Now(),
+		PhotoID:    photoID,
+		Volume:     volume,
+		Muted:      muted,
+		ResumeTime: resumeTime,
+		Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
+		UpdatedAt:  time.Now(),
 	}
 	m.playbackPrefs[fmt.Sprintf("%d:%d", photoID, userID)] = pref
 	return pref, nil
@@ -208,12 +210,16 @@ func (m *mockRepo) HardDeleteTrashedPhotos(userID int64) ([]*storage.Photo, erro
 	return photos, nil
 }
 
-func (m *mockRepo) SetPhotoFavorite(id int64, userID int64, favorite bool) error {
+func (m *mockRepo) SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error {
 	p, ok := m.photos[id]
 	if !ok || p.UploadedBy != userID || p.DeletedAt != nil {
 		return fmt.Errorf("图片不存在")
 	}
+	if superFavorite {
+		favorite = true
+	}
 	p.IsFavorite = favorite
+	p.IsSuperFavorite = superFavorite
 	return nil
 }
 

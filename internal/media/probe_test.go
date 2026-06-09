@@ -10,7 +10,7 @@ import (
 func TestProbeVideoWithRunner_Success(t *testing.T) {
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return []byte(`{
-			"streams": [{"codec_type":"video","codec_name":"h264","width":1920,"height":1080}],
+			"streams": [{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,"avg_frame_rate":"30000/1001"}],
 			"format": {"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"12.345"}
 		}`), nil
 	}
@@ -27,6 +27,9 @@ func TestProbeVideoWithRunner_Success(t *testing.T) {
 	}
 	if meta.CodecName != "h264" {
 		t.Fatalf("期望编码 h264，得到 %s", meta.CodecName)
+	}
+	if meta.FrameRate < 29.96 || meta.FrameRate > 29.98 {
+		t.Fatalf("期望帧率约 29.97，得到 %.4f", meta.FrameRate)
 	}
 }
 

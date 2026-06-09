@@ -94,6 +94,33 @@
         "missingTarget": "请先选择一个资源库，或填写新的资源库路径",
         "libraryName": "资源库 {index}"
       }
+    },
+    "galleryChooser": {
+      "pageTitle": "Gallery 选择",
+      "brand": "EchoGallery",
+      "status": "找不到服务器",
+      "title": "选择其他 Gallery",
+      "message": "当前 Web App 对应的地址暂时不可用。你可以从最近打开的 Gallery 继续，或手动输入新的地址。",
+      "currentAddress": "当前地址",
+      "recentTitle": "最近打开",
+      "recentCount": "{count} 个记录",
+      "recentEmpty": "这里还没有最近打开的 Gallery 记录。你可以在下方输入新的地址。",
+      "unavailable": "当前不可达",
+      "open": "打开",
+      "remove": "移除",
+      "manualTitle": "选择其他 Gallery",
+      "manualHint": "输入 IP、域名或完整 URL",
+      "manualNameLabel": "显示名称（可选）",
+      "manualNamePlaceholder": "例如：客厅 NAS",
+      "manualUrlLabel": "Gallery 地址",
+      "manualUrlPlaceholder": "例如：192.168.1.8:8080",
+      "submit": "打开 Gallery",
+      "invalidURL": "请输入有效的 Gallery 地址",
+      "lastSeen": "上次打开 {time}",
+      "justNow": "刚刚",
+      "minutesAgo": "{count} 分钟前",
+      "hoursAgo": "{count} 小时前",
+      "daysAgo": "{count} 天前"
     }
   },
   "app": {

@@ -26,8 +26,11 @@ const api = {
     if (!r.ok) throw await r.json();
     return r.json();
   },
-  async del(url) {
-    const r = await fetch(url, { method: 'DELETE' });
+  async del(url, data) {
+    const options = data == null
+      ? { method: 'DELETE' }
+      : { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) };
+    const r = await fetch(url, options);
     if (!r.ok) throw await r.json();
     return r.json();
   },
@@ -37,6 +40,16 @@ const api = {
     return r.json();
   },
 };
+
+function isIOSDevice() {
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  return /iPad|iPhone|iPod/.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function initDeviceClasses() {
+  document.documentElement.classList.toggle('is-ios-device', isIOSDevice());
+}
 
 const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
@@ -59,7 +72,9 @@ const libraryBatchWorkflowEnabledStorageKey = 'echogallery_library_batch_workflo
 const libraryBatchWorkflowAggressiveStorageKey = 'echogallery_library_batch_workflow_aggressive_v1';
 const libraryBatchWorkflowMoveLegacyStorageKey = 'echogallery_library_batch_workflow_move_legacy_v1';
 const libraryBatchWorkflowCleanFilesStorageKey = 'echogallery_library_batch_workflow_clean_files_v1';
+const libraryBatchWorkflowPlaybackCacheStorageKey = 'echogallery_library_batch_workflow_playback_cache_v1';
 const libraryBatchWorkflowPhaseStorageKey = 'echogallery_library_batch_workflow_phase_v1';
+const pwaSettingsStorageKey = 'echogallery_pwa_settings_v1';
 const copyCatalogPath = '/static/strings/zh-CN.json';
 const COPY_DEFAULTS = {
   app: {
@@ -486,6 +501,10 @@ const icons = {
   shareSmall: '',
   favoriteSmall: '',
   favoriteFilled: '',
+  like: '',
+  superLike: '',
+  dislike: '',
+  nonLike: '',
   github: '',
   pin: '',
   autoplay: '',
@@ -504,6 +523,8 @@ const icons = {
   infoRatio: '',
   infoDimensions: '',
   infoFileSize: '',
+  infoVideoCodec: '',
+  infoVideoFramerate: '',
   exifCamera: '',
   exifAperture: '',
   exifShutter: '',
@@ -601,6 +622,10 @@ const svgIconFiles = {
   shareSmall: 'share-small.svg',
   favoriteSmall: 'favorite-small.svg',
   favoriteFilled: 'favorite-filled.svg',
+  like: 'like.svg',
+  superLike: 'super-like.svg',
+  dislike: 'dislike.svg',
+  nonLike: 'non-like.svg',
   github: 'github.svg',
   pin: 'pin.svg',
   autoplay: 'autoplay.svg',
@@ -619,6 +644,8 @@ const svgIconFiles = {
   infoRatio: 'info-ratio.svg',
   infoDimensions: 'info-dimensions.svg',
   infoFileSize: 'info-file-size.svg',
+  infoVideoCodec: 'info-video-codec.svg',
+  infoVideoFramerate: 'info-video-framerate.svg',
   exifCamera: 'exif-camera.svg',
   exifAperture: 'exif-aperture.svg',
   exifShutter: 'exif-shutter.svg',
@@ -644,6 +671,7 @@ const svgIconFiles = {
   contextShare: 'context-share.svg',
   contextDelete: 'context-delete.svg',
   contextRestore: 'context-restore.svg',
+  contextConvertPlayback: 'context-convert-playback.svg',
 };
 
 function navIconMarkup(view, active = false) {
@@ -768,6 +796,32 @@ function normalizeTimelineOrder(value) {
 function normalizeAlbumDetailSort(value) {
   return ['name', 'size', 'timeline_asc', 'timeline_desc'].includes(value) ? value : 'timeline_desc';
 }
+function normalizePWASettings(raw = {}) {
+  const data = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const name = String(data.name || '').trim() || 'EchoGallery';
+  const iconSource = data.iconSource === 'svg' ? 'png' : (['favicon', 'library', 'png'].includes(data.iconSource) ? data.iconSource : 'favicon');
+  const themeMode = ['accent', 'fixed'].includes(data.themeMode) ? data.themeMode : 'accent';
+  const themeColor = normalizeHexColor(data.themeColor || '') || '#2d6a5f';
+  const startPage = ['/', '/login', 'auto'].includes(data.startPage) ? data.startPage : '/';
+  const cacheStrategy = ['static-only', 'app-shell', 'disabled'].includes(data.cacheStrategy) ? data.cacheStrategy : 'static-only';
+  return { name, iconSource, themeMode, themeColor, startPage, cacheStrategy };
+}
+function currentAppDisplayName() {
+  const current = normalizePWASettings(state && state.pwaSettings || {});
+  return String(current.name || '').trim() || 'EchoGallery';
+}
+function loadPWASettings() {
+  try {
+    return normalizePWASettings(JSON.parse(localStorage.getItem(pwaSettingsStorageKey) || '{}'));
+  } catch (_) {
+    return normalizePWASettings();
+  }
+}
+function persistPWASettings() {
+  state.pwaSettings = normalizePWASettings(state.pwaSettings);
+  localStorage.setItem(pwaSettingsStorageKey, JSON.stringify(state.pwaSettings));
+  window.dispatchEvent(new CustomEvent('eg:pwa-settings-change', { detail: state.pwaSettings }));
+}
 function normalizePathForCompare(value) {
   return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/g, '');
 }
@@ -888,6 +942,9 @@ function videoBookmarkKey(photo) {
   if (!photo) return '';
   return String(photo.uuid || photo.id || '');
 }
+function videoPlaybackPreferenceKey(photo) {
+  return photo && photo.id ? String(photo.id) : '';
+}
 function normalizeVideoBookmarkState(raw) {
   const next = { bookmarks: [], resumeTime: 0 };
   if (typeof raw === 'number') {
@@ -918,7 +975,7 @@ function normalizeVideoBookmarkState(raw) {
   next.bookmarks.sort((a, b) => a.slot - b.slot);
   return next;
 }
-function loadVideoBookmarks() {
+function loadLegacyVideoBookmarks() {
   try {
     const parsed = JSON.parse(localStorage.getItem(videoBookmarksStorageKey) || '{}');
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
@@ -934,37 +991,106 @@ function loadVideoBookmarks() {
   } catch (_) {}
   return {};
 }
-function persistVideoBookmarks() {
+function persistLegacyVideoBookmarks(store) {
   try {
-    localStorage.setItem(videoBookmarksStorageKey, JSON.stringify(state.videoBookmarks || {}));
+    localStorage.setItem(videoBookmarksStorageKey, JSON.stringify(store || {}));
   } catch (_) {
-    // 书签是体验增强，不应因为本地存储不可用影响播放。
+    // 旧缓存迁移失败不应影响当前播放。
   }
 }
-function getVideoBookmarkState(photo, { create = false } = {}) {
+function clearLegacyVideoBookmarkState(photo) {
+  const key = videoBookmarkKey(photo);
+  if (!key || !state.legacyVideoBookmarks || !state.legacyVideoBookmarks[key]) return;
+  delete state.legacyVideoBookmarks[key];
+  persistLegacyVideoBookmarks(state.legacyVideoBookmarks);
+}
+function legacyVideoBookmarkStateForPhoto(photo) {
   const key = videoBookmarkKey(photo);
   if (!key) return null;
-  let entry = state.videoBookmarks[key];
+  const entry = state.legacyVideoBookmarks ? state.legacyVideoBookmarks[key] : null;
+  return entry ? normalizeVideoBookmarkState(entry) : null;
+}
+function cloneVideoPlaybackBookmarks(bookmarks = []) {
+  return (Array.isArray(bookmarks) ? bookmarks : []).map(bookmark => ({
+    slot: Math.max(1, Math.min(10, Number(bookmark && bookmark.slot) || 0)),
+    time: Math.max(0, Math.floor(Number(bookmark && bookmark.time) || 0)),
+    name: String(bookmark && bookmark.name || '').trim(),
+  })).filter(bookmark => bookmark.slot > 0);
+}
+function cloneVideoPlaybackPreference(pref) {
+  const normalized = normalizeVideoPlaybackPreference(pref);
+  return {
+    volume: normalized.volume,
+    muted: normalized.muted,
+    resumeTime: normalized.resumeTime,
+    bookmarks: cloneVideoPlaybackBookmarks(normalized.bookmarks),
+  };
+}
+function cacheVideoPlaybackPreference(photo, pref) {
+  if (!photo || !photo.id) return cloneVideoPlaybackPreference(pref);
+  const key = videoPlaybackPreferenceKey(photo);
+  const normalized = cloneVideoPlaybackPreference(pref);
+  state.videoPlaybackPreferences[key] = normalized;
+  photo.video_bookmark_count = normalized.bookmarks.length;
+  photo.video_resume_time = normalized.resumeTime;
+  updateVideoPlaybackInCollections(photo.id, normalized);
+  updateVideoBookmarkThumbIndicators(photo.id);
+  return normalized;
+}
+function updateVideoPlaybackInCollections(photoId, pref) {
+  const targetID = Number(photoId);
+  if (!targetID) return;
+  const collections = [
+    state.photos,
+    state.favoritePhotos,
+    state.randomAlbumPhotos,
+    state.albumPhotos,
+    state.trashPhotos,
+    state.lightboxPhotos,
+    state.memoryPhotos,
+    state.searchResults,
+  ];
+  const bookmarkCount = Array.isArray(pref && pref.bookmarks) ? pref.bookmarks.length : 0;
+  const resumeTime = Math.max(0, Math.floor(Number(pref && pref.resumeTime) || 0));
+  collections.forEach(list => {
+    if (!Array.isArray(list)) return;
+    list.forEach(photo => {
+      if (!photo || Number(photo.id) !== targetID) return;
+      photo.video_bookmark_count = bookmarkCount;
+      photo.video_resume_time = resumeTime;
+    });
+  });
+}
+function getVideoBookmarkState(photo, { create = false } = {}) {
+  const key = videoPlaybackPreferenceKey(photo);
+  if (!key) return null;
+  let entry = state.videoPlaybackPreferences[key];
   if (!entry && create) {
-    entry = { bookmarks: [], resumeTime: 0 };
-    state.videoBookmarks[key] = entry;
+    entry = normalizeVideoPlaybackPreference(null);
+    state.videoPlaybackPreferences[key] = entry;
   }
-  if (entry && !Array.isArray(entry.bookmarks)) {
-    state.videoBookmarks[key] = normalizeVideoBookmarkState(entry);
-    entry = state.videoBookmarks[key];
+  if (entry) {
+    state.videoPlaybackPreferences[key] = cloneVideoPlaybackPreference(entry);
+    entry = state.videoPlaybackPreferences[key];
   }
   return entry || null;
 }
 function getVideoBookmarkList(photo) {
   const entry = getVideoBookmarkState(photo);
-  return entry ? entry.bookmarks : [];
+  if (entry) return entry.bookmarks;
+  const legacy = legacyVideoBookmarkStateForPhoto(photo);
+  return legacy ? legacy.bookmarks : [];
 }
 function getVideoBookmarkCount(photo) {
-  return isVideoMedia(photo) ? getVideoBookmarkList(photo).length : 0;
+  if (!isVideoMedia(photo)) return 0;
+  const cached = getVideoBookmarkList(photo).length;
+  if (cached > 0) return cached;
+  return Math.max(0, Number(photo && photo.video_bookmark_count) || 0);
 }
 function getVideoBookmarkCountByKey(key) {
-  const entry = state.videoBookmarks[String(key || '')];
-  return entry && Array.isArray(entry.bookmarks) ? entry.bookmarks.length : 0;
+  const entry = state.videoPlaybackPreferences[String(key || '')];
+  if (entry && Array.isArray(entry.bookmarks)) return entry.bookmarks.length;
+  return 0;
 }
 function getVideoBookmarkSlot(photo, slot) {
   const entry = getVideoBookmarkState(photo);
@@ -990,10 +1116,11 @@ function setVideoBookmarkSlot(photo, slot, seconds, name = '') {
   else if (entry.bookmarks.length < 10) entry.bookmarks.push(bookmark);
   else return false;
   entry.bookmarks.sort((a, b) => a.slot - b.slot);
-  persistVideoBookmarks();
+  queueVideoPlaybackPreferenceSave(photo, { bookmarks: entry.bookmarks });
   updateVideoBookmarkButton(photo);
   updateVideoBookmarkProgress(photo);
   updateVideoBookmarkThumbIndicators(photo);
+  clearLegacyVideoBookmarkState(photo);
   return true;
 }
 function deleteVideoBookmarkSlot(photo, slot) {
@@ -1003,35 +1130,126 @@ function deleteVideoBookmarkSlot(photo, slot) {
   const before = entry.bookmarks.length;
   entry.bookmarks = entry.bookmarks.filter(item => item.slot !== targetSlot);
   if (entry.bookmarks.length === before) return false;
-  persistVideoBookmarks();
+  queueVideoPlaybackPreferenceSave(photo, { bookmarks: entry.bookmarks });
   updateVideoBookmarkButton(photo);
   updateVideoBookmarkProgress(photo);
   updateVideoBookmarkThumbIndicators(photo);
+  clearLegacyVideoBookmarkState(photo);
   return true;
+}
+function addVideoBookmarkAtCurrentTime(photo, video = $('#lb-video')) {
+  if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) {
+    return { ok: false, reason: 'unavailable' };
+  }
+  const entry = getVideoBookmarkState(photo, { create: true });
+  if (!entry) return { ok: false, reason: 'unavailable' };
+  if (entry.bookmarks.length >= 10) return { ok: false, reason: 'full' };
+  const slot = Array.from({ length: 10 }, (_, i) => i + 1)
+    .find(candidate => !entry.bookmarks.some(item => Number(item.slot) === candidate));
+  if (!slot) return { ok: false, reason: 'full' };
+  const seconds = Math.max(0, Number(video.currentTime) || 0);
+  if (hasNearbyVideoBookmark(entry, slot, seconds, 1)) return { ok: false, reason: 'nearby' };
+  if (!setVideoBookmarkSlot(photo, slot, seconds)) return { ok: false, reason: 'failed' };
+  return { ok: true, slot, seconds };
 }
 function getVideoResumeTime(photo) {
   const entry = getVideoBookmarkState(photo);
-  const value = entry ? Number(entry.resumeTime) : 0;
+  const value = entry ? Number(entry.resumeTime) : Number(photo && photo.video_resume_time);
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 }
 function setVideoResumeTime(photo, seconds) {
   const entry = getVideoBookmarkState(photo, { create: true });
   const value = Math.max(0, Number(seconds) || 0);
   if (!entry) return false;
+  if (entry.resumeTime === Math.floor(value)) return true;
   entry.resumeTime = Math.floor(value);
-  persistVideoBookmarks();
+  queueVideoPlaybackPreferenceSave(photo, { resume_time: entry.resumeTime });
+  clearLegacyVideoBookmarkState(photo);
   return true;
 }
 function updateVideoBookmarkButton(photo = state.lightboxPhotos[state.lightboxIndex]) {
   const btn = $('#lb-video-bookmark');
-  if (!btn) return;
   const isVideo = isVideoMedia(photo);
+  $('#lightbox-header')?.classList.toggle('lightbox-video-active', isVideo);
+  if (!btn) return;
   btn.classList.toggle('hidden', !isVideo);
   if (!isVideo) return;
   const count = getVideoBookmarkList(photo).length;
   btn.classList.toggle('active', count > 0);
   btn.title = count > 0 ? `视频书签 ${count}/10，点击管理` : '视频书签，点击管理';
   btn.setAttribute('aria-label', btn.title);
+}
+function syncTouchPlaybackButton(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
+  const btn = $('#lb-touch-playback-toggle');
+  const icon = $('#lb-touch-playback-icon');
+  if (!btn) return;
+  const visible = isTouchLikeDevice()
+    && isVideoMedia(photo)
+    && video
+    && !video.classList.contains('hidden');
+  btn.classList.toggle('hidden', !visible);
+  if (!visible) {
+    btn.classList.remove('active');
+    return;
+  }
+  const paused = !video || video.paused;
+  if (icon) icon.innerHTML = paused ? icons.play : icons.pause;
+  const label = paused ? '播放视频' : '暂停视频';
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('aria-pressed', paused ? 'false' : 'true');
+}
+function updateMediaSessionPlaybackState(video = $('#lb-video')) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.playbackState = video && !video.paused ? 'playing' : 'paused';
+  } catch (_) {}
+}
+function clearLightboxMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = null;
+    navigator.mediaSession.playbackState = 'none';
+    ['play', 'pause', 'seekbackward', 'seekforward'].forEach(action => {
+      try { navigator.mediaSession.setActionHandler(action, null); } catch (_) {}
+    });
+  } catch (_) {}
+}
+function setMediaSessionAction(action, handler) {
+  if (!('mediaSession' in navigator)) return;
+  try { navigator.mediaSession.setActionHandler(action, handler); } catch (_) {}
+}
+function syncLightboxMediaSession(photo, video = $('#lb-video')) {
+  if (!('mediaSession' in navigator) || !isVideoMedia(photo) || !video) {
+    clearLightboxMediaSession();
+    return;
+  }
+  try {
+    if ('MediaMetadata' in window) {
+      const artwork = mediaThumbURL(photo)
+        ? [{ src: mediaThumbURL(photo), sizes: '512x512', type: 'image/webp' }]
+        : [];
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: photo.original_name || 'EchoGallery',
+        artist: 'EchoGallery',
+        album: '本地视频',
+        artwork,
+      });
+    }
+  } catch (_) {}
+  setMediaSessionAction('play', () => {
+    if (video && video.paused) video.play().catch(() => {});
+  });
+  setMediaSessionAction('pause', () => {
+    if (video && !video.paused) video.pause();
+  });
+  setMediaSessionAction('seekbackward', details => {
+    adjustVideoTime(-(Number(details && details.seekOffset) || 5));
+  });
+  setMediaSessionAction('seekforward', details => {
+    adjustVideoTime(Number(details && details.seekOffset) || 5);
+  });
+  updateMediaSessionPlaybackState(video);
 }
 function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
   if (video && !('currentTime' in video) && !video.classList) {
@@ -1061,7 +1279,8 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
     return;
   }
   const current = Math.max(0, Number(video.currentTime) || 0);
-  fill.style.width = `${Math.max(0, Math.min(100, current / video.duration * 100))}%`;
+  const progressPercent = Math.max(0, Math.min(100, current / video.duration * 100));
+  fill.style.width = progressPercent <= 0 ? '0%' : `max(var(--video-progress-track-height, 8px), ${progressPercent}%)`;
   if (currentLabel) currentLabel.textContent = formatDuration(current * 1000);
   if (durationLabel) durationLabel.textContent = formatDuration(video.duration * 1000);
   const bookmarks = getVideoBookmarkList(photo);
@@ -1080,9 +1299,6 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
     return `<button type="button" class="lightbox-video-progress-marker" data-video-bookmark-slot="${bookmark.slot}" style="left:${left}%" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${bookmark.slot === 10 ? '0' : bookmark.slot}</button>`;
   });
   markers.innerHTML = sections.concat(bookmarkMarkers).join('');
-}
-function videoPlaybackPreferenceKey(photo) {
-  return photo && photo.id ? String(photo.id) : '';
 }
 function normalizeVideoVolumeValue(value, fallback = 1) {
   const volume = Number(value);
@@ -1103,56 +1319,159 @@ function persistGlobalVideoVolume(volume) {
   } catch (_) {}
   return state.globalVideoVolume;
 }
+function effectiveVideoVolume(video = $('#lb-video')) {
+  const stored = Number(video && video.dataset ? video.dataset.egVolume : NaN);
+  if (Number.isFinite(stored)) return normalizeVideoVolumeValue(stored, state.globalVideoVolume);
+  if (video && Number.isFinite(Number(video.volume))) return normalizeVideoVolumeValue(video.volume, state.globalVideoVolume);
+  return normalizeVideoVolumeValue(state.globalVideoVolume, 1);
+}
+function ensureVideoGainNode(video = $('#lb-video')) {
+  if (!video || !isTouchLikeDevice()) return null;
+  if (state.lightboxVideoGainNode && state.lightboxVideoAudioElement === video) {
+    return state.lightboxVideoGainNode;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  try {
+    if (!state.lightboxVideoAudioContext) state.lightboxVideoAudioContext = new AudioContextClass();
+    if (state.lightboxVideoAudioContext.state === 'suspended') {
+      state.lightboxVideoAudioContext.resume().catch(() => {});
+    }
+    state.lightboxVideoAudioSource = state.lightboxVideoAudioContext.createMediaElementSource(video);
+    state.lightboxVideoGainNode = state.lightboxVideoAudioContext.createGain();
+    state.lightboxVideoAudioSource.connect(state.lightboxVideoGainNode);
+    state.lightboxVideoGainNode.connect(state.lightboxVideoAudioContext.destination);
+    state.lightboxVideoAudioElement = video;
+    return state.lightboxVideoGainNode;
+  } catch (_) {
+    return null;
+  }
+}
+function applyVideoVolumeOutput(video = $('#lb-video'), volume = state.globalVideoVolume) {
+  if (!video) return false;
+  const value = normalizeVideoVolumeValue(volume, state.globalVideoVolume);
+  if (video.dataset) video.dataset.egVolume = String(value);
+  const gain = ensureVideoGainNode(video);
+  if (gain) {
+    try { video.volume = 1; } catch (_) {}
+    gain.gain.value = value;
+  } else {
+    try { video.volume = value; } catch (_) {}
+  }
+  return true;
+}
 function normalizeVideoPlaybackPreference(raw) {
+  const legacy = normalizeVideoBookmarkState(raw);
   return {
-    volume: normalizeVideoVolumeValue(state.globalVideoVolume, 1),
+    volume: normalizeVideoVolumeValue(raw && raw.volume, state.globalVideoVolume),
     muted: !!(raw && raw.muted),
+    resumeTime: Math.max(0, Math.floor(Number(raw && (raw.resume_time ?? raw.resumeTime ?? legacy.resumeTime)) || 0)),
+    bookmarks: cloneVideoPlaybackBookmarks(raw && raw.bookmarks || legacy.bookmarks),
   };
+}
+function shouldMigrateLegacyVideoPlayback(serverPref, legacyPref) {
+  if (!legacyPref) return false;
+  const legacyHasData = (legacyPref.resumeTime || 0) > 0 || (legacyPref.bookmarks || []).length > 0;
+  if (!legacyHasData) return false;
+  const serverHasData = (serverPref.resumeTime || 0) > 0 || (serverPref.bookmarks || []).length > 0;
+  return !serverHasData;
 }
 async function loadVideoPlaybackPreference(photo) {
   const key = videoPlaybackPreferenceKey(photo);
   if (!key || !isVideoMedia(photo)) return normalizeVideoPlaybackPreference(null);
   if (state.videoPlaybackPreferences[key]) return state.videoPlaybackPreferences[key];
-  try {
-    const pref = await api.get(`/api/media/${photo.id}/playback`);
-    state.videoPlaybackPreferences[key] = normalizeVideoPlaybackPreference(pref);
-  } catch (_) {
-    state.videoPlaybackPreferences[key] = normalizeVideoPlaybackPreference(null);
-  }
-  return state.videoPlaybackPreferences[key];
+  if (state.videoPlaybackPreferenceRequests[key]) return state.videoPlaybackPreferenceRequests[key];
+  state.videoPlaybackPreferenceRequests[key] = (async () => {
+    const legacyPref = legacyVideoBookmarkStateForPhoto(photo);
+    try {
+      let pref = normalizeVideoPlaybackPreference(await api.get(`/api/media/${photo.id}/playback`));
+      if (shouldMigrateLegacyVideoPlayback(pref, legacyPref)) {
+        pref = normalizeVideoPlaybackPreference(await api.put(`/api/media/${photo.id}/playback`, {
+          resume_time: legacyPref.resumeTime,
+          bookmarks: legacyPref.bookmarks,
+        }));
+        clearLegacyVideoBookmarkState(photo);
+      }
+      return cacheVideoPlaybackPreference(photo, pref);
+    } catch (_) {
+      if (legacyPref) return cacheVideoPlaybackPreference(photo, legacyPref);
+      return cacheVideoPlaybackPreference(photo, null);
+    } finally {
+      delete state.videoPlaybackPreferenceRequests[key];
+    }
+  })();
+  return state.videoPlaybackPreferenceRequests[key];
 }
 async function restoreVideoPlaybackPreference(video, photo) {
   if (!video || !isVideoMedia(photo)) return;
   const pref = await loadVideoPlaybackPreference(photo);
   if (state.lightboxPhotos[state.lightboxIndex] !== photo) return;
   video.dataset.restoringPlaybackPreference = '1';
-  video.volume = normalizeVideoVolumeValue(state.globalVideoVolume, 1);
+  if (state.continueLastVideoPosition && Number.isFinite(video.duration) && video.duration > 0) {
+    const saved = Math.max(0, Math.floor(Number(pref && pref.resumeTime) || 0));
+    if (saved > 0 && saved < video.duration - 2 && Math.abs((Number(video.currentTime) || 0) - saved) > 1) {
+      video.currentTime = saved;
+    }
+  }
+  applyVideoVolumeOutput(video, state.globalVideoVolume);
   video.muted = pref.muted;
+  updateVideoBookmarkButton(photo);
+  updateVideoBookmarkProgress(video, photo);
   requestAnimationFrame(() => {
     if (video) delete video.dataset.restoringPlaybackPreference;
   });
 }
+function queueVideoPlaybackPreferenceSave(photo, patch = {}, delay = 380) {
+  const key = videoPlaybackPreferenceKey(photo);
+  if (!key || !photo || !photo.id) return;
+  const queue = state.videoPlaybackPreferenceSaveQueue[key] || {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'muted')) queue.muted = !!patch.muted;
+  if (Object.prototype.hasOwnProperty.call(patch, 'resume_time')) queue.resume_time = Math.max(0, Math.floor(Number(patch.resume_time) || 0));
+  if (Object.prototype.hasOwnProperty.call(patch, 'bookmarks')) queue.bookmarks = cloneVideoPlaybackBookmarks(patch.bookmarks);
+  state.videoPlaybackPreferenceSaveQueue[key] = queue;
+  clearTimeout(state.videoPlaybackPreferenceSaveTimers[key]);
+  state.videoPlaybackPreferenceSaveTimers[key] = setTimeout(async () => {
+    const payload = state.videoPlaybackPreferenceSaveQueue[key];
+    delete state.videoPlaybackPreferenceSaveQueue[key];
+    delete state.videoPlaybackPreferenceSaveTimers[key];
+    try {
+      const pref = await api.put(`/api/media/${photo.id}/playback`, payload);
+      cacheVideoPlaybackPreference(photo, pref);
+      if (state.lightboxPhotos[state.lightboxIndex] && Number(state.lightboxPhotos[state.lightboxIndex].id) === Number(photo.id)) {
+        updateVideoBookmarkButton(photo);
+        updateVideoBookmarkProgress($('#lb-video'), photo);
+        if (_ctxMenu?.classList.contains('lightbox-bookmark-menu')) refreshVideoBookmarkMenu();
+      }
+    } catch (_) {
+      // 静默失败：下次播放或再次修改时会继续尝试同步。
+    }
+  }, delay);
+}
 function persistVideoPlaybackPreferenceSoon(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
   if (!video || !isVideoMedia(photo) || !photo.id || video.dataset.restoringPlaybackPreference === '1') return;
-  persistGlobalVideoVolume(video.volume);
+  persistGlobalVideoVolume(effectiveVideoVolume(video));
   const key = videoPlaybackPreferenceKey(photo);
   const muted = !!video.muted;
   const previous = state.videoPlaybackPreferences[key] || normalizeVideoPlaybackPreference(null);
   if (previous.muted === muted) return;
   const pref = normalizeVideoPlaybackPreference({ muted });
+  pref.resumeTime = previous.resumeTime;
+  pref.bookmarks = cloneVideoPlaybackBookmarks(previous.bookmarks);
   state.videoPlaybackPreferences[key] = pref;
-  clearTimeout(state.videoPlaybackPreferenceSaveTimer);
-  state.videoPlaybackPreferenceSaveTimer = setTimeout(() => {
-    api.put(`/api/media/${photo.id}/playback`, { muted: pref.muted }).catch(() => {});
-  }, 400);
+  queueVideoPlaybackPreferenceSave(photo, { muted: pref.muted });
 }
 function showVideoProgressActivity(duration = 3000) {
   const progress = $('#lb-video-progress');
   if (!progress || progress.classList.contains('hidden')) return;
+  const touchPlaybackToggle = $('#lb-touch-playback-toggle');
   progress.classList.add('active');
+  touchPlaybackToggle?.classList.add('active');
   clearTimeout(state.lightboxVideoProgressTimer);
   state.lightboxVideoProgressTimer = setTimeout(() => {
-    if (!progress.classList.contains('scrubbing')) progress.classList.remove('active');
+    if (!progress.classList.contains('scrubbing')) {
+      progress.classList.remove('active');
+      touchPlaybackToggle?.classList.remove('active');
+    }
   }, duration);
 }
 function seekVideoFromProgressClientX(track, clientX) {
@@ -1166,8 +1485,59 @@ function seekVideoFromProgressClientX(track, clientX) {
   showVideoProgressActivity();
   return true;
 }
+function jumpVideoToProgressMarker(marker) {
+  const video = $('#lb-video');
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!marker || !video || video.classList.contains('hidden') || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+  const bookmarkSlot = Number(marker.dataset.videoBookmarkSlot || 0);
+  if (bookmarkSlot) {
+    const bookmark = getVideoBookmarkSlot(photo, bookmarkSlot);
+    if (!bookmark) return false;
+    video.currentTime = Math.max(0, Math.min(video.duration, Number(bookmark.time) || 0));
+    updateVideoBookmarkProgress(video, photo);
+    showVideoProgressActivity();
+    return true;
+  }
+  const section = Number(marker.dataset.videoSection || 0);
+  if (section > 0) {
+    video.currentTime = Math.max(0, Math.min(video.duration, video.duration / 10 * section));
+    updateVideoBookmarkProgress(video, photo);
+    showVideoProgressActivity();
+    return true;
+  }
+  return false;
+}
+function nearestVideoProgressMarker(track, clientX, pointerType = '') {
+  if (!track) return null;
+  const rect = track.getBoundingClientRect();
+  if (!rect.width) return null;
+  const markers = [...track.querySelectorAll('[data-video-bookmark-slot], [data-video-section]')];
+  if (!markers.length) return null;
+  const threshold = pointerType === 'touch' || pointerType === 'pen' ? 28 : 18;
+  let best = null;
+  let bestDistance = Infinity;
+  markers.forEach(marker => {
+    const leftPercent = parseFloat(marker.style.left || '0');
+    if (!Number.isFinite(leftPercent)) return;
+    const markerX = rect.left + rect.width * (leftPercent / 100);
+    const distance = Math.abs(clientX - markerX);
+    if (distance < bestDistance) {
+      best = marker;
+      bestDistance = distance;
+    }
+  });
+  if (!best || bestDistance > threshold) return null;
+  return best;
+}
 function beginVideoProgressScrub(e, track) {
   if (!track || e.button > 0) return false;
+  const marker = e.target.closest('[data-video-bookmark-slot], [data-video-section]') || nearestVideoProgressMarker(track, e.clientX, e.pointerType);
+  if (marker && jumpVideoToProgressMarker(marker)) {
+    state.videoProgressClickSuppressUntil = Date.now() + 450;
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
   const progress = $('#lb-video-progress');
   if (!progress || !seekVideoFromProgressClientX(track, e.clientX)) return false;
   state.videoProgressScrubPointerId = e.pointerId;
@@ -1205,39 +1575,83 @@ function endVideoProgressScrub(e) {
   e.preventDefault();
   return true;
 }
-function handleLightboxVideoSurfaceClick(e) {
-  if (!e || Date.now() < state.videoProgressClickSuppressUntil) return false;
-  if (state.slideshowPlaying) return false;
+function beginVideoSurfaceSwipe(e) {
+  if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return false;
+  if (state.slideshowPlaying || state.videoProgressScrubPointerId != null) return false;
+  if (e.target.closest('.lightbox-header, .lightbox-info, .lightbox-video-progress, .lightbox-volume-feedback, .lb-nav, .lb-touch-playback-toggle, .context-menu, button, input, select, label, a')) return false;
+  if (!e.target.closest('.lightbox-media-frame, #lb-video')) return false;
   const photo = state.lightboxPhotos[state.lightboxIndex];
   const video = $('#lb-video');
   if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return false;
-  if (!e.target.closest('.lightbox-body')) return false;
-  if (e.target.closest('.lightbox-header, .lightbox-info, .lightbox-video-progress, .lightbox-volume-feedback, .lb-nav, .context-menu, button, input, select, label, a')) return false;
-  if (!e.target.closest('.lightbox-media-frame, #lb-video')) return false;
   const body = $('.lightbox-body');
-  const rect = body ? body.getBoundingClientRect() : video.getBoundingClientRect();
-  const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
-  const side = ratio <= 0.25 ? 'left' : ratio >= 0.75 ? 'right' : '';
-  const isTouch = state.lightboxLastPointerType === 'touch' || state.lightboxLastPointerType === 'pen';
-  if (isTouch && side) {
-    const now = Date.now();
-    const last = state.videoSurfaceLastTap || {};
-    clearTimeout(state.videoSurfaceTapTimer);
-    if (last.side === side && now - last.time <= 340) {
-      state.videoSurfaceLastTap = null;
-      adjustVideoTime(side === 'left' ? -5 : 5);
-    } else {
-      state.videoSurfaceLastTap = { side, time: now };
-      state.videoSurfaceTapTimer = setTimeout(() => {
-        state.videoSurfaceLastTap = null;
-        toggleVideoPlayback();
-      }, 260);
-    }
-  } else {
-    clearTimeout(state.videoSurfaceTapTimer);
-    state.videoSurfaceLastTap = null;
-    toggleVideoPlayback();
+  state.videoSurfaceSwipe = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    startTime: Number(video.currentTime) || 0,
+    startVolume: effectiveVideoVolume(video),
+    dragging: false,
+    mode: '',
+    width: Math.max(1, (body && body.clientWidth) || window.innerWidth || 1),
+    height: Math.max(1, (body && body.clientHeight) || window.innerHeight || 1),
+  };
+  if (body && body.setPointerCapture) {
+    try { body.setPointerCapture(e.pointerId); } catch (_) {}
   }
+  return true;
+}
+function updateVideoSurfaceSwipe(e) {
+  const swipe = state.videoSurfaceSwipe;
+  if (!swipe || swipe.pointerId !== e.pointerId) return false;
+  const video = $('#lb-video');
+  if (!video || video.classList.contains('hidden')) return false;
+  const dx = e.clientX - swipe.startX;
+  const dy = e.clientY - swipe.startY;
+  const absX = Math.abs(dx);
+  const absY = Math.abs(dy);
+  if (!swipe.dragging) {
+    if (absY > 18 && absY > absX * 1.15) {
+      swipe.dragging = true;
+      swipe.mode = 'volume';
+      showVolumeOverlay(video);
+    } else if (absX >= 14 && absX >= absY * 1.2) {
+      swipe.dragging = true;
+      swipe.mode = 'seek';
+    } else {
+      return false;
+    }
+  }
+  if (swipe.mode === 'volume') {
+  const delta = -dy / Math.max(130, swipe.height * 0.32);
+  setVideoVolumeValue(swipe.startVolume + delta, video);
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
+  const duration = Number(video.duration) || 0;
+  const seekRange = Number.isFinite(duration) && duration > 0
+    ? Math.max(12, Math.min(90, duration * 0.18))
+    : 30;
+  const deltaSeconds = dx / swipe.width * seekRange;
+  video.currentTime = Math.max(0, Math.min(duration || Infinity, swipe.startTime + deltaSeconds));
+  updateVideoBookmarkProgress(video);
+  showVideoProgressActivity();
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
+function endVideoSurfaceSwipe(e) {
+  const swipe = state.videoSurfaceSwipe;
+  if (!swipe || swipe.pointerId !== e.pointerId) return false;
+  state.videoSurfaceSwipe = null;
+  const body = $('.lightbox-body');
+  if (body && body.releasePointerCapture) {
+    try { body.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+  if (!swipe.dragging) return false;
+  state.videoProgressClickSuppressUntil = Date.now() + 520;
+  if (swipe.mode === 'volume') showVolumeOverlay();
+  else showVideoProgressActivity();
   e.preventDefault();
   e.stopPropagation();
   return true;
@@ -1271,6 +1685,12 @@ function restoreVideoResumePosition(video, photo) {
   }
   updateVideoBookmarkButton(photo);
   updateVideoBookmarkProgress(video, photo);
+}
+function requestVideoPlaybackIndicatorSync(photo) {
+  if (!isVideoMedia(photo) || !photo || !photo.id) return;
+  void loadVideoPlaybackPreference(photo).then(() => {
+    updateVideoBookmarkThumbIndicators(photo.id);
+  }).catch(() => {});
 }
 function getVideoBookmarkSlotFromEvent(e) {
   if (!e || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return null;
@@ -1390,6 +1810,110 @@ function initSidebarPreference() {
 function isMobileLayout() {
   return window.matchMedia('(max-width: 640px)').matches;
 }
+function isTouchLikeDevice() {
+  return window.matchMedia('(hover: none), (pointer: coarse)').matches;
+}
+function touchDistance(touches) {
+  if (!touches || touches.length < 2) return 0;
+  const a = touches[0];
+  const b = touches[1];
+  return Math.hypot((a.clientX || 0) - (b.clientX || 0), (a.clientY || 0) - (b.clientY || 0));
+}
+function touchMidpoint(touches) {
+  if (!touches || touches.length < 2) return { x: 0, y: 0 };
+  return {
+    x: ((touches[0].clientX || 0) + (touches[1].clientX || 0)) / 2,
+    y: ((touches[0].clientY || 0) + (touches[1].clientY || 0)) / 2,
+  };
+}
+function isPhotoWallPinchView() {
+  return ['timeline', 'favorites', 'random-album', 'album-detail', 'memories', 'trash'].includes(state.view);
+}
+function pinchContextForTouches(touches) {
+  if (!touches || touches.length < 2) return '';
+  if ($('#lightbox')?.classList.contains('open')) return 'lightbox';
+  if (state.searchOpen || state.blockingInteraction || document.querySelector('.modal-overlay.open')) return 'blocked';
+  if (isPhotoWallPinchView()) return 'grid';
+  return 'blocked';
+}
+function beginTouchPinch(e) {
+  if (!e || !e.touches || e.touches.length < 2) return false;
+  const context = pinchContextForTouches(e.touches);
+  const distance = touchDistance(e.touches);
+  if (distance <= 0) return false;
+  if (context === 'blocked') {
+    state.pinchGesture = {
+      context,
+      startDistance: distance,
+      startGridSize: state.gridSize,
+      startLightboxZoom: state.lightboxZoom,
+    };
+    e.preventDefault();
+    return true;
+  }
+  state.pinchGesture = {
+    context,
+    startDistance: distance,
+    startGridSize: state.gridSize,
+    startLightboxZoom: state.lightboxBoostActive ? 300 : state.lightboxZoom,
+  };
+  if (context === 'lightbox') {
+    state.lightboxSwipe = null;
+    state.videoSurfaceSwipe = null;
+    resetLightboxSwipeVisual();
+    const point = touchMidpoint(e.touches);
+    updateLightboxFocusPointFromPointer(point.x, point.y);
+  }
+  e.preventDefault();
+  return true;
+}
+function updateTouchPinch(e) {
+  if (!e || !e.touches || e.touches.length < 2) return false;
+  if (!state.pinchGesture) beginTouchPinch(e);
+  const gesture = state.pinchGesture;
+  if (!gesture || !gesture.startDistance) return false;
+  const ratio = touchDistance(e.touches) / gesture.startDistance;
+  if (gesture.context === 'lightbox') {
+    const point = touchMidpoint(e.touches);
+    const nextZoom = Math.round((gesture.startLightboxZoom || 100) * ratio);
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    updateLightboxFocusPointFromPointer(point.x, point.y);
+    if (photo && !isVideoMedia(photo) && nextZoom < 100) {
+      setLightboxUnderzoomProgress(lightboxUnderzoomProgressForZoom(nextZoom));
+    } else {
+      clearLightboxUnderzoomState();
+    }
+    setLightboxZoom(nextZoom, { fromPinch: true });
+  } else if (gesture.context === 'grid') {
+    setGridScale(Math.round((gesture.startGridSize || 180) * ratio));
+    persistGridScaleSoon();
+  }
+  e.preventDefault();
+  return true;
+}
+function endTouchPinch(e) {
+  if (!state.pinchGesture) return false;
+  if (e && e.touches && e.touches.length >= 2) return false;
+  const gesture = state.pinchGesture;
+  const currentZoom = Number(state.lightboxZoom) || 100;
+  state.pinchGesture = null;
+  if (gesture && gesture.context === 'lightbox') {
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    if (photo && !isVideoMedia(photo)) {
+      if (currentZoom < 75) {
+        startLightboxUnderzoomExit();
+        return true;
+      }
+      if (currentZoom < 100) {
+        clearLightboxUnderzoomState();
+        setLightboxFit();
+      } else {
+        clearLightboxUnderzoomState();
+      }
+    }
+  }
+  return true;
+}
 function syncSidebarUI() {
   const app = $('#app');
   const nav = $('#main-nav');
@@ -1491,7 +2015,7 @@ function toggleSlideshow() {
 function shouldStopSlideshowFromClick(target) {
   if (!state.slideshowPlaying || !target) return false;
   if (!target.closest('#lightbox.open')) return false;
-  if (target.closest('.lightbox-header, .lightbox-info, .lb-nav, .context-menu, button, input, select, label')) return false;
+  if (target.closest('.lightbox-header, .lightbox-info, .lb-nav, .lb-touch-playback-toggle, .context-menu, button, input, select, label')) return false;
   return !!target.closest('.lightbox-body');
 }
 function updateSlideshowSetting(name, value) {
@@ -1512,6 +2036,62 @@ function initLightboxZoom() {
   state.lightboxZoom = 100;
   state.lightboxZoomMode = 'fit';
 }
+function resetLightboxZoomToDefault() {
+  state.lightboxPinchZoomActive = false;
+  state.lightboxZoom = 100;
+  state.lightboxZoomMode = 'fit';
+}
+function currentLightboxViewportOrientation() {
+  const width = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  return width >= height ? 'landscape' : 'portrait';
+}
+function syncLightboxViewportGeometry() {
+  const width = window.visualViewport ? Number(window.visualViewport.width) || 0 : Number(window.innerWidth) || 0;
+  const isPortraitMobile = width > 0 && width <= 900 && currentLightboxViewportOrientation() === 'portrait';
+  if (!isPortraitMobile) {
+    document.documentElement.style.removeProperty('--eg-lightbox-viewport-height');
+    return;
+  }
+  const measuredSafeArea = measuredSafeAreaInsets();
+  const visualHeight = window.visualViewport ? Number(window.visualViewport.height) || 0 : 0;
+  const layoutHeight = Number(window.innerHeight) || 0;
+  const clientHeight = Number(document.documentElement.clientHeight) || 0;
+  const standaloneHeight = (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone)
+    ? Number(window.screen && window.screen.height) || 0
+    : 0;
+  const fullHeight = Math.max(
+    layoutHeight,
+    clientHeight,
+    visualHeight + measuredSafeArea.top + measuredSafeArea.bottom,
+    standaloneHeight,
+    1,
+  );
+  document.documentElement.style.setProperty('--eg-lightbox-viewport-height', `${Math.ceil(fullHeight)}px`);
+}
+function resetLightboxZoomForViewportChange(force = false) {
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) return;
+  syncLightboxViewportGeometry();
+  const orientation = currentLightboxViewportOrientation();
+  const changed = state.lightboxViewportOrientation && state.lightboxViewportOrientation !== orientation;
+  state.lightboxViewportOrientation = orientation;
+  if (force || changed) {
+    state.lightboxPinchZoomActive = false;
+    clearLightboxUnderzoomState();
+    resetLightboxFocusPoint();
+    resetLightboxTemporaryZoom();
+    setLightboxFit();
+  } else {
+    applyLightboxZoom();
+  }
+  updateLightboxHeaderLayout();
+}
+function scheduleLightboxViewportChangeCheck(force = false) {
+  if (!$('#lightbox')?.classList.contains('open')) return;
+  clearTimeout(state.lightboxViewportResizeTimer);
+  state.lightboxViewportResizeTimer = window.setTimeout(() => resetLightboxZoomForViewportChange(force), 120);
+}
 function resetLightboxFocusPoint() {
   state.lightboxFocusPoint = {
     mediaX: 0.5,
@@ -1525,6 +2105,83 @@ function resetLightboxFocusPoint() {
 }
 function resetLightboxTemporaryZoom() {
   syncLightboxTemporaryZoom(false);
+}
+function lightboxUnderzoomProgressForZoom(zoom) {
+  return clampLightboxValue((100 - Math.max(0, Number(zoom) || 0)) / 100, 0, 1);
+}
+function lightboxUnderzoomVisualProgress(progress) {
+  const next = clampLightboxValue(Number(progress) || 0, 0, 1);
+  return Math.pow(next, 1.35);
+}
+function setLightboxUnderzoomProgress(progress, options = {}) {
+  const lightbox = $('#lightbox');
+  if (!lightbox) return;
+  const next = clampLightboxValue(Number(progress) || 0, 0, 1);
+  const visualProgress = lightboxUnderzoomVisualProgress(next);
+  const exiting = !!options.exiting && next > 0.001;
+  const visibleRatio = Math.max(0, 1 - visualProgress);
+  state.lightboxUnderzoomProgress = next;
+  lightbox.classList.toggle('lightbox-underzooming', next > 0.001);
+  lightbox.classList.toggle('lightbox-underzoom-exiting', exiting);
+  lightbox.style.setProperty('--lightbox-underzoom-progress', visualProgress.toFixed(4));
+  lightbox.style.setProperty('--lightbox-underzoom-controls-opacity', visibleRatio.toFixed(4));
+  lightbox.style.setProperty('--lightbox-underzoom-overlay-alpha', visibleRatio.toFixed(4));
+  lightbox.style.setProperty('--lightbox-underzoom-media-opacity', visibleRatio.toFixed(4));
+}
+function setLightboxDismissGesture(progress, translateY = 0) {
+  const lightbox = $('#lightbox');
+  if (!lightbox) return;
+  const next = clampLightboxValue(Number(progress) || 0, 0, 1);
+  const offset = Math.max(0, Number(translateY) || 0);
+  state.lightboxDismissProgress = next;
+  lightbox.classList.toggle('lightbox-dismiss-dragging', next > 0.001);
+  lightbox.style.setProperty('--lightbox-dismiss-progress', next.toFixed(4));
+  lightbox.style.setProperty('--lightbox-dismiss-translate-y', `${offset.toFixed(2)}px`);
+}
+function clearLightboxDismissGesture(options = {}) {
+  const lightbox = $('#lightbox');
+  clearTimeout(state.lightboxDismissResetTimer);
+  state.lightboxDismissResetTimer = null;
+  state.lightboxDismissProgress = 0;
+  if (!lightbox) return;
+  if (options.animate) {
+    lightbox.classList.remove('lightbox-dismiss-dragging');
+    lightbox.style.setProperty('--lightbox-dismiss-progress', '0');
+    lightbox.style.setProperty('--lightbox-dismiss-translate-y', '0px');
+    setLightboxUnderzoomProgress(0);
+    state.lightboxDismissResetTimer = window.setTimeout(() => {
+      state.lightboxDismissResetTimer = null;
+      lightbox.style.removeProperty('--lightbox-dismiss-progress');
+      lightbox.style.removeProperty('--lightbox-dismiss-translate-y');
+      clearLightboxUnderzoomState();
+    }, 220);
+    return;
+  }
+  lightbox.classList.remove('lightbox-dismiss-dragging');
+  lightbox.style.removeProperty('--lightbox-dismiss-progress');
+  lightbox.style.removeProperty('--lightbox-dismiss-translate-y');
+}
+function clearLightboxUnderzoomState() {
+  clearTimeout(state.lightboxUnderzoomExitTimer);
+  state.lightboxUnderzoomExitTimer = null;
+  state.lightboxUnderzoomProgress = 0;
+  const lightbox = $('#lightbox');
+  if (!lightbox) return;
+  lightbox.classList.remove('lightbox-underzooming', 'lightbox-underzoom-exiting');
+  lightbox.style.removeProperty('--lightbox-underzoom-progress');
+  lightbox.style.removeProperty('--lightbox-underzoom-controls-opacity');
+  lightbox.style.removeProperty('--lightbox-underzoom-overlay-alpha');
+  lightbox.style.removeProperty('--lightbox-underzoom-media-opacity');
+}
+function startLightboxUnderzoomExit() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!photo || isVideoMedia(photo)) {
+    exitLightboxToContext();
+    return;
+  }
+  clearTimeout(state.lightboxUnderzoomExitTimer);
+  state.lightboxUnderzoomExitTimer = null;
+  exitLightboxToContext();
 }
 function focusLightboxKeyboardSurface() {
   const lightbox = $('#lightbox');
@@ -1540,14 +2197,16 @@ function lightboxEffectiveZoomState() {
   }
   return { zoom: state.lightboxZoom, mode: state.lightboxZoomMode };
 }
-function setLightboxZoom(value) {
-  state.lightboxZoom = Math.min(300, Math.max(50, Number(value) || 100));
+function setLightboxZoom(value, options = {}) {
+  state.lightboxPinchZoomActive = !!options.fromPinch;
+  const minZoom = options.fromPinch ? 0 : 50;
+  state.lightboxZoom = Math.min(300, Math.max(minZoom, Number(value) || 0));
   state.lightboxZoomMode = 'scale';
+  if (!options.fromPinch) clearLightboxUnderzoomState();
   applyLightboxZoom();
 }
 function setLightboxFit() {
-  state.lightboxZoom = 100;
-  state.lightboxZoomMode = 'fit';
+  resetLightboxZoomToDefault();
   applyLightboxZoom();
 }
 function lightboxMediaNaturalSize() {
@@ -1573,13 +2232,45 @@ function lightboxMediaNaturalSize() {
     height: Number(photo.height) || 0,
   };
 }
+function readCSSPixelValue(value) {
+  const parsed = parseFloat(value || '0');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+function measuredSafeAreaInsets() {
+  let probe = $('#eg-safe-area-probe');
+  if (!probe) {
+    probe = document.createElement('div');
+    probe.id = 'eg-safe-area-probe';
+    probe.style.cssText = [
+      'position:fixed',
+      'inset:0',
+      'visibility:hidden',
+      'pointer-events:none',
+      'padding-top:env(safe-area-inset-top, 0px)',
+      'padding-bottom:env(safe-area-inset-bottom, 0px)',
+      'width:0',
+      'height:0',
+      'overflow:hidden',
+    ].join(';');
+    document.body.appendChild(probe);
+  }
+  const style = window.getComputedStyle(probe);
+  return {
+    top: readCSSPixelValue(style.paddingTop),
+    bottom: readCSSPixelValue(style.paddingBottom),
+  };
+}
 function lightboxViewportMetrics(body) {
   if (!body) return { width: 0, height: 0 };
   const style = window.getComputedStyle(body);
-  const paddingLeft = parseFloat(style.paddingLeft || '0');
-  const paddingRight = parseFloat(style.paddingRight || '0');
-  const paddingTop = parseFloat(style.paddingTop || '0');
-  const paddingBottom = parseFloat(style.paddingBottom || '0');
+  const rootStyle = window.getComputedStyle(document.documentElement);
+  const paddingLeft = readCSSPixelValue(style.paddingLeft);
+  const paddingRight = readCSSPixelValue(style.paddingRight);
+  const paddingTop = readCSSPixelValue(style.paddingTop);
+  const paddingBottom = readCSSPixelValue(style.paddingBottom);
+  const measuredSafeArea = measuredSafeAreaInsets();
+  const safeTop = readCSSPixelValue(rootStyle.getPropertyValue('--eg-safe-area-top')) || measuredSafeArea.top;
+  const safeBottom = readCSSPixelValue(rootStyle.getPropertyValue('--eg-safe-area-bottom')) || measuredSafeArea.bottom;
   return {
     width: Math.max(1, body.clientWidth - paddingLeft - paddingRight),
     height: Math.max(1, body.clientHeight - paddingTop - paddingBottom),
@@ -1587,6 +2278,8 @@ function lightboxViewportMetrics(body) {
     paddingTop,
     paddingRight,
     paddingBottom,
+    safeTop,
+    safeBottom,
   };
 }
 function lightboxViewportSize(body) {
@@ -1597,6 +2290,253 @@ function currentLightboxMediaElement() {
   const photo = state.lightboxPhotos[state.lightboxIndex];
   if (!photo) return null;
   return isVideoMedia(photo) ? $('#lb-video') : $('#lb-img');
+}
+function lightboxSwipePreviewURL(photo, { current = false } = {}) {
+  if (!photo) return '';
+  if (isVideoMedia(photo)) return mediaThumbURL(photo);
+  if (current) {
+    const img = $('#lb-img');
+    if (img && img.currentSrc && img.complete) return img.currentSrc;
+  }
+  return mediaFileURL(photo);
+}
+function setLightboxSwipePreviewImage(selector, photo, options = {}) {
+  const img = $(selector);
+  if (!img) return;
+  const isCurrent = !!options.current;
+  const wantsPosterOnly = !!photo && isVideoMedia(photo);
+  const fallbackURL = photo && !isCurrent && !wantsPosterOnly
+    ? (currentLoadedPreviewURLForPhoto(photo) || mediaThumbURL(photo))
+    : '';
+  const url = fallbackURL || lightboxSwipePreviewURL(photo, options);
+  img.classList.toggle('is-empty', !url);
+  if (!url) {
+    img.removeAttribute('src');
+    return;
+  }
+  img.onerror = () => {
+    if (isVideoMedia(photo)) {
+      img.onerror = null;
+      img.src = videoPosterPlaceholder;
+      return;
+    }
+    img.classList.add('is-empty');
+  };
+  if (img.src !== url) img.src = url;
+  if (photo && !isCurrent && !wantsPosterOnly) {
+    const fullURL = mediaFileURL(photo);
+    const loader = new Image();
+    loader.decoding = 'async';
+    loader.onload = () => {
+      if (!$('#lb-swipe-strip')?.classList.contains('active')) return;
+      if (img.dataset.photoId !== String(photo.id || photo.uuid || '')) return;
+      img.src = fullURL;
+    };
+    img.dataset.photoId = String(photo.id || photo.uuid || '');
+    loader.src = fullURL;
+  } else {
+    img.dataset.photoId = String(photo && (photo.id || photo.uuid) || '');
+  }
+}
+function setLightboxSwipePreviewTransform(x, animate = false) {
+  const strip = $('#lb-swipe-strip');
+  if (!strip) return;
+  const width = Math.max(1, Number(strip.dataset.swipeWidth) || strip.clientWidth || window.innerWidth || 1);
+  strip.classList.toggle('animating', !!animate);
+  [
+    ['#lb-swipe-prev', -1],
+    ['#lb-swipe-current', 0],
+    ['#lb-swipe-next', 1],
+  ].forEach(([selector, offset]) => {
+    const item = $(selector);
+    if (item) item.style.transform = `translate3d(${Math.round(x + offset * width)}px, 0, 0)`;
+  });
+}
+function setupLightboxSwipePreview(swipe) {
+  const strip = $('#lb-swipe-strip');
+  if (!strip || !swipe) return;
+  strip.dataset.swipeWidth = String(Math.max(1, Number(swipe.width) || window.innerWidth || 1));
+  setLightboxSwipePreviewImage('#lb-swipe-prev', state.lightboxPhotos[state.lightboxIndex - 1]);
+  setLightboxSwipePreviewImage('#lb-swipe-current', state.lightboxPhotos[state.lightboxIndex], { current: true });
+  setLightboxSwipePreviewImage('#lb-swipe-next', state.lightboxPhotos[state.lightboxIndex + 1]);
+  strip.classList.add('active');
+  strip.classList.remove('animating');
+  setLightboxSwipePreviewTransform(0, false);
+}
+function refreshLightboxSwipePreviewNeighbor(index) {
+  const swipe = state.lightboxSwipe;
+  const strip = $('#lb-swipe-strip');
+  if (!swipe || !strip || !strip.classList.contains('active')) return;
+  if (index === state.lightboxIndex - 1) setLightboxSwipePreviewImage('#lb-swipe-prev', state.lightboxPhotos[index]);
+  if (index === state.lightboxIndex + 1) setLightboxSwipePreviewImage('#lb-swipe-next', state.lightboxPhotos[index]);
+}
+function resetLightboxSwipePreview({ animate = false } = {}) {
+  const strip = $('#lb-swipe-strip');
+  if (!strip) return;
+  if (animate && strip.classList.contains('active')) {
+    setLightboxSwipePreviewTransform(0, true);
+    window.setTimeout(() => {
+      strip.classList.remove('active', 'animating');
+      setLightboxSwipePreviewTransform(0, false);
+    }, 260);
+    return;
+  }
+  strip.classList.remove('active', 'animating');
+  setLightboxSwipePreviewTransform(0, false);
+}
+function resetLightboxSwipeVisual({ animate = false } = {}) {
+  const media = currentLightboxMediaElement();
+  resetLightboxSwipePreview({ animate });
+  if (media) {
+    media.classList.toggle('lightbox-swipe-animating', !!animate);
+    media.style.removeProperty('--lightbox-swipe-x');
+    media.style.removeProperty('--lightbox-swipe-opacity');
+    if (animate) {
+      window.setTimeout(() => media.classList.remove('lightbox-swipe-active', 'lightbox-swipe-animating'), 260);
+    } else {
+      media.classList.remove('lightbox-swipe-active', 'lightbox-swipe-animating');
+    }
+  }
+}
+function isLightboxSwipeExcludedTarget(target) {
+  if (!target) return true;
+  return !!target.closest('.lightbox-header, .lightbox-info, .lightbox-video-progress, .lightbox-volume-feedback, .lb-nav, .lb-touch-playback-toggle, .context-menu, button, input, select, label, a');
+}
+function beginLightboxSwipe(e) {
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) return false;
+  if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return false;
+  if (state.videoProgressScrubPointerId != null || isLightboxSwipeExcludedTarget(e.target)) return false;
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!photo || isVideoMedia(photo)) return false;
+  const body = $('.lightbox-body');
+  const media = currentLightboxMediaElement();
+  if (!body || !media || media.classList.contains('hidden') || body.classList.contains('zoomed')) return false;
+  if (!e.target.closest('.lightbox-media-frame, #lb-img')) return false;
+  state.lightboxSwipe = {
+    pointerId: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    lastX: e.clientX,
+    lastY: e.clientY,
+    dragging: false,
+    mode: '',
+    width: Math.max(1, body.clientWidth || window.innerWidth || 1),
+    height: Math.max(1, body.clientHeight || window.innerHeight || 1),
+    dismissProgress: 0,
+  };
+  setupLightboxSwipePreview(state.lightboxSwipe);
+  prefetchAdjacentMedia();
+  warmLightboxIndex(state.lightboxIndex - 1);
+  warmLightboxIndex(state.lightboxIndex + 1);
+  if (state.lightboxIndex + 1 >= state.lightboxPhotos.length && lightboxCanLoadMoreForward()) {
+    void ensureLightboxIndexAvailable(state.lightboxIndex + 1)
+      .then(ok => { if (ok) refreshLightboxSwipePreviewNeighbor(state.lightboxIndex + 1); })
+      .catch(() => {});
+  }
+  if (body.setPointerCapture) {
+    try { body.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+  return true;
+}
+function updateLightboxSwipe(e) {
+  const swipe = state.lightboxSwipe;
+  if (!swipe || swipe.pointerId !== e.pointerId) return false;
+  const dx = e.clientX - swipe.startX;
+  const dy = e.clientY - swipe.startY;
+  const absX = Math.abs(dx);
+  const absY = Math.abs(dy);
+  if (!swipe.dragging) {
+    if (dy > 0 && absY > 16 && absY > absX * 1.15) {
+      swipe.dragging = true;
+      swipe.mode = 'dismiss';
+    } else {
+      if (absX < 12 || absX < absY * 1.2) return false;
+      swipe.dragging = true;
+      swipe.mode = 'horizontal';
+    }
+  }
+  const media = currentLightboxMediaElement();
+  if (!media) return false;
+  if (swipe.mode === 'dismiss') {
+    const downY = Math.max(0, dy);
+    const dismissProgress = clampLightboxValue(downY / swipe.height, 0, 1);
+    swipe.lastY = e.clientY;
+    swipe.dismissProgress = dismissProgress;
+    setLightboxDismissGesture(dismissProgress, downY);
+    setLightboxUnderzoomProgress(dismissProgress);
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
+  const atStart = state.lightboxIndex <= 0 && dx > 0;
+  const atEnd = state.lightboxIndex >= state.lightboxPhotos.length - 1 && !lightboxCanLoadMoreForward() && dx < 0;
+  const resistance = atStart || atEnd ? 0.38 : 1;
+  const x = dx * resistance;
+  const opacity = Math.max(0.72, 1 - Math.min(0.24, absX / swipe.width * 0.28));
+  warmLightboxIndex(dx < 0 ? state.lightboxIndex + 1 : state.lightboxIndex - 1);
+  swipe.lastX = e.clientX;
+  setLightboxSwipePreviewTransform(x, false);
+  media.classList.add('lightbox-swipe-active');
+  media.classList.remove('lightbox-swipe-animating');
+  media.style.setProperty('--lightbox-swipe-opacity', '0');
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
+async function endLightboxSwipe(e) {
+  const swipe = state.lightboxSwipe;
+  if (!swipe || swipe.pointerId !== e.pointerId) return false;
+  state.lightboxSwipe = null;
+  const body = $('.lightbox-body');
+  if (body && body.releasePointerCapture) {
+    try { body.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+  if (swipe.mode === 'dismiss') {
+    const cancelled = e.type === 'pointercancel';
+    const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.25;
+    if (shouldExit) {
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
+      e.preventDefault();
+      e.stopPropagation();
+      clearLightboxDismissGesture();
+      startLightboxUnderzoomExit();
+      return true;
+    }
+    clearLightboxDismissGesture({ animate: !!swipe.dragging });
+    if (swipe.dragging) {
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 320;
+      e.preventDefault();
+      e.stopPropagation();
+      return true;
+    }
+    return false;
+  }
+  const dx = (swipe.lastX || e.clientX) - swipe.startX;
+  const threshold = Math.min(120, Math.max(56, swipe.width * 0.18));
+  const dir = dx < 0 ? 1 : -1;
+  const cancelled = e.type === 'pointercancel';
+  const canSwitch = !cancelled && Math.abs(dx) >= threshold && (dir < 0 ? state.lightboxIndex > 0 : (state.lightboxIndex < state.lightboxPhotos.length - 1 || lightboxCanLoadMoreForward()));
+  const media = currentLightboxMediaElement();
+  if (!swipe.dragging || !canSwitch || !media) {
+    resetLightboxSwipeVisual({ animate: !!swipe.dragging });
+    if (swipe.dragging) {
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return !!swipe.dragging;
+  }
+  state.lightboxSwipeClickSuppressUntil = Date.now() + 520;
+  e.preventDefault();
+  e.stopPropagation();
+  setLightboxSwipePreviewTransform(dir > 0 ? -swipe.width : swipe.width, true);
+  media.classList.add('lightbox-swipe-animating');
+  media.style.setProperty('--lightbox-swipe-opacity', '0');
+  await new Promise(resolve => setTimeout(resolve, 230));
+  resetLightboxSwipeVisual();
+  await lbNav(dir);
+  return true;
 }
 function clampLightboxValue(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -1633,6 +2573,7 @@ function syncLightboxTemporaryZoom(active) {
   applyLightboxZoom();
 }
 function applyLightboxZoom() {
+  if ($('#lightbox')?.classList.contains('open')) syncLightboxViewportGeometry();
   const img = $('#lb-img');
   const video = $('#lb-video');
   const label = $('#lb-zoom-value');
@@ -1651,8 +2592,8 @@ function applyLightboxZoom() {
       ? Math.min(viewportWidth / width, viewportHeight / height)
       : Math.min(viewportWidth / width, viewportHeight / height, 1);
     const displayScale = fitScale * (effective.zoom / 100);
-    const targetWidth = Math.max(1, Math.round(width * displayScale));
-    const targetHeight = Math.max(1, Math.round(height * displayScale));
+    const targetWidth = Math.max(1, Math.ceil(width * displayScale));
+    const targetHeight = Math.max(1, Math.ceil(height * displayScale));
     if (img) {
       img.style.transform = '';
       img.style.maxWidth = 'none';
@@ -1698,7 +2639,7 @@ function applyLightboxZoom() {
   }
   if (body) body.classList.toggle('zoomed', zoomed);
   if (fitBtn) fitBtn.classList.toggle('active', effective.mode === 'fit' && !state.lightboxBoostActive);
-  if (label) label.textContent = `${effective.zoom}%`;
+  if (label) label.textContent = `${effective.mode === 'fit' && !state.lightboxBoostActive ? 100 : effective.zoom}%`;
   if (input) {
     input.value = String(state.lightboxZoom);
     updateRangeProgress(input);
@@ -1927,7 +2868,15 @@ function applyLibraryBranding() {
   root.style.setProperty('--nav-text-muted', isDark ? 'rgba(245,239,230,.72)' : 'rgba(36,29,24,.82)');
   root.style.setProperty('--topbar-text', isDark ? '#f5efe6' : '#253933');
   root.style.setProperty('--topbar-text-muted', isDark ? 'rgba(245,239,230,.72)' : 'rgba(36,29,24,.78)');
-  document.title = current && current.name ? `${current.name} - EchoGallery` : 'EchoGallery';
+  const appName = currentAppDisplayName();
+  document.title = current && current.name ? `${current.name} - ${appName}` : appName;
+  let appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+  if (!appleTitle) {
+    appleTitle = document.createElement('meta');
+    appleTitle.name = 'apple-mobile-web-app-title';
+    document.head.appendChild(appleTitle);
+  }
+  appleTitle.content = appName;
   let favicon = document.querySelector('link[rel="icon"]');
   if (!favicon) {
     favicon = document.createElement('link');
@@ -1941,6 +2890,15 @@ function applyLibraryBranding() {
     favicon.dataset.logoUrl = '';
     favicon.href = createTextFavicon(fallbackText);
   }
+  window.dispatchEvent(new CustomEvent('eg:pwa-gallery-meta', {
+    detail: {
+      url: `${location.origin}/`,
+      title: current && current.name ? `${current.name} - ${appName}` : appName,
+      displayName: current && current.name ? current.name : appName,
+      icon: logoURL || favicon.href || '/static/pwa-icon.png',
+      themeColor: accent,
+    },
+  }));
   const navLogo = document.querySelector('.nav-logo');
   if (navLogo) {
     navLogo.innerHTML = renderNavLogo();
@@ -2487,7 +3445,13 @@ async function fetchLibraryBatchBuildStatus() {
   return api.get('/api/settings/libraries/build-all');
 }
 async function startLibraryBatchBuild(options = {}) {
-  return api.post('/api/settings/libraries/build-all', { aggressive: !!options.aggressive });
+  return api.post('/api/settings/libraries/build-all', {
+    aggressive: !!options.aggressive,
+    build_thumbnails_after_scan: !!options.buildThumbnailsAfterScan,
+    move_legacy_thumbnails: !!options.moveLegacyThumbnails,
+    clean_thumbnail_files: !!options.cleanThumbnailFiles,
+    build_playback_caches: !!options.buildPlaybackCaches,
+  });
 }
 async function cancelLibraryBatchBuild() {
   return api.del('/api/settings/libraries/build-all');
@@ -2509,10 +3473,36 @@ async function startLibraryBatchThumbnailBuild(options = {}) {
     aggressive: !!options.aggressive,
     move_legacy_thumbnails: !!options.moveLegacyThumbnails,
     clean_thumbnail_files: !!options.cleanThumbnailFiles,
+    build_playback_caches: !!options.buildPlaybackCaches,
   });
 }
 async function cancelLibraryBatchThumbnailBuild() {
   return api.del('/api/settings/libraries/thumbnails/build-all');
+}
+async function fetchPlaybackCaches() {
+  return api.get('/api/settings/playback-cache');
+}
+function playbackCacheExistsForPhoto(photo) {
+  if (!photo || !photo.uuid) return false;
+  return (state.playbackCacheItems || []).some(item => String(item && item.uuid || '') === String(photo.uuid));
+}
+async function ensurePlaybackCacheItemsLoaded() {
+  if (state.playbackCacheItemsLoaded) return state.playbackCacheItems;
+  await refreshPlaybackCacheItems();
+  state.playbackCacheItemsLoaded = true;
+  return state.playbackCacheItems;
+}
+async function deletePlaybackCaches(uuids) {
+  return api.del('/api/settings/playback-cache', { uuids: Array.isArray(uuids) ? uuids : [] });
+}
+async function fetchPlaybackCacheBuildStatus() {
+  return api.get('/api/settings/playback-cache/build');
+}
+async function startPlaybackCacheBuild() {
+  return api.post('/api/settings/playback-cache/build', {});
+}
+async function cancelPlaybackCacheBuild() {
+  return api.del('/api/settings/playback-cache/build');
 }
 async function setLibraryBatchThumbnailBuildExitAfterComplete(enabled) {
   return api.put('/api/settings/libraries/thumbnails/build-all/exit-after-complete', { enabled });
@@ -2541,8 +3531,7 @@ function applyServerSettings(data = {}) {
   state.slideshowMode = data.slideshow_mode === 'sequential' ? 'sequential' : 'random';
   state.slideshowLoop = data.slideshow_loop !== false;
   state.slideshowInterval = Math.min(30000, Math.max(1000, Number(data.slideshow_interval) || 5000));
-  state.lightboxZoom = Math.min(300, Math.max(50, Number(data.lightbox_zoom) || 100));
-  state.lightboxZoomMode = state.lightboxZoom === 100 ? 'fit' : 'scale';
+  resetLightboxZoomToDefault();
   state.experimentalAutoplayVideo = !!data.experimental_autoplay_video;
   state.videoAutoplayNext = !!data.video_autoplay_next;
   state.videoSectionMinMinutes = Math.min(240, Math.max(1, Number(data.video_section_min_minutes) || 10));
@@ -2582,7 +3571,7 @@ function buildSettingsPayload() {
     slideshow_mode: state.slideshowMode,
     slideshow_loop: !!state.slideshowLoop,
     slideshow_interval: state.slideshowInterval,
-    lightbox_zoom: state.lightboxZoom,
+    lightbox_zoom: 100,
     experimental_autoplay_video: !!state.experimentalAutoplayVideo,
     video_autoplay_next: !!state.videoAutoplayNext,
     video_section_min_minutes: state.videoSectionMinMinutes || 10,
@@ -2647,6 +3636,8 @@ function toggleVideoPlayback() {
   if (!video || video.classList.contains('hidden')) return false;
   if (video.paused) video.play().catch(() => {});
   else video.pause();
+  syncTouchPlaybackButton(video);
+  updateMediaSessionPlaybackState(video);
   return true;
 }
 function stepVideoFrame(direction) {
@@ -2688,7 +3679,12 @@ function jumpVideoSection(direction) {
 function adjustVideoVolume(delta) {
   const video = $('#lb-video');
   if (!video || video.classList.contains('hidden')) return false;
-  video.volume = Math.max(0, Math.min(1, video.volume + delta / 100));
+  setVideoVolumeValue(video.volume + delta / 100, video);
+  return true;
+}
+function setVideoVolumeValue(value, video = $('#lb-video')) {
+  if (!video || video.classList.contains('hidden')) return false;
+  applyVideoVolumeOutput(video, value);
   video.muted = false;
   showVolumeOverlay(video);
   persistVideoPlaybackPreferenceSoon(video);
@@ -2715,7 +3711,7 @@ function showVolumeOverlay(video = $('#lb-video')) {
   const fill = $('#lb-volume-fill');
   const label = $('#lb-volume-label');
   if (!overlay || !fill || !label) return;
-  const value = video.muted ? 0 : Math.round((video.volume || 0) * 100);
+  const value = video.muted ? 0 : Math.round(effectiveVideoVolume(video) * 100);
   fill.style.width = `${value}%`;
   label.textContent = video.muted ? '静音' : `${value}%`;
   overlay.classList.add('show');
@@ -2991,6 +3987,14 @@ const state = {
   lightboxPointerClientX: 0,
   lightboxPointerClientY: 0,
   lightboxPointerInside: false,
+  pinchGesture: null,
+  lightboxPinchZoomActive: false,
+  lightboxUnderzoomProgress: 0,
+  lightboxUnderzoomExitTimer: null,
+  lightboxDismissProgress: 0,
+  lightboxDismissResetTimer: null,
+  lightboxViewportOrientation: '',
+  lightboxViewportResizeTimer: null,
   gridGap: 2,
   thumbRadius: 2,
   serverSettings: {
@@ -3049,13 +4053,22 @@ const state = {
   settingsScrollRestorePending: true,
   lightboxPlaybackToken: 0,
   lightboxMediaLoading: false,
+  lightboxPreviousThemeColor: '',
+  lightboxHadThemeColorMeta: true,
   lightboxUiIdleTimer: null,
   lightboxVolumeTimer: null,
+  lightboxVideoAudioContext: null,
+  lightboxVideoAudioSource: null,
+  lightboxVideoGainNode: null,
+  lightboxVideoAudioElement: null,
   lightboxVideoProgressTimer: null,
   videoProgressScrubPointerId: null,
   videoProgressClickSuppressUntil: 0,
   videoSurfaceLastTap: null,
   videoSurfaceTapTimer: null,
+  videoSurfaceSwipe: null,
+  lightboxSwipe: null,
+  lightboxSwipeClickSuppressUntil: 0,
   lightboxLastPointerType: '',
   autoplayMutedHintShown: false,
   viewScrollPositions: {},
@@ -3078,14 +4091,16 @@ const state = {
   searchDownloadAbortController: null,
   searchDownloadLoading: false,
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
-  videoBookmarks: loadVideoBookmarks(),
+  pwaSettings: loadPWASettings(),
+  legacyVideoBookmarks: loadLegacyVideoBookmarks(),
   videoBookmarkSaveTimer: null,
   globalVideoVolume: loadGlobalVideoVolume(),
   videoPlaybackPreferences: {},
-  videoPlaybackPreferenceSaveTimer: null,
+  videoPlaybackPreferenceRequests: {},
+  videoPlaybackPreferenceSaveQueue: {},
+  videoPlaybackPreferenceSaveTimers: {},
   activePreloadJobs: new Set(),
   visibleThumbnailWarmSignatures: {},
-  autoUpdateEnabled: localStorage.getItem('echogallery_auto_update') === '1',
   libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
   libraryBuildPollTimer: null,
   libraryBatchBuildStatus: { status: 'idle', message: '当前没有批量扫描任务' },
@@ -3095,10 +4110,18 @@ const state = {
   libraryBatchWorkflowAggressive: localStorage.getItem(libraryBatchWorkflowAggressiveStorageKey) === '1',
   libraryBatchWorkflowMoveLegacyThumbnails: localStorage.getItem(libraryBatchWorkflowMoveLegacyStorageKey) === '1',
   libraryBatchWorkflowCleanThumbnailFiles: localStorage.getItem(libraryBatchWorkflowCleanFilesStorageKey) === '1',
+  libraryBatchWorkflowBuildPlaybackCaches: localStorage.getItem(libraryBatchWorkflowPlaybackCacheStorageKey) === '1',
   libraryBatchWorkflowPhase: localStorage.getItem(libraryBatchWorkflowPhaseStorageKey) || '',
+  libraryBatchWorkflowStartPending: false,
   libraryBatchThumbnailBuildStatus: { status: 'idle', message: '当前没有批量缩略图任务' },
   libraryBatchThumbnailBuildPollTimer: null,
   libraryBatchThumbnailBuildCancelPending: false,
+  playbackCacheBuildStatus: { status: 'idle', message: '当前没有播放兼容缓存任务' },
+  playbackCacheBuildPollTimer: null,
+  playbackCacheBuildCancelPending: false,
+  playbackCacheItems: [],
+  playbackCacheItemsLoaded: false,
+  playbackCacheSelected: new Set(),
   thumbnailBuildStatus: { status: 'idle', message: '当前没有缩略图任务' },
   thumbnailBuildPollTimer: null,
   thumbnailBuildCancelPending: false,
@@ -3342,6 +4365,212 @@ function isLibraryBatchThumbnailBuildActive(status = state.libraryBatchThumbnail
   return value === 'running' || value === 'cancelling';
 }
 
+function isPlaybackCacheBuildActive(status = state.playbackCacheBuildStatus) {
+  const value = String(status && status.status || '');
+  return value === 'running' || value === 'cancelling';
+}
+
+function playbackCacheBuildProgressPercent(status = state.playbackCacheBuildStatus) {
+  const done = Math.max(0, Number(status && status.done) || 0);
+  const total = Math.max(0, Number(status && status.total) || 0);
+  return total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+}
+
+function stopPlaybackCacheBuildPolling() {
+  if (state.playbackCacheBuildPollTimer) {
+    clearTimeout(state.playbackCacheBuildPollTimer);
+    state.playbackCacheBuildPollTimer = null;
+  }
+}
+
+async function pollPlaybackCacheBuildStatus() {
+  stopPlaybackCacheBuildPolling();
+  try {
+    const status = await fetchPlaybackCacheBuildStatus();
+    const previousStatus = String(state.playbackCacheBuildStatus && state.playbackCacheBuildStatus.status || '');
+    state.playbackCacheBuildStatus = status || { status: 'idle', message: '当前没有播放兼容缓存任务' };
+    state.playbackCacheBuildCancelPending = isPlaybackCacheBuildActive(state.playbackCacheBuildStatus) && state.playbackCacheBuildCancelPending;
+    syncPlaybackCacheModal();
+    const currentStatus = String(state.playbackCacheBuildStatus.status || '');
+    if (isPlaybackCacheBuildActive(state.playbackCacheBuildStatus)) {
+      state.playbackCacheBuildPollTimer = setTimeout(pollPlaybackCacheBuildStatus, 900);
+    } else if (previousStatus === 'running' || previousStatus === 'cancelling') {
+      await refreshPlaybackCacheItems();
+      syncPlaybackCacheModal();
+    } else if (currentStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'cancelled') {
+      await refreshPlaybackCacheItems();
+      syncPlaybackCacheModal();
+    }
+  } catch (e) {
+    console.error('播放兼容缓存状态获取失败', e);
+    state.playbackCacheBuildPollTimer = setTimeout(pollPlaybackCacheBuildStatus, 1800);
+  }
+}
+
+async function refreshPlaybackCacheItems() {
+  const data = await fetchPlaybackCaches();
+  const items = Array.isArray(data && data.items) ? data.items : [];
+  state.playbackCacheItems = items;
+  state.playbackCacheItemsLoaded = true;
+  const available = new Set(items.map(item => String(item.uuid || '')).filter(Boolean));
+  state.playbackCacheSelected = new Set([...state.playbackCacheSelected].filter(uuid => available.has(uuid)));
+  return items;
+}
+
+function playbackCacheSelectionAllChecked() {
+  const items = Array.isArray(state.playbackCacheItems) ? state.playbackCacheItems : [];
+  return items.length > 0 && items.every(item => state.playbackCacheSelected.has(String(item.uuid || '')));
+}
+
+function renderPlaybackCacheRows() {
+  const items = Array.isArray(state.playbackCacheItems) ? state.playbackCacheItems : [];
+  if (!items.length) {
+    return `<div class="playback-cache-empty">当前没有已生成的播放兼容缓存。</div>`;
+  }
+  return items.map(item => {
+    const uuid = String(item.uuid || '');
+    const checked = state.playbackCacheSelected.has(uuid);
+    const name = item.original_name || uuid || '未知媒体';
+    const detail = [
+      item.mime_type || '未知类型',
+      formatSize(Number(item.size) || 0),
+      item.created_at ? `生成于 ${formatDateTime(item.created_at)}` : '',
+    ].filter(Boolean).join(' · ');
+    return `<label class="playback-cache-row ${checked ? 'is-selected' : ''}">
+      <span class="settings-toggle-switch playback-cache-check">
+        <input type="checkbox" name="playback-cache-item" value="${escapeHTML(uuid)}" ${checked ? 'checked' : ''}>
+        <span class="settings-toggle-slider" aria-hidden="true"></span>
+      </span>
+      <span class="playback-cache-main">
+        <strong>${escapeHTML(name)}</strong>
+        <span>${escapeHTML(detail)}</span>
+        <small title="${escapeHTML(item.cache_path || '')}">${escapeHTML(item.cache_path || '')}</small>
+      </span>
+    </label>`;
+  }).join('');
+}
+
+function renderPlaybackCacheModalContent() {
+  const status = state.playbackCacheBuildStatus || {};
+  const active = isPlaybackCacheBuildActive(status);
+  const percent = playbackCacheBuildProgressPercent(status);
+  const selectedCount = state.playbackCacheSelected.size;
+  const items = Array.isArray(state.playbackCacheItems) ? state.playbackCacheItems : [];
+  const statusParts = [
+    status.message || '当前没有播放兼容缓存任务',
+    Number(status.total) > 0 ? `${Number(status.done) || 0} / ${Number(status.total) || 0}` : '',
+    Number(status.generated) > 0 ? `生成 ${Number(status.generated)}` : '',
+    Number(status.skipped) > 0 ? `跳过 ${Number(status.skipped)}` : '',
+    Number(status.failed) > 0 ? `失败 ${Number(status.failed)}` : '',
+  ].filter(Boolean);
+  return `<div class="playback-cache-toolbar">
+    <label class="playback-cache-select-all">
+      <span class="settings-toggle-switch playback-cache-check">
+        <input id="playback-cache-select-all" type="checkbox" ${playbackCacheSelectionAllChecked() ? 'checked' : ''} ${items.length ? '' : 'disabled'}>
+        <span class="settings-toggle-slider" aria-hidden="true"></span>
+      </span>
+      <span>全选当前缓存</span>
+    </label>
+    <span>${escapeHTML(items.length ? `共 ${items.length} 个缓存，已选 ${selectedCount} 个` : '暂无缓存')}</span>
+  </div>
+  <div class="playback-cache-progress">
+    <span style="width:${percent}%"></span>
+  </div>
+  <div class="playback-cache-status">${statusParts.map(part => `<span>${escapeHTML(part)}</span>`).join('')}</div>
+  ${status.error ? `<div class="playback-cache-error">${escapeHTML(status.error)}</div>` : ''}
+  <div class="playback-cache-list">${renderPlaybackCacheRows()}</div>
+  <div class="modal-footer playback-cache-actions">
+    <button class="btn" id="playback-cache-close" type="button">关闭</button>
+    <button class="btn" id="playback-cache-delete" type="button" ${selectedCount ? '' : 'disabled'}>删除所选</button>
+    <button class="btn" id="playback-cache-cancel-build" type="button" ${active ? '' : 'disabled'}>${state.playbackCacheBuildCancelPending ? '正在取消…' : '取消构建'}</button>
+    <button class="btn btn-primary" id="playback-cache-start-build" type="button" ${active ? 'disabled' : ''}>开始转码 / 封装</button>
+  </div>`;
+}
+
+function bindPlaybackCacheModalHandlers() {
+  const modal = $('#playback-cache-modal');
+  if (!modal) return;
+  $('#playback-cache-close')?.addEventListener('click', closePlaybackCacheModal);
+  $('#playback-cache-select-all')?.addEventListener('change', e => {
+    const checked = !!e.target.checked;
+    state.playbackCacheSelected = new Set(checked ? state.playbackCacheItems.map(item => String(item.uuid || '')).filter(Boolean) : []);
+    syncPlaybackCacheModal();
+  });
+  $$('input[name="playback-cache-item"]', modal).forEach(input => {
+    input.addEventListener('change', e => {
+      const uuid = String(e.target.value || '');
+      if (!uuid) return;
+      if (e.target.checked) state.playbackCacheSelected.add(uuid);
+      else state.playbackCacheSelected.delete(uuid);
+      syncPlaybackCacheModal();
+    });
+  });
+  $('#playback-cache-delete')?.addEventListener('click', async () => {
+    const uuids = [...state.playbackCacheSelected];
+    if (!uuids.length) return;
+    try {
+      await deletePlaybackCaches(uuids);
+      state.playbackCacheSelected.clear();
+      await refreshPlaybackCacheItems();
+      syncPlaybackCacheModal();
+      showToast('已删除所选播放兼容缓存');
+    } catch (e) {
+      alert('删除播放兼容缓存失败: ' + ((e && e.error) || e));
+    }
+  });
+  $('#playback-cache-start-build')?.addEventListener('click', async () => {
+    try {
+      state.playbackCacheBuildStatus = await startPlaybackCacheBuild();
+      state.playbackCacheBuildCancelPending = false;
+      syncPlaybackCacheModal();
+      void pollPlaybackCacheBuildStatus();
+    } catch (e) {
+      alert('启动播放兼容缓存构建失败: ' + ((e && e.error) || e));
+    }
+  });
+  $('#playback-cache-cancel-build')?.addEventListener('click', async () => {
+    if (state.playbackCacheBuildCancelPending || !isPlaybackCacheBuildActive()) return;
+    state.playbackCacheBuildCancelPending = true;
+    syncPlaybackCacheModal();
+    try {
+      state.playbackCacheBuildStatus = await cancelPlaybackCacheBuild();
+      void pollPlaybackCacheBuildStatus();
+    } catch (e) {
+      state.playbackCacheBuildCancelPending = false;
+      syncPlaybackCacheModal();
+      alert('取消播放兼容缓存构建失败: ' + ((e && e.error) || e));
+    }
+  });
+}
+
+function syncPlaybackCacheModal() {
+  const content = $('#playback-cache-content');
+  if (!content) return;
+  content.innerHTML = renderPlaybackCacheModalContent();
+  bindPlaybackCacheModalHandlers();
+}
+
+async function openPlaybackCacheModal() {
+  const modal = $('#playback-cache-modal');
+  if (!modal) return;
+  modal.classList.add('open');
+  syncPlaybackCacheModal();
+  try {
+    await Promise.all([refreshPlaybackCacheItems(), fetchPlaybackCacheBuildStatus().then(status => {
+      state.playbackCacheBuildStatus = status || state.playbackCacheBuildStatus;
+    })]);
+  } catch (e) {
+    console.error('播放兼容缓存加载失败', e);
+    showToast('播放兼容缓存加载失败');
+  }
+  syncPlaybackCacheModal();
+  if (isPlaybackCacheBuildActive()) void pollPlaybackCacheBuildStatus();
+}
+
+function closePlaybackCacheModal() {
+  $('#playback-cache-modal')?.classList.remove('open');
+}
+
 async function pollThumbnailBuildStatus() {
   stopThumbnailBuildPolling();
   try {
@@ -3429,8 +4658,14 @@ async function pollLibraryBatchBuildStatus() {
       if (state.libraryBatchBuildStatus.status === 'completed') {
         setLibraryBatchWorkflowPhase('thumbnails');
         try {
-          await syncLibraryBatchWorkflowSelections();
-          await openLibraryBatchThumbnailBuildWorkflow({ aggressive: state.libraryBatchWorkflowAggressive, startedByWorkflow: true });
+          const thumbnailStatus = await fetchLibraryBatchThumbnailBuildStatus();
+          state.libraryBatchThumbnailBuildStatus = thumbnailStatus || { status: 'idle', message: '当前没有批量缩略图任务' };
+          if (isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus)) {
+            stopLibraryBatchThumbnailBuildPolling();
+            state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
+          } else {
+            await openLibraryBatchThumbnailBuildWorkflow({ aggressive: state.libraryBatchWorkflowAggressive, startedByWorkflow: true });
+          }
         } catch (workflowError) {
           clearLibraryBatchWorkflowPhase();
           alert('启动批量缩略图失败: ' + ((workflowError && workflowError.error) || workflowError.message || workflowError));
@@ -3544,6 +4779,7 @@ async function openLibraryBatchBuildWorkflow(options = {}) {
       showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed', '批量扫描已完成'));
     }
   } catch (e) {
+    if (options.startedByWorkflow) throw e;
     alert('批量扫描资源库失败: ' + ((e && e.error) || e));
   }
 }
@@ -3554,6 +4790,7 @@ async function openLibraryBatchThumbnailBuildWorkflow(options = {}) {
       ...options,
       moveLegacyThumbnails: Object.prototype.hasOwnProperty.call(options, 'moveLegacyThumbnails') ? !!options.moveLegacyThumbnails : !!state.libraryBatchWorkflowMoveLegacyThumbnails,
       cleanThumbnailFiles: Object.prototype.hasOwnProperty.call(options, 'cleanThumbnailFiles') ? !!options.cleanThumbnailFiles : !!state.libraryBatchWorkflowCleanThumbnailFiles,
+      buildPlaybackCaches: Object.prototype.hasOwnProperty.call(options, 'buildPlaybackCaches') ? !!options.buildPlaybackCaches : !!state.libraryBatchWorkflowBuildPlaybackCaches,
     };
     const status = await startLibraryBatchThumbnailBuild(requestOptions);
     state.libraryBatchThumbnailBuildStatus = status || { status: 'idle', message: '当前没有批量缩略图任务' };
@@ -3656,26 +4893,69 @@ function setLightboxMediaLoading(loading) {
 
 // ── 右键菜单 ──────────────────────────────────────────
 let _ctxMenu = null;
-function showContextMenu(x, y, items) {
+function positionContextMenu(menu, x, y, options = {}) {
+  const margin = 12;
+  const gap = Number.isFinite(options.gap) ? options.gap : 8;
+  const anchor = options.anchor;
+  const anchorRect = options.anchorRect || (anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null);
+  const menuRect = menu.getBoundingClientRect();
+  let left = Number.isFinite(x) ? x : margin;
+  let top = Number.isFinite(y) ? y : margin;
+
+  if (anchorRect) {
+    if (options.align === 'end') {
+      left = anchorRect.right - menuRect.width;
+    } else if (options.align === 'center') {
+      left = anchorRect.left + (anchorRect.width - menuRect.width) / 2;
+    } else {
+      left = anchorRect.left;
+    }
+
+    if (options.vertical === 'top') {
+      top = anchorRect.top;
+    } else if (options.vertical === 'above') {
+      top = anchorRect.top - menuRect.height - gap;
+    } else if (options.vertical === 'auto') {
+      const below = anchorRect.bottom + gap;
+      const above = anchorRect.top - menuRect.height - gap;
+      top = below + menuRect.height <= window.innerHeight - margin
+        ? below
+        : above;
+    } else {
+      top = anchorRect.bottom + gap;
+    }
+  }
+
+  left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - menuRect.width - margin));
+  top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - menuRect.height - margin));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = '';
+}
+function showContextMenu(x, y, items, options = {}) {
   closeContextMenu();
   const menu = el('div', 'context-menu');
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+  menu.style.left = `${Number.isFinite(x) ? x : 12}px`;
+  menu.style.top = `${Number.isFinite(y) ? y : 12}px`;
+  menu.style.visibility = 'hidden';
   items.forEach(item => {
     if (item === '-') {
       const sep = el('div', 'context-menu-separator');
       menu.appendChild(sep); return;
     }
-    const btn = el('button', `context-menu-item${item.danger ? ' danger' : ''}`);
+    const btn = el('button', `context-menu-item${item.danger ? ' danger' : ''}${item.disabled ? ' disabled' : ''}`);
+    btn.disabled = !!item.disabled;
     btn.innerHTML = `<span class="context-menu-icon">${item.icon || ''}</span><span>${escapeHTML(item.label)}</span>`;
-    btn.addEventListener('click', () => { closeContextMenu(); item.action(); });
+    btn.addEventListener('click', () => {
+      if (item.disabled) return;
+      closeContextMenu();
+      item.action();
+    });
     menu.appendChild(btn);
   });
   document.body.appendChild(menu);
   _ctxMenu = menu;
-  const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth)   menu.style.left = (x - rect.width) + 'px';
-  if (rect.bottom > window.innerHeight) menu.style.top  = (y - rect.height) + 'px';
+  positionContextMenu(menu, x, y, options);
 }
 function closeContextMenu() {
   if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; }
@@ -3723,6 +5003,7 @@ ${renderEditAlbumModal()}
 ${renderShareModal()}
 ${renderAlbumPickerModal()}
 ${renderShareListModal()}
+${renderPlaybackCacheModal()}
 ${renderTimelineLoadAllModal()}
 ${renderRandomAlbumLoadAllModal()}
 ${renderLibraryLogoGuideModal()}`;
@@ -3774,10 +5055,7 @@ function bindNav() {
   window.addEventListener('resize', () => {
     syncSidebarUI();
     if (!isCompactNavLayout()) closeNavPicker();
-    if ($('#lightbox')?.classList.contains('open')) {
-      applyLightboxZoom();
-      updateLightboxHeaderLayout();
-    }
+    scheduleLightboxViewportChangeCheck(false);
   });
   document.addEventListener('click', e => {
     const nav = $('#main-nav');
@@ -4957,7 +6235,8 @@ function updateVideoBookmarkThumbIndicators(photoOrId = null) {
     ? `.photo-thumb[data-id="${targetId}"]`
     : '.photo-thumb[data-kind="video"]';
   document.querySelectorAll(thumbSelector).forEach(thumb => {
-    const count = getVideoBookmarkCountByKey(thumb.dataset.id);
+    const photo = findKnownPhotoByID(Number(thumb.dataset.id));
+    const count = getVideoBookmarkCountByKey(thumb.dataset.id) || Math.max(0, Number(photo && photo.video_bookmark_count) || 0);
     const existing = thumb.querySelector('.video-bookmark-badge');
     if (count > 0 && !existing) {
       thumb.insertAdjacentHTML('beforeend', `<span class="video-bookmark-badge" title="视频书签 ${count}/10" aria-label="视频书签 ${count}/10">${icons.bookmark}<span class="video-bookmark-count">${count}</span></span>`);
@@ -4993,6 +6272,7 @@ function persistLibraryBatchWorkflowPrefs() {
   localStorage.setItem(libraryBatchWorkflowAggressiveStorageKey, state.libraryBatchWorkflowAggressive ? '1' : '0');
   localStorage.setItem(libraryBatchWorkflowMoveLegacyStorageKey, state.libraryBatchWorkflowMoveLegacyThumbnails ? '1' : '0');
   localStorage.setItem(libraryBatchWorkflowCleanFilesStorageKey, state.libraryBatchWorkflowCleanThumbnailFiles ? '1' : '0');
+  localStorage.setItem(libraryBatchWorkflowPlaybackCacheStorageKey, state.libraryBatchWorkflowBuildPlaybackCaches ? '1' : '0');
 }
 
 function setLibraryBatchWorkflowPhase(phase = '') {
@@ -5002,6 +6282,7 @@ function setLibraryBatchWorkflowPhase(phase = '') {
 }
 
 function clearLibraryBatchWorkflowPhase() {
+  state.libraryBatchWorkflowStartPending = false;
   setLibraryBatchWorkflowPhase('');
 }
 
@@ -5013,6 +6294,7 @@ function libraryBatchWorkflowOptionLabels() {
   const labels = [];
   if (state.libraryBatchWorkflowMoveLegacyThumbnails) labels.push('整理旧版资源库');
   if (state.libraryBatchWorkflowCleanThumbnailFiles) labels.push('清理文件');
+  if (state.libraryBatchWorkflowBuildPlaybackCaches) labels.push('转码 / 封装不支持的视频流');
   return labels;
 }
 
@@ -5058,22 +6340,60 @@ function libraryBatchWorkflowSelectionStatus() {
   return scan || thumbnails || {};
 }
 
-function libraryBatchWorkflowProgressPercent() {
+function clampProgressPercent(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
+}
+
+function libraryBatchWorkflowStageProgressPercent() {
   const scan = state.libraryBatchBuildStatus || {};
   const thumbnails = state.libraryBatchThumbnailBuildStatus || {};
-  const scanPercent = Math.max(0, Math.min(100, Number(scan.current_percent) || 0));
-  const thumbnailPercent = Math.max(0, Math.min(100, Number(thumbnails.current_percent) || 0));
-  if (state.libraryBatchWorkflowEnabled || libraryBatchWorkflowActive()) {
-    if (state.libraryBatchWorkflowPhase === 'thumbnails') return Math.min(100, 50 + thumbnailPercent / 2);
-    if (state.libraryBatchWorkflowPhase === 'scan' || isLibraryBatchBuildActive(scan)) return scanPercent / 2;
-    if (String(scan.status || '') === 'completed' && isLibraryBatchThumbnailBuildActive(thumbnails)) return Math.min(100, 50 + thumbnailPercent / 2);
-    if (String(scan.status || '') === 'completed' && String(thumbnails.status || '') === 'completed') return 100;
-  }
-  if (isLibraryBatchThumbnailBuildActive(thumbnails)) return thumbnailPercent;
-  if (isLibraryBatchBuildActive(scan)) return scanPercent;
+  const scanPercent = clampProgressPercent(scan.current_percent);
+  const thumbnailPercent = clampProgressPercent(thumbnails.current_percent);
+  if (isLibraryBatchThumbnailBuildActive(thumbnails) || state.libraryBatchWorkflowPhase === 'thumbnails') return thumbnailPercent;
+  if (isLibraryBatchBuildActive(scan) || state.libraryBatchWorkflowPhase === 'scan') return scanPercent;
   if (String(thumbnails.status || '') === 'completed') return 100;
-  if (String(scan.status || '') === 'completed') return state.libraryBatchWorkflowEnabled ? 50 : 100;
-  return Math.max(scanPercent, thumbnailPercent);
+  if (String(scan.status || '') === 'completed') return 100;
+  return 0;
+}
+
+function libraryBatchWorkflowTotalProgressPercent() {
+  const scan = state.libraryBatchBuildStatus || {};
+  const thumbnails = state.libraryBatchThumbnailBuildStatus || {};
+  const scanPercent = clampProgressPercent(scan.current_percent);
+  const thumbnailPercent = clampProgressPercent(thumbnails.current_percent);
+  const twoStage = state.libraryBatchWorkflowEnabled || libraryBatchWorkflowActive() || state.libraryBatchWorkflowPhase === 'thumbnails';
+  if (!twoStage) return libraryBatchWorkflowStageProgressPercent();
+  if (String(scan.status || '') === 'completed' && String(thumbnails.status || '') === 'completed') return 100;
+  if (state.libraryBatchWorkflowPhase === 'thumbnails' || isLibraryBatchThumbnailBuildActive(thumbnails)) return Math.min(100, 50 + thumbnailPercent / 2);
+  if (state.libraryBatchWorkflowPhase === 'scan' || isLibraryBatchBuildActive(scan)) return scanPercent / 2;
+  if (String(scan.status || '') === 'completed') return 50;
+  return 0;
+}
+
+function estimateBatchETASeconds(status, percent) {
+  const elapsed = Math.max(0, Number(status && status.elapsed_seconds) || 0);
+  const value = clampProgressPercent(percent);
+  if (elapsed <= 2 || value <= 0 || value >= 100) return 0;
+  return Math.max(0, Math.round(elapsed * (100 - value) / value));
+}
+
+function libraryBatchWorkflowMetricItems(stagePercent, totalPercent) {
+  const activeStatus = isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus) || state.libraryBatchWorkflowPhase === 'thumbnails'
+    ? (state.libraryBatchThumbnailBuildStatus || {})
+    : (state.libraryBatchBuildStatus || {});
+  const status = libraryBatchWorkflowSelectionStatus();
+  const current = Math.max(0, Number(activeStatus.current_library_index || status.current_library_index) || 0);
+  const totalLibraries = Math.max(0, Number(activeStatus.total_libraries || status.total_libraries) || 0);
+  const done = Math.max(0, Number(activeStatus.current_done || status.current_done) || 0);
+  const total = Math.max(0, Number(activeStatus.current_total || status.current_total) || 0);
+  const eta = estimateBatchETASeconds(activeStatus, stagePercent);
+  const items = [];
+  if (totalLibraries > 0 && current > 0) items.push(`资源库 ${Math.min(current, totalLibraries)} / ${totalLibraries}`);
+  if (total > 0) items.push(`阶段 ${done} / ${total}`);
+  items.push(`当前 ${Math.round(stagePercent)}%`);
+  if (Math.round(totalPercent) !== Math.round(stagePercent)) items.push(`总进度 ${Math.round(totalPercent)}%`);
+  items.push(`ETA ${eta > 0 ? formatSecondsShort(eta) : '计算中'}`);
+  return items;
 }
 
 function libraryBatchWorkflowProgressCopy() {
@@ -5088,15 +6408,20 @@ function libraryBatchWorkflowProgressCopy() {
 }
 
 function renderLibraryBatchWorkflowPanel() {
+  const starting = !!state.libraryBatchWorkflowStartPending;
   const running = libraryBatchWorkflowActive();
-  const controlsDisabled = running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive();
+  const controlsDisabled = starting || running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive();
   const hasSelection = libraryBatchWorkflowHasSelection();
   const selectionStatus = libraryBatchWorkflowSelectionStatus();
-  const progressPercent = libraryBatchWorkflowProgressPercent();
+  const progressPercent = libraryBatchWorkflowStageProgressPercent();
+  const totalProgressPercent = libraryBatchWorkflowTotalProgressPercent();
+  const progressMetrics = libraryBatchWorkflowMetricItems(progressPercent, totalProgressPercent);
   const currentPhase = state.libraryBatchWorkflowPhase === 'thumbnails' ? '批量缩略图阶段' : '批量扫描阶段';
   const optionLabels = libraryBatchWorkflowOptionLabels();
   const optionCopy = optionLabels.length ? `；附加处理：${optionLabels.join('、')}` : '';
-  const statusCopy = running
+  const statusCopy = starting
+    ? '正在启动批量工作流，请稍候'
+    : running
     ? `当前处于${currentPhase}${state.libraryBatchWorkflowAggressive ? '，并已启用高资源模式' : ''}${optionCopy}`
     : (state.libraryBatchWorkflowEnabled
       ? `点击后会先扫描，再自动接着构建缩略图${state.libraryBatchWorkflowAggressive ? '，并临时启用高资源模式' : ''}${optionCopy}`
@@ -5107,28 +6432,34 @@ function renderLibraryBatchWorkflowPanel() {
         <h3>批量工作流</h3>
         <span>${escapeHTML(statusCopy)}</span>
       </div>
-      <span class="settings-batch-build-badge ${running ? 'active' : ''}">${escapeHTML(running ? '串行运行中' : '可选')}</span>
+      <span class="settings-batch-build-badge ${starting || running ? 'active' : ''}">${escapeHTML(starting ? '启动中' : (running ? '串行运行中' : '可选'))}</span>
     </div>
     <div class="settings-batch-workflow-progress" aria-label="批量工作流进度">
       <span style="width:${progressPercent}%"></span>
     </div>
     <div class="settings-batch-build-meta">
       <span>${escapeHTML(libraryBatchWorkflowProgressCopy())}</span>
-      <span>${Math.round(progressPercent)}%</span>
+      <span>${progressMetrics.map(item => escapeHTML(item)).join('</span><span>')}</span>
     </div>
     <div class="settings-batch-build-selection">
       <strong>资源库范围</strong>
       <div class="settings-batch-build-selection-list settings-batch-workflow-selection-list ${controlsDisabled ? 'is-disabled' : ''}">${renderLibraryBatchSelectionRows(selectionStatus, 'settings-library-batch-workflow-selection', controlsDisabled)}</div>
     </div>
     <div class="settings-group settings-batch-build-master-toggles ${controlsDisabled ? 'is-disabled' : ''}">
-      ${renderSettingsToggle('settings-library-batch-workflow-select-all', '批量范围全选', libraryBatchWorkflowAllSelected(), '', controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-select-all', '批量范围全选', libraryBatchWorkflowAllSelected(), '开启后选择全部资源库；关闭后取消当前批量范围。', controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-enabled', '扫描后自动构建缩略图', state.libraryBatchWorkflowEnabled, '适合一次性把多个资源库扫描并补全缩略图。', controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-aggressive', '高资源无人值守模式', state.libraryBatchWorkflowAggressive, '临时提高扫描与缩略图并发，优先缩短总耗时。', controlsDisabled)}
-      ${renderSettingsToggle('settings-library-batch-workflow-move-legacy', '整理旧版资源库', state.libraryBatchWorkflowMoveLegacyThumbnails, '为旧资源库补齐稳定 ID，并把旧缩略图迁移到按资源库 ID 隔离的新目录。', controlsDisabled)}
-      ${renderSettingsToggle('settings-library-batch-workflow-clean-files', '清理文件', state.libraryBatchWorkflowCleanThumbnailFiles, '清理旧 JPG、preview、build-preview 等遗留缩略图文件；不会删除其它资源库的缩略图目录。', controlsDisabled)}
+      <details class="settings-advanced-options">
+        <summary>高级选项</summary>
+        <div class="settings-advanced-options-body">
+          ${renderSettingsToggle('settings-library-batch-workflow-move-legacy', '整理旧版资源库', state.libraryBatchWorkflowMoveLegacyThumbnails, '为旧资源库补齐稳定 ID，并把旧缩略图迁移到按资源库 ID 隔离的新目录。', controlsDisabled)}
+          ${renderSettingsToggle('settings-library-batch-workflow-clean-files', '清理文件', state.libraryBatchWorkflowCleanThumbnailFiles, '清理旧 JPG、preview、build-preview 等遗留缩略图文件；不会删除其它资源库的缩略图目录。', controlsDisabled)}
+          ${renderSettingsToggle('settings-library-batch-workflow-playback-cache', '转码 / 封装不支持的视频流', state.libraryBatchWorkflowBuildPlaybackCaches, '为 MKV、WMV、WMA 等浏览器不易直接播放的媒体预先生成播放兼容缓存。', controlsDisabled)}
+        </div>
+      </details>
     </div>
     <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${controlsDisabled || !hasSelection ? 'disabled' : ''}>${state.libraryBatchWorkflowEnabled ? '一键开始扫描并构建缩略图' : '开始批量扫描'}</button>
+      <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${controlsDisabled || !hasSelection ? 'disabled' : ''}>${starting ? '正在启动…' : (state.libraryBatchWorkflowEnabled ? '一键开始扫描并构建缩略图' : '开始批量扫描')}</button>
       <button class="btn" id="settings-cancel-library-batch-workflow-btn" type="button" ${running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive() ? '' : 'disabled'}>${running ? '取消当前工作流' : '取消当前阶段'}</button>
     </div>
   </div>`;
@@ -5168,13 +6499,29 @@ async function cancelLibraryBatchWorkflow() {
 }
 
 async function openLibraryBatchFullWorkflow() {
+  if (state.libraryBatchWorkflowStartPending || libraryBatchWorkflowActive() || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+    syncLibraryBatchWorkflowPanel();
+    return;
+  }
+  state.libraryBatchWorkflowStartPending = true;
+  syncLibraryBatchWorkflowPanel();
   try {
     await syncLibraryBatchWorkflowSelections();
     setLibraryBatchWorkflowPhase(state.libraryBatchWorkflowEnabled ? 'scan' : '');
-    await openLibraryBatchBuildWorkflow({ aggressive: state.libraryBatchWorkflowAggressive });
+    await openLibraryBatchBuildWorkflow({
+      aggressive: state.libraryBatchWorkflowAggressive,
+      startedByWorkflow: true,
+      buildThumbnailsAfterScan: state.libraryBatchWorkflowEnabled,
+      moveLegacyThumbnails: state.libraryBatchWorkflowMoveLegacyThumbnails,
+      cleanThumbnailFiles: state.libraryBatchWorkflowCleanThumbnailFiles,
+      buildPlaybackCaches: state.libraryBatchWorkflowBuildPlaybackCaches,
+    });
   } catch (e) {
     clearLibraryBatchWorkflowPhase();
     alert('启动批量工作流失败: ' + ((e && e.error) || e.message || e));
+  } finally {
+    state.libraryBatchWorkflowStartPending = false;
+    syncLibraryBatchWorkflowPanel();
   }
 }
 
@@ -5301,6 +6648,9 @@ function renderLibraryBatchTaskProgress(status, idleLabel) {
       break;
     case 'maintenance':
       phase = '整理缩略图目录';
+      break;
+    case 'playback':
+      phase = '播放兼容缓存';
       break;
     default:
       phase = '扫描';
@@ -5437,7 +6787,7 @@ function syncLibraryBatchWorkflowPanel() {
   container.innerHTML = renderLibraryBatchWorkflowPanel();
   $$('input[name="settings-library-batch-workflow-selection"]').forEach(input => {
     input.addEventListener('change', async () => {
-      if (isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+      if (state.libraryBatchWorkflowStartPending || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
         syncLibraryBatchWorkflowPanel();
         return;
       }
@@ -5455,6 +6805,10 @@ function syncLibraryBatchWorkflowPanel() {
     });
   });
   $('#settings-library-batch-workflow-select-all')?.addEventListener('change', async e => {
+    if (state.libraryBatchWorkflowStartPending || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
+      syncLibraryBatchWorkflowPanel();
+      return;
+    }
     try {
       await setLibraryBatchWorkflowSelectionAll(!!e.target.checked);
       syncLibraryBatchWorkflowPanel();
@@ -5482,6 +6836,11 @@ function syncLibraryBatchWorkflowPanel() {
   });
   $('#settings-library-batch-workflow-clean-files')?.addEventListener('change', e => {
     state.libraryBatchWorkflowCleanThumbnailFiles = !!e.target.checked;
+    persistLibraryBatchWorkflowPrefs();
+    syncLibraryBatchWorkflowPanel();
+  });
+  $('#settings-library-batch-workflow-playback-cache')?.addEventListener('change', e => {
+    state.libraryBatchWorkflowBuildPlaybackCaches = !!e.target.checked;
     persistLibraryBatchWorkflowPrefs();
     syncLibraryBatchWorkflowPanel();
   });
@@ -5524,6 +6883,7 @@ function renderLibraryBatchThumbnailBuildPanel() {
   const optionParts = [];
   if (status.move_legacy_thumbnails) optionParts.push('整理旧版资源库');
   if (status.clean_thumbnail_files) optionParts.push('清理文件');
+  if (status.build_playback_caches) optionParts.push('播放兼容缓存');
   return `<div class="settings-batch-build-panel">
     <div class="settings-batch-build-head">
       <div>
@@ -5607,6 +6967,7 @@ function renderSettingsContent() {
   const activeAccent = resolveLibraryAccentColor(currentLibraryBrand() || {});
   const activeAccentText = readableTextColorForBackground(activeAccent);
   const thumbnailBuildSize = 512;
+  const pwa = normalizePWASettings(state.pwaSettings);
   $('#content').innerHTML = `
 <div class="settings-layout">
   <section class="card settings-panel settings-panel-application">
@@ -5616,9 +6977,6 @@ function renderSettingsContent() {
         <label><span>资源库管理</span><span>为每个资源库配一个名字，可在这里增删改</span></label>
         <div class="settings-library-list" id="settings-library-list">${renderLibrarySettingsRows()}</div>
       </div>
-    </div>
-    <div class="settings-actions settings-actions-fill">
-      <button class="btn" id="settings-build-all-thumbs-btn" type="button">加载全部缩略图</button>
     </div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
   </section>
@@ -5660,10 +7018,6 @@ function renderSettingsContent() {
     <p>当关闭“系统播放器”时，将使用内置播放器并应用 IINA 风格快捷键。</p>
     <div class="settings-group">
       <div class="settings-control">
-        <label for="settings-lightbox-zoom"><span>默认灯箱缩放</span><span id="settings-lightbox-zoom-value">${state.lightboxZoom}%</span></label>
-        <input class="input" id="settings-lightbox-zoom" type="range" min="50" max="300" step="10" value="${state.lightboxZoom}">
-      </div>
-      <div class="settings-control">
         <label for="settings-slideshow-interval"><span>默认幻灯片间隔</span><span id="settings-slideshow-interval-value">${state.slideshowInterval / 1000} 秒</span></label>
         <input class="input" id="settings-slideshow-interval" type="range" min="1" max="30" step="1" value="${state.slideshowInterval / 1000}">
       </div>
@@ -5692,6 +7046,7 @@ function renderSettingsContent() {
       ${renderSettingsToggle('settings-prefetch-neighbors', '预加载前后相邻媒体', state.experimentalPrefetchNeighbors)}
       <div class="settings-actions">
         <button class="btn" id="settings-refresh-video-thumbs-btn">刷新视频缩略图</button>
+        <button class="btn" id="settings-playback-cache-btn" type="button">管理播放兼容缓存</button>
         <button class="btn" id="settings-backfill-exif-btn" type="button">补录旧照片 EXIF</button>
       </div>
     </div>
@@ -5710,17 +7065,48 @@ function renderSettingsContent() {
   </section>
 
   <section class="card settings-panel settings-panel-update">
-    <h3>更新</h3>
-    <p>软件更新会用于获取新功能、性能优化与问题修复。EchoGallery 会尽量在更新前保留控制权，不在未确认的情况下修改本地程序。</p>
+    <h3>PWA 安装体验</h3>
+    <p>这些选择会保存在当前浏览器，用于后续生成 Web App manifest、安装图标与离线壳缓存策略。</p>
     <div class="settings-group">
-      <div class="settings-static settings-update-note">
-        <strong>软件更新</strong>
-        <span>检查更新会对比 GitHub Release 中的最新版本；开启自动更新后，EchoGallery 可在发现新版本时提示安装。</span>
+      <div class="settings-control">
+        <label for="settings-pwa-name"><span>App 显示名</span><span>安装后显示在桌面或主屏幕</span></label>
+        <input class="input" id="settings-pwa-name" type="text" value="${escapeHTML(pwa.name)}" placeholder="EchoGallery">
       </div>
-      <div class="settings-actions">
-        <button class="btn" id="settings-check-update-btn" type="button">检查更新</button>
+      <div class="settings-control">
+        <label for="settings-pwa-icon-source"><span>图标来源</span><span>决定安装图标优先使用哪一套资源</span></label>
+        <select class="input" id="settings-pwa-icon-source">
+          <option value="favicon" ${pwa.iconSource === 'favicon' ? 'selected' : ''}>沿用当前 favicon</option>
+          <option value="library" ${pwa.iconSource === 'library' ? 'selected' : ''}>使用当前资源库头像</option>
+          <option value="png" ${pwa.iconSource === 'png' ? 'selected' : ''}>使用 PNG 图标</option>
+        </select>
       </div>
-      ${renderSettingsToggle('settings-auto-update', '自动更新', state.autoUpdateEnabled)}
+      <div class="settings-control">
+        <label for="settings-pwa-theme-mode"><span>主题色</span><span>用于安装窗口、启动页与浏览器主题栏</span></label>
+        <select class="input" id="settings-pwa-theme-mode">
+          <option value="accent" ${pwa.themeMode === 'accent' ? 'selected' : ''}>跟随当前资源库主色</option>
+          <option value="fixed" ${pwa.themeMode === 'fixed' ? 'selected' : ''}>使用固定颜色</option>
+        </select>
+      </div>
+      <div class="settings-control">
+        <label for="settings-pwa-theme-color"><span>固定主题色</span><span>仅在选择固定颜色时使用</span></label>
+        <input class="input" id="settings-pwa-theme-color" type="color" value="${escapeHTML(pwa.themeColor)}" ${pwa.themeMode === 'fixed' ? '' : 'disabled'}>
+      </div>
+      <div class="settings-control">
+        <label for="settings-pwa-start-page"><span>启动页</span><span>安装后打开 EchoGallery 的默认入口</span></label>
+        <select class="input" id="settings-pwa-start-page">
+          <option value="/" ${pwa.startPage === '/' ? 'selected' : ''}>主页 / 自动进入当前资源库</option>
+          <option value="/login" ${pwa.startPage === '/login' ? 'selected' : ''}>登录页</option>
+          <option value="auto" ${pwa.startPage === 'auto' ? 'selected' : ''}>根据登录状态自动跳转</option>
+        </select>
+      </div>
+      <div class="settings-control">
+        <label for="settings-pwa-cache-strategy"><span>缓存策略</span><span>默认不缓存媒体原图与缩略图，避免浏览器缓存膨胀</span></label>
+        <select class="input" id="settings-pwa-cache-strategy">
+          <option value="static-only" ${pwa.cacheStrategy === 'static-only' ? 'selected' : ''}>仅缓存前端静态资源</option>
+          <option value="app-shell" ${pwa.cacheStrategy === 'app-shell' ? 'selected' : ''}>缓存 App 壳页面，API 优先走网络</option>
+          <option value="disabled" ${pwa.cacheStrategy === 'disabled' ? 'selected' : ''}>暂不启用离线缓存</option>
+        </select>
+      </div>
     </div>
   </section>
 
@@ -5754,7 +7140,6 @@ function renderSettingsContent() {
   syncRangeProgress($('#content'));
 
   $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
-  $('#settings-build-all-thumbs-btn')?.addEventListener('click', openThumbnailBuildWorkflow);
   syncLibraryBatchWorkflowPanel();
 
   function bindLibraryRow(row) {
@@ -5879,11 +7264,6 @@ function renderSettingsContent() {
     state.serverSettings.low_resource_mode = !!e.target.checked;
     setSettingsDirty();
   });
-  $('#settings-lightbox-zoom').addEventListener('input', e => {
-    setLightboxZoom(e.target.value);
-    $('#settings-lightbox-zoom-value').textContent = `${state.lightboxZoom}%`;
-    setSettingsDirty();
-  });
   $('#settings-slideshow-interval').addEventListener('input', e => {
     updateSlideshowSetting('interval', parseInt(e.target.value, 10) * 1000);
     $('#settings-slideshow-interval-value').textContent = `${state.slideshowInterval / 1000} 秒`;
@@ -5915,6 +7295,7 @@ function renderSettingsContent() {
   $('#settings-refresh-video-thumbs-btn').addEventListener('click', () => {
     openVideoThumbnailRefreshWorkflow();
   });
+  $('#settings-playback-cache-btn')?.addEventListener('click', openPlaybackCacheModal);
   $('#settings-backfill-exif-btn').addEventListener('click', async () => {
     const btn = $('#settings-backfill-exif-btn');
     try {
@@ -5930,18 +7311,25 @@ function renderSettingsContent() {
     }
   });
   $('#settings-exp-restore-last-view').addEventListener('change', e => { setExperimentalSetting('restoreLastView', e.target.checked); setSettingsDirty(); });
-  $('#settings-check-update-btn')?.addEventListener('click', async () => {
-    const btn = $('#settings-check-update-btn');
-    await withButtonBusy(btn, '检查中…', async () => {
-      await new Promise(resolve => setTimeout(resolve, 450));
-      showToast('当前构建未提供版本元数据，暂无法判断是否有新版本');
+  const syncPWASettings = () => {
+    state.pwaSettings = normalizePWASettings({
+      name: $('#settings-pwa-name')?.value,
+      iconSource: $('#settings-pwa-icon-source')?.value,
+      themeMode: $('#settings-pwa-theme-mode')?.value,
+      themeColor: $('#settings-pwa-theme-color')?.value,
+      startPage: $('#settings-pwa-start-page')?.value,
+      cacheStrategy: $('#settings-pwa-cache-strategy')?.value,
     });
-  });
-  $('#settings-auto-update')?.addEventListener('change', e => {
-    state.autoUpdateEnabled = !!e.target.checked;
-    localStorage.setItem('echogallery_auto_update', state.autoUpdateEnabled ? '1' : '0');
-    showToast(state.autoUpdateEnabled ? '已开启自动更新提示' : '已关闭自动更新');
-  });
+    const colorInput = $('#settings-pwa-theme-color');
+    if (colorInput) colorInput.disabled = state.pwaSettings.themeMode !== 'fixed';
+    persistPWASettings();
+  };
+  $('#settings-pwa-name')?.addEventListener('input', syncPWASettings);
+  $('#settings-pwa-icon-source')?.addEventListener('change', syncPWASettings);
+  $('#settings-pwa-theme-mode')?.addEventListener('change', syncPWASettings);
+  $('#settings-pwa-theme-color')?.addEventListener('input', syncPWASettings);
+  $('#settings-pwa-start-page')?.addEventListener('change', syncPWASettings);
+  $('#settings-pwa-cache-strategy')?.addEventListener('change', syncPWASettings);
   $('#theme-btn')?.addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
   void pollThumbnailBuildStatus();
   $('#shutdown-btn')?.addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
@@ -6206,7 +7594,7 @@ async function renderFavorites() {
   ]);
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
-    extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.favorite} 取消收藏</button>`,
+    extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.dislike || icons.favorite} 取消喜欢</button>`,
   }) + renderMediaKindFilterControl();
   $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
@@ -6216,7 +7604,7 @@ async function renderFavorites() {
 <div id="favorite-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
   $('#download-all-favorites-btn').addEventListener('click', () => {
-    if (confirm('确定要打包下载全部个人收藏吗？媒体较多时可能需要一些时间。')) downloadAllFavorites();
+    downloadAllFavorites();
   });
 
   await loadShareMap();
@@ -6318,6 +7706,26 @@ function appendFavoriteGrid(newPhotos) {
   grid.appendChild(fragment);
 }
 
+function sortFavoritePhotosInPlace() {
+  state.favoritePhotos.sort((a, b) => {
+    const superDiff = Number(!!b.is_super_favorite) - Number(!!a.is_super_favorite);
+    if (superDiff) return superDiff;
+    const timeA = Date.parse(a.taken_at || a.uploaded_at || '') || 0;
+    const timeB = Date.parse(b.taken_at || b.uploaded_at || '') || 0;
+    if (timeA !== timeB) return timeB - timeA;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+}
+
+function rerenderFavoriteGrid() {
+  const container = $('#favorite-wrap');
+  if (!container) return;
+  sortFavoritePhotosInPlace();
+  container.innerHTML = '';
+  appendFavoriteGrid(state.favoritePhotos);
+  renderFavoritesEmptyStateIfNeeded();
+}
+
 function updateFavoriteTotalHint() {
   const hint = $('#favorite-total-hint');
   if (!hint) return;
@@ -6337,10 +7745,11 @@ async function loadMoreFavorites() {
     state.favoriteTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.favoritePhotos.length + (page.photos || []).length;
     updateFavoriteTotalHint();
     state.favoritePhotos.push(...(page.photos || []));
+    sortFavoritePhotosInPlace();
     state.favoriteCursor = page.next_cursor || '';
     state.favoriteHasMore = page.has_more || false;
     state.favoriteLoaded = true;
-    appendFavoriteGrid(page.photos || []);
+    rerenderFavoriteGrid();
   } catch (e) {
     console.error(e);
   } finally {
@@ -6449,6 +7858,13 @@ function requiresSystemPlayer(photo) {
   const mime = String((photo && photo.mime_type) || '').toLowerCase();
   return mime.includes('x-ms-wmv') || mime.includes('x-ms-wma');
 }
+function requiresBrowserPlaybackConversion(photo) {
+  if (!isVideoMedia(photo)) return false;
+  const ext = mediaExtension(photo);
+  const mime = String((photo && photo.mime_type) || '').toLowerCase();
+  if (['.mkv', '.avi', '.wmv', '.wma', '.mpg', '.mpeg', '.ts', '.mts', '.m2ts', '.ogv'].includes(ext)) return true;
+  return mime.includes('matroska') || mime.includes('x-ms-wmv') || mime.includes('x-ms-wma') || mime.includes('x-msvideo');
+}
 
 function mediaThumbURL(photo) {
   return `/media/thumbnails/${photo.uuid}`;
@@ -6456,6 +7872,10 @@ function mediaThumbURL(photo) {
 
 function mediaFileURL(photo) {
   return isVideoMedia(photo) ? `/media/files/${photo.uuid}` : `/media/photos/${photo.uuid}`;
+}
+
+function mediaPlaybackURL(photo) {
+  return isVideoMedia(photo) ? `/media/playback/${photo.uuid}` : mediaFileURL(photo);
 }
 
 function videoFormatLabel(photo) {
@@ -6480,6 +7900,24 @@ function aspectRatioLabel(width, height) {
   const h = Number(height) || 0;
   if (!w || !h) return '—';
   const ratio = w / h;
+  const wallpaperRatios = [
+    393 / 852,
+    748 / 1619,
+    440 / 956,
+    402 / 874,
+    420 / 912,
+    390 / 844,
+    430 / 932,
+    428 / 926,
+    414 / 896,
+    375 / 812,
+    744 / 1133,
+    820 / 1180,
+    834 / 1194,
+  ];
+  if (wallpaperRatios.some(candidate => Math.abs(Math.log(ratio / candidate)) <= 0.014 || Math.abs(Math.log(ratio / (1 / candidate))) <= 0.014)) {
+    return '墙纸';
+  }
   const commonRatios = [
     [1, 1],
     [4, 3],
@@ -6569,6 +8007,74 @@ function buildExifInfoItems(photo) {
   return items;
 }
 
+function hasInfoValue(value) {
+  return value != null && String(value).trim() !== '' && String(value).trim() !== '—';
+}
+
+function compactInfoItems(items) {
+  return items.filter(([, , value]) => hasInfoValue(value));
+}
+
+function formatVideoCodec(value) {
+  const raw = compactExifValue(value).toLowerCase();
+  if (!raw) return '';
+  const names = {
+    h264: 'H.264',
+    avc1: 'H.264',
+    x264: 'H.264',
+    hevc: 'H.265 / HEVC',
+    h265: 'H.265 / HEVC',
+    x265: 'H.265 / HEVC',
+    vp9: 'VP9',
+    vp8: 'VP8',
+    av1: 'AV1',
+    mpeg4: 'MPEG-4 Part 2',
+    mpeg2video: 'MPEG-2 Video',
+    mpeg1video: 'MPEG-1 Video',
+    mjpeg: 'Motion JPEG',
+    prores: 'Apple ProRes',
+    theora: 'Theora',
+    wmv1: 'Windows Media Video 7',
+    wmv2: 'Windows Media Video 8',
+    wmv3: 'Windows Media Video 9',
+    vc1: 'VC-1',
+    dvvideo: 'DV Video',
+  };
+  return names[raw] || raw.toUpperCase();
+}
+
+function formatVideoFrameRate(value) {
+  const rate = Number(value);
+  if (!Number.isFinite(rate) || rate <= 0) return '';
+  const rounded = Math.round(rate * 100) / 100;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(2)} fps`;
+}
+
+function buildLightboxInfoItems(photo) {
+  if (!photo) return [];
+  const base = [
+    [isVideoMedia(photo) ? icons.mediaVideo : icons.mediaImage, '类型', isVideoMedia(photo) ? '视频' : '图片'],
+    [icons.infoMime, 'MIME', photo.mime_type],
+    [icons.infoDate, '拍摄时间', formatDateTime(photo.taken_at)],
+    [icons.infoDimensions, '尺寸', photo.width && photo.height ? `${photo.width} × ${photo.height}` : ''],
+    [icons.infoFileSize, '大小（MB）', formatSizeMB(photo.size)],
+  ];
+  if (!isVideoMedia(photo)) {
+    return compactInfoItems([
+      ...base.slice(0, 4),
+      [icons.infoRatio, '宽高比（近似）', aspectRatioLabel(photo.width, photo.height)],
+      base[4],
+      ...buildExifInfoItems(photo),
+    ]);
+  }
+  const videoEXIF = photo.exif && typeof photo.exif === 'object' ? photo.exif : {};
+  return compactInfoItems([
+    ...base,
+    [icons.infoVideoCodec, '编码', formatVideoCodec(videoEXIF.video_codec)],
+    [icons.infoVideoFramerate, '帧率', formatVideoFrameRate(videoEXIF.video_frame_rate)],
+  ]);
+}
+
 // ── 缩略图 ────────────────────────────────────────────
 function retryThumbnailLoad(imageEl, photo) {
   if (!imageEl || !photo) return;
@@ -6627,7 +8133,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const isShared = !!state.shareMap[`photo:${photo.id}`];
   const favoriteToggle = opts.trashMode
     ? ''
-    : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}" type="button" aria-label="${photo.is_favorite ? '取消收藏' : '加入收藏'}" title="${photo.is_favorite ? '已收藏，点击取消' : '加入个人收藏'}">${photo.is_favorite ? icons.favoriteFilled : icons.favorite}</button>`;
+    : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}${photo.is_super_favorite ? ' super-active' : ''}" type="button" aria-label="${escapeHTML(favoriteLabelForPhoto(photo))}" title="${escapeHTML(favoriteLabelForPhoto(photo))}">${favoriteIconForPhoto(photo)}</button>`;
   const shareBadge = isShared
     ? `<span class="share-badge">${icons.shareSmall}</span>` : '';
   const mediaBadge = isVideoMedia(photo)
@@ -6639,7 +8145,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
     : '';
   const thumbFallback = isVideoMedia(photo) ? ` onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'"` : '';
 
-  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${videoBookmarkBadge}${shareBadge}${mediaBadge}`;
+  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}>${videoBookmarkBadge}${shareBadge}${mediaBadge}`;
   const imageEl = div.querySelector('img');
   if (imageEl) {
     imageEl.addEventListener('load', () => {
@@ -6665,7 +8171,13 @@ function makePhotoThumb(photo, listRef, opts = {}) {
       e.stopPropagation();
       await toggleFavorite(photo);
     });
+    bindHoldAction(favoriteEl, e => {
+      e.preventDefault();
+      e.stopPropagation();
+      void toggleFavorite(photo, { mode: 'hold', sourceButton: favoriteEl });
+    });
   }
+  if (isVideoMedia(photo)) requestVideoPlaybackIndicatorSync(photo);
   const photoIndex = Array.isArray(listRef) ? listRef.indexOf(photo) : -1;
   const warmIntent = () => {
     if (photoIndex >= 0) prefetchPhotosForLightboxIntent(listRef, photoIndex);
@@ -6691,20 +8203,54 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   div.addEventListener('contextmenu', e => {
     e.preventDefault();
     setFocusedPhoto(photo.id, { scroll: false });
-    if (opts.trashMode) showTrashContextMenu(e.clientX, e.clientY, photo);
-    else showPhotoContextMenu(e.clientX, e.clientY, photo, div, listRef);
+    const menuOptions = { mobile: isTouchLikeDevice() };
+    if (opts.trashMode) showTrashContextMenu(e.clientX, e.clientY, photo, menuOptions);
+    else showPhotoContextMenu(e.clientX, e.clientY, photo, div, listRef, menuOptions);
   });
 
   // c-3: 长按触发操作菜单（移动端）
   addLongPress(div, e => {
     const touch = e.changedTouches[0];
-    if (opts.trashMode) showTrashContextMenu(touch.clientX, touch.clientY, photo);
-    else showPhotoContextMenu(touch.clientX, touch.clientY, photo, div, listRef);
+    if (opts.trashMode) showTrashContextMenu(touch.clientX, touch.clientY, photo, { mobile: true });
+    else showPhotoContextMenu(touch.clientX, touch.clientY, photo, div, listRef, { mobile: true });
   });
 
   if (state.selected.has(photo.id)) div.classList.add('selected');
   if (state.focusedPhotoID === photo.id) div.classList.add('keyboard-focused');
   return div;
+}
+
+function bindHoldAction(el, callback, delay = 620) {
+  if (!el) return;
+  let timer = null;
+  let fired = false;
+  const clear = () => {
+    clearTimeout(timer);
+    timer = null;
+  };
+  el.addEventListener('pointerdown', e => {
+    if (e.button > 0) return;
+    fired = false;
+    clear();
+    timer = setTimeout(() => {
+      fired = true;
+      callback(e);
+    }, delay);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
+    el.addEventListener(type, e => {
+      clear();
+      if (!fired) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+  });
+  el.addEventListener('click', e => {
+    if (!fired) return;
+    fired = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 }
 
 function visiblePhotoThumbs() {
@@ -6816,53 +8362,105 @@ function currentLoadedPreviewURLForPhoto(photo) {
   return '';
 }
 
-function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = []) {
+function compactContextMenuItems(items) {
+  const result = [];
+  (items || []).forEach(item => {
+    if (item === '-') {
+      if (result.length && result[result.length - 1] !== '-') result.push(item);
+      return;
+    }
+    if (item) result.push(item);
+  });
+  while (result[0] === '-') result.shift();
+  while (result[result.length - 1] === '-') result.pop();
+  return result;
+}
+
+function filterPhotoContextMenuItemsForDevice(items, options = {}) {
+  const mobile = !!options.mobile;
+  const lightbox = !!options.lightbox;
+  if (!mobile) return compactContextMenuItems(items);
+  return compactContextMenuItems((items || []).filter(item => {
+    if (item === '-') return true;
+    if (!item) return false;
+    if (['select', 'view', 'share'].includes(item.role)) return false;
+    if (lightbox && item.role === 'reveal') return false;
+    return true;
+  }));
+}
+
+function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], options = {}) {
   const isSelected = state.selected.has(photo.id);
   const isShared = !!state.shareMap[`photo:${photo.id}`];
-  const favoriteLabel = photo.is_favorite ? '取消收藏' : '加入个人收藏';
+  const favoriteLabel = favoriteLabelForPhoto(photo, { context: state.view });
+  const favoriteAction = () => toggleFavorite(photo);
+  const favoriteIcon = photo.is_super_favorite ? icons.superLike : photo.is_favorite ? icons.like : icons.nonLike;
   const items = [
-    { icon: icons.contextSelect, label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl, { listRef }) },
-    { icon: icons.contextView, label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
-    { icon: icons.contextTimeline, label: '在时间线中查看', action: () => openInTimeline(photo.id) },
-    { icon: icons.contextFavorite, label: favoriteLabel, action: () => toggleFavorite(photo) },
-    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
-    { icon: icons.contextDownload, label: '下载', action: () => triggerDownload(`/api/media/${photo.id}/download`) },
+    { role: 'select', icon: icons.contextSelect, label: isSelected ? '取消选择' : '选择（点击勾选图标可快速选择）', action: () => toggleSelect(photo.id, thumbEl, { listRef }) },
+    { role: 'view', icon: icons.contextView, label: '查看', action: () => openLightbox(listRef, listRef.indexOf(photo)) },
+    { role: 'timeline', icon: icons.contextTimeline, label: '在时间线中查看', action: () => openInTimeline(photo.id) },
+    { role: 'favorite', icon: favoriteIcon || icons.contextFavorite, label: favoriteLabel, action: favoriteAction },
+    { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
+    { role: 'download', icon: icons.contextDownload, label: '下载', action: () => confirmDownloadAction('确定要下载这个媒体吗？', () => triggerDownload(`/api/media/${photo.id}/download`)) },
   ];
+  if (requiresBrowserPlaybackConversion(photo)) {
+    const converted = playbackCacheExistsForPhoto(photo);
+    items.push({
+      role: 'convert-playback',
+      icon: icons.contextConvertPlayback || icons.contextDownload,
+      label: converted ? '已转换为受支持的格式' : '转换为受支持的格式',
+      disabled: converted,
+      action: () => buildBrowserPlaybackCacheForPhoto(photo),
+    });
+  }
   if (containingAlbums.length) {
     items.push('-');
     containingAlbums.forEach(album => {
-      items.push({ icon: icons.contextAlbum, label: `在相册中查看：${albumDisplayTitle(album)}`, action: () => openInAlbum(album, photo.id) });
+      items.push({ role: 'album', icon: icons.contextAlbum, label: `在相册中查看：${albumDisplayTitle(album)}`, action: () => openInAlbum(album, photo.id) });
     });
   }
   items.push(
     '-',
-    { icon: icons.contextShare, label: isShared ? '管理分享…' : '分享…', action: () => isShared ? openShareListModal('photo', photo.id) : openShareModal('photo', photo.id) },
+    { role: 'share', icon: icons.contextShare, label: isShared ? '管理分享…' : '分享…', action: () => isShared ? openShareListModal('photo', photo.id) : openShareModal('photo', photo.id) },
     '-',
-    { icon: icons.contextDelete, label: '删除', danger: true, action: () => deleteSinglePhoto(photo.id) },
+    { role: 'delete', icon: icons.contextDelete, label: '删除', danger: true, action: () => deleteSinglePhoto(photo.id) },
   );
-  return items;
+  return filterPhotoContextMenuItemsForDevice(items, options);
 }
 
 // 时间线图片右键菜单
-async function showPhotoContextMenu(x, y, photo, thumbEl, listRef) {
+async function showPhotoContextMenu(x, y, photo, thumbEl, listRef, options = {}) {
   let albums = [];
   try {
     albums = await api.get(`/api/media/${photo.id}/albums`);
   } catch (e) {
     console.error('加载媒体所在相册失败:', e);
   }
+  if (requiresBrowserPlaybackConversion(photo)) {
+    try {
+      await ensurePlaybackCacheItemsLoaded();
+    } catch (e) {
+      console.error('加载播放兼容缓存列表失败:', e);
+    }
+  }
   if ((!albums || !albums.length) && state.view === 'album-detail' && state.currentAlbum && state.currentAlbum.id) {
     albums = [state.currentAlbum];
   }
-  showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef, albums || []));
+  showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef, albums || [], options), options);
 }
 
 async function showCurrentLightboxContextMenu() {
   const photo = state.lightboxPhotos[state.lightboxIndex];
   if (!photo) return;
   const button = $('#lb-more');
-  const rect = button ? button.getBoundingClientRect() : { right: window.innerWidth - 18, bottom: 58 };
-  await showPhotoContextMenu(rect.right, rect.bottom + 8, photo, findPhotoThumb(photo.id), state.lightboxPhotos);
+  const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 64, right: window.innerWidth - 18, top: 32, bottom: 84, width: 46, height: 52 };
+  await showPhotoContextMenu(rect.right, rect.bottom, photo, findPhotoThumb(photo.id), state.lightboxPhotos, {
+    anchorRect: rect,
+    align: 'end',
+    vertical: 'below',
+    lightbox: true,
+    mobile: isTouchLikeDevice() || isMobileLayout(),
+  });
 }
 function renderVideoBookmarkMenuContent(photo, video) {
   const currentTime = Math.max(0, Number(video.currentTime) || 0);
@@ -6914,41 +8512,47 @@ function showVideoBookmarkMenu() {
   closeContextMenu();
   const menu = el('div', 'context-menu lightbox-bookmark-menu');
   const button = $('#lb-video-bookmark');
-  const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 18, right: window.innerWidth - 18, top: 58, bottom: 58 };
+  const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 64, right: window.innerWidth - 18, top: 32, bottom: 84, width: 46, height: 52 };
   menu.style.left = `${rect.right}px`;
-  menu.style.top = `${rect.bottom + 8}px`;
+  menu.style.top = `${rect.top}px`;
+  menu.style.visibility = 'hidden';
   menu.innerHTML = renderVideoBookmarkMenuContent(photo, video);
   document.body.appendChild(menu);
   _ctxMenu = menu;
-  const menuRect = menu.getBoundingClientRect();
-  if (menuRect.right > window.innerWidth) menu.style.left = `${Math.max(12, rect.right - menuRect.width)}px`;
-  if (menuRect.bottom > window.innerHeight) menu.style.top = `${Math.max(12, rect.top - menuRect.height - 8)}px`;
+  positionContextMenu(menu, rect.right, rect.bottom, {
+    anchorRect: rect,
+    align: 'end',
+    vertical: 'below',
+  });
 }
 
 // 回收站图片右键菜单 (b-4)
-function showTrashContextMenu(x, y, photo) {
-  showContextMenu(x, y, [
-    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
+function showTrashContextMenu(x, y, photo, options = {}) {
+  const items = [
+    options.mobile ? null : { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     '-',
     { icon: icons.contextRestore, label: '恢复到时间线', action: () => restorePhoto(photo.id) },
     { icon: icons.contextDelete, label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) },
-  ]);
+  ];
+  showContextMenu(x, y, compactContextMenuItems(items), options);
 }
 
 async function addSelectedMediaToAlbum(album) {
   showToast('文件夹相册暂不支持手动添加');
 }
 
-function albumContextMenuItems(album, { includeView = true } = {}) {
+function albumContextMenuItems(album, options = {}) {
+  const { includeView = true, mobile = false } = options;
   const items = [];
   if (includeView) {
-    items.push({ icon: icons.contextView, label: '查看', action: () => openAlbumDetail(album) });
+    items.push({ role: 'view', icon: icons.contextView, label: '查看', action: () => openAlbumDetail(album) });
   }
   items.push(
-    { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealAlbumInFinder(album.id) },
-    { icon: icons.albumContextDownload, label: '下载', action: () => triggerDownload(`/api/media/albums/${album.id}/download`) },
+    { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealAlbumInFinder(album.id) },
+    { role: 'download', icon: icons.albumContextDownload, label: '下载', action: () => confirmDownloadAction('确定要下载这个相册吗？', () => triggerDownload(`/api/media/albums/${album.id}/download`)) },
   );
-  return items;
+  if (!mobile) return items;
+  return compactContextMenuItems(items.filter(item => item.role !== 'view'));
 }
 
 function showAlbumContextMenu(x, y, album, options = {}) {
@@ -6960,7 +8564,30 @@ async function addSinglePhotoToAlbum(photoId) {
   showToast('文件夹相册暂不支持手动添加');
 }
 
-function updatePhotoFavoriteInCollections(photoId, favorite) {
+function favoriteIconForPhoto(photo) {
+  if (photo && photo.is_super_favorite) return icons.superLike || icons.favoriteFilled || icons.like || icons.favorite;
+  if (photo && photo.is_favorite) return icons.like || icons.favoriteFilled || icons.favorite;
+  return icons.nonLike || icons.favorite;
+}
+function favoriteLabelForPhoto(photo, { context = state.view } = {}) {
+  if (photo && (photo.is_super_favorite || photo.is_favorite)) return '取消喜欢';
+  return '添加到个人收藏';
+}
+function nextFavoriteStateForPhoto(photo, { context = state.view } = {}) {
+  if (photo && (photo.is_super_favorite || photo.is_favorite)) return { favorite: false, superFavorite: false, kind: 'remove' };
+  return { favorite: true, superFavorite: false, kind: 'add' };
+}
+function alternateFavoriteStateForPhoto(photo) {
+  if (!photo || (!photo.is_favorite && !photo.is_super_favorite)) return null;
+  if (photo.is_super_favorite) return { favorite: true, superFavorite: false, kind: 'downgrade' };
+  return { favorite: true, superFavorite: true, kind: 'upgrade' };
+}
+function applyFavoriteStateToPhoto(photo, favorite, superFavorite = false) {
+  if (!photo) return;
+  photo.is_favorite = !!favorite || !!superFavorite;
+  photo.is_super_favorite = !!superFavorite;
+}
+function updatePhotoFavoriteInCollections(photoId, favorite, superFavorite = false) {
   const collections = [
     state.photos,
     state.favoritePhotos,
@@ -6972,18 +8599,59 @@ function updatePhotoFavoriteInCollections(photoId, favorite) {
   collections.forEach(list => {
     if (!Array.isArray(list)) return;
     list.forEach(photo => {
-      if (photo && photo.id === photoId) photo.is_favorite = favorite;
+      if (photo && photo.id === photoId) applyFavoriteStateToPhoto(photo, favorite, superFavorite);
     });
   });
 }
 
-function updateFavoriteButtonsInDOM(photoId, favorite) {
+function updateFavoriteButtonsInDOM(photoId, favorite, superFavorite = false, { animateButton = null } = {}) {
   document.querySelectorAll(`.photo-thumb[data-id="${photoId}"] .favorite-toggle`).forEach(button => {
-    button.classList.toggle('active', favorite);
-    button.setAttribute('aria-label', favorite ? '取消收藏' : '加入收藏');
-    button.title = favorite ? '已收藏，点击取消' : '加入个人收藏';
-    button.innerHTML = favorite ? icons.favoriteFilled : icons.favorite;
+    const photo = findKnownPhotoByID(photoId) || { is_favorite: favorite, is_super_favorite: superFavorite };
+    applyFavoriteStateToPhoto(photo, favorite, superFavorite);
+    syncFavoriteButtonState(button, photo, { animateIcon: animateButton === button });
   });
+}
+function animateFavoriteIconSwap(button, nextIcon) {
+  if (!button) return;
+  const applyNext = () => {
+    button.innerHTML = nextIcon;
+    const nextSVG = button.querySelector('svg');
+    if (!nextSVG || typeof nextSVG.animate !== 'function') return;
+    nextSVG.animate([
+      { transform: 'scale(0)' },
+      { transform: 'scale(1.08)' },
+      { transform: 'scale(1)' },
+    ], {
+      duration: 260,
+      easing: 'cubic-bezier(.22, 1.2, .28, 1)',
+      fill: 'both',
+    });
+  };
+  const currentSVG = button.querySelector('svg');
+  if (!currentSVG || typeof currentSVG.animate !== 'function') {
+    applyNext();
+    return;
+  }
+  currentSVG.animate([
+    { transform: 'scale(1)' },
+    { transform: 'scale(0)' },
+  ], {
+    duration: 150,
+    easing: 'cubic-bezier(.32, 0, .2, 1)',
+    fill: 'both',
+  });
+  clearTimeout(button._favoriteMorphTimer);
+  button._favoriteMorphTimer = setTimeout(applyNext, 138);
+}
+function syncFavoriteButtonState(button, photo, { animateIcon = false } = {}) {
+  if (!button || !photo) return;
+  button.classList.toggle('active', !!photo.is_favorite);
+  button.classList.toggle('super-active', !!photo.is_super_favorite);
+  button.setAttribute('aria-label', favoriteLabelForPhoto(photo));
+  button.title = favoriteLabelForPhoto(photo);
+  const nextIcon = favoriteIconForPhoto(photo);
+  if (animateIcon) animateFavoriteIconSwap(button, nextIcon);
+  else button.innerHTML = nextIcon;
 }
 
 function removePhotoFromList(list, photoId) {
@@ -7021,33 +8689,52 @@ function removeFavoritePhotoFromUI(photoId) {
   updateSelectionBar();
 }
 
-async function setPhotoFavorite(photoId, favorite) {
-  await api.put(`/api/media/${photoId}/favorite`, { favorite });
-  updatePhotoFavoriteInCollections(photoId, favorite);
+async function setPhotoFavorite(photoId, favorite, superFavorite = false) {
+  await api.put(`/api/media/${photoId}/favorite`, { favorite: !!favorite || !!superFavorite, super_favorite: !!superFavorite });
+  updatePhotoFavoriteInCollections(photoId, !!favorite || !!superFavorite, !!superFavorite);
 }
 
 function updateLightboxFavoriteButton(photo) {
   const favoriteBtn = $('#lb-favorite');
   if (!favoriteBtn || !photo) return;
-  favoriteBtn.innerHTML = photo.is_favorite ? icons.favoriteFilled : icons.favorite;
-  favoriteBtn.title = photo.is_favorite ? '取消收藏' : '收藏';
-  favoriteBtn.setAttribute('aria-label', favoriteBtn.title);
-  favoriteBtn.classList.toggle('active', !!photo.is_favorite);
+  syncFavoriteButtonState(favoriteBtn, photo);
 }
 
-async function toggleFavorite(photo) {
-  const nextFavorite = !photo.is_favorite;
+function favoriteToastForTransition(next, photo) {
+  if (next.kind === 'upgrade') return '已加入特别喜欢';
+  if (next.kind === 'downgrade') return '已改为个人收藏';
+  if (next.kind === 'remove') return '已取消喜欢';
+  if (next.kind === 'add') return '已加入个人收藏';
+  return photo && photo.is_super_favorite ? '已加入特别喜欢' : '已加入个人收藏';
+}
+
+async function toggleFavorite(photo, { mode = 'click', sourceButton = null } = {}) {
+  const next = mode === 'hold'
+    ? alternateFavoriteStateForPhoto(photo)
+    : nextFavoriteStateForPhoto(photo, { context: state.view });
+  if (!next) return;
+  const nextFavorite = next.favorite;
+  const nextSuperFavorite = next.superFavorite;
   try {
-    await setPhotoFavorite(photo.id, nextFavorite);
-    updateFavoriteButtonsInDOM(photo.id, nextFavorite);
+    await setPhotoFavorite(photo.id, nextFavorite, nextSuperFavorite);
+    const knownPhoto = findKnownPhotoByID(photo.id) || photo;
+    applyFavoriteStateToPhoto(knownPhoto, nextFavorite, nextSuperFavorite);
+    updateFavoriteButtonsInDOM(photo.id, nextFavorite, nextSuperFavorite, {
+      animateButton: mode === 'hold' ? sourceButton : null,
+    });
     if (state.view === 'favorites' && !nextFavorite) {
       closeLightbox();
       removeFavoritePhotoFromUI(photo.id);
-      showToast('已取消收藏');
+      showToast('已取消喜欢');
       return;
     }
-    if ($('#lightbox').classList.contains('open')) updateLightboxFavoriteButton(photo);
-    showToast(nextFavorite ? '已加入个人收藏' : '已取消收藏');
+    if ($('#lightbox').classList.contains('open')) {
+      syncFavoriteButtonState($('#lb-favorite'), knownPhoto, {
+        animateIcon: mode === 'hold' && sourceButton && sourceButton.id === 'lb-favorite',
+      });
+    }
+    if (state.view === 'favorites' && (next.kind === 'upgrade' || next.kind === 'downgrade')) rerenderFavoriteGrid();
+    showToast(favoriteToastForTransition(next, knownPhoto));
   } catch (e) {
     alert('操作失败: ' + ((e && e.error) || e));
   }
@@ -7068,6 +8755,7 @@ async function unfavoriteSelected() {
 }
 
 async function deleteSinglePhoto(photoId) {
+  if (!confirm('确定要将这个媒体移到回收站吗？')) return;
   try {
     await api.del(`/api/media/${photoId}`);
     removeDeletedPhotosFromUI([photoId]);
@@ -7171,6 +8859,7 @@ function selectAllInGroup(groupEl) {
 }
 async function deleteSelected() {
   if (!state.selected.size) return;
+  if (!confirm(`确定要将选中的 ${state.selected.size} 条媒体移到回收站吗？`)) return;
   const ids = [...state.selected];
   const deleted = [];
   const failed = [];
@@ -7472,6 +9161,15 @@ function parentAlbumFor(album) {
   return findAlbumByPath(albumParentPath(album));
 }
 
+function returnToAlbumParent(album = state.currentAlbum) {
+  const parent = parentAlbumFor(album);
+  if (parent) {
+    openAlbumDetail(parent);
+  } else {
+    switchView('albums');
+  }
+}
+
 function makeAlbumCard(album) {
   const albumKind = isFolderAlbum(album) ? 'folder' : 'user';
   const albumKindLabel = albumKind === 'folder' ? '文件夹' : '自建';
@@ -7498,11 +9196,11 @@ function makeAlbumCard(album) {
   card.addEventListener('click', () => openAlbumDetail(album));
   card.addEventListener('contextmenu', e => {
     e.preventDefault();
-    showAlbumContextMenu(e.clientX, e.clientY, album);
+    showAlbumContextMenu(e.clientX, e.clientY, album, { mobile: isTouchLikeDevice() });
   });
   addLongPress(card, e => {
     const touch = e.changedTouches[0];
-    showAlbumContextMenu(touch.clientX, touch.clientY, album);
+    showAlbumContextMenu(touch.clientX, touch.clientY, album, { mobile: true });
   });
   return card;
 }
@@ -7617,17 +9315,15 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
     });
   }
   $('#album-detail-back-btn')?.addEventListener('click', () => {
-    const parent = parentAlbumFor(album);
-    if (parent) openAlbumDetail(parent);
-    else switchView('albums');
+    returnToAlbumParent(album);
   });
   $('#album-detail-pill')?.addEventListener('contextmenu', e => {
     e.preventDefault();
-    showAlbumContextMenu(e.clientX, e.clientY, album, { includeView: false });
+    showAlbumContextMenu(e.clientX, e.clientY, album, { includeView: false, mobile: isTouchLikeDevice() });
   });
   addLongPress($('#album-detail-pill'), e => {
     const touch = e.changedTouches[0];
-    showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false });
+    showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false, mobile: true });
   });
   const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   const detailStateKey = `${album.id}:${state.albumDetailSort}:${state.mediaKindFilter}:${childAlbums.map(item => item.id).join(',')}`;
@@ -7998,19 +9694,23 @@ function renderLightbox() {
       </div>
     </div>
     <div class="lightbox-action-group">
-      <button class="btn-icon" id="lb-download" title="下载" aria-label="下载">${icons.download}</button>
       <button class="btn-icon hidden" id="lb-video-bookmark" title="视频书签" aria-label="视频书签">${icons.bookmark}</button>
       <button class="btn-icon" id="lb-favorite" title="收藏" aria-label="收藏">${icons.favorite}</button>
       <button class="btn-icon" id="lb-share" title="分享" aria-label="分享">${icons.share}</button>
       <button class="btn-icon" id="lb-more" title="更多操作" aria-label="更多操作">${icons.more}</button>
-      <button class="btn-icon lightbox-play-btn" id="lb-slideshow-toggle"><span class="lightbox-play-icon"></span><span class="lightbox-play-label">幻灯片</span></button>
+      <button class="btn-icon lightbox-play-btn" id="lb-slideshow-toggle"><span class="lightbox-play-icon"></span></button>
     </div>
   </div>
   <div class="lightbox-body">
     <div class="lightbox-loading" id="lb-loading"><div class="spinner"></div><span>媒体加载中…</span></div>
     <div class="lightbox-media-frame" id="lb-frame">
-      <img class="lightbox-img" id="lb-img" src="" alt="">
+      <img class="lightbox-img" id="lb-img" src="" alt="" draggable="false">
       <video class="lightbox-video hidden" id="lb-video" playsinline preload="metadata"></video>
+      <div class="lightbox-swipe-strip" id="lb-swipe-strip" aria-hidden="true">
+        <img class="lightbox-swipe-preview" id="lb-swipe-prev" alt="" draggable="false">
+        <img class="lightbox-swipe-preview" id="lb-swipe-current" alt="" draggable="false">
+        <img class="lightbox-swipe-preview" id="lb-swipe-next" alt="" draggable="false">
+      </div>
     </div>
     <div class="lightbox-video-progress hidden" id="lb-video-progress" aria-hidden="true">
       <span class="lightbox-video-progress-time" id="lb-video-progress-current">0:00</span>
@@ -8021,6 +9721,9 @@ function renderLightbox() {
       <span class="lightbox-video-progress-time" id="lb-video-progress-duration">0:00</span>
     </div>
     <div class="lightbox-volume-feedback" id="lb-volume-feedback"><div class="lightbox-volume-fill" id="lb-volume-fill"></div><span id="lb-volume-label">100%</span></div>
+    <button class="lb-touch-playback-toggle hidden" id="lb-touch-playback-toggle" type="button" title="播放视频" aria-label="播放视频" aria-pressed="false">
+      <span id="lb-touch-playback-icon">${icons.play}</span>
+    </button>
     <button class="lb-nav lb-prev" id="lb-prev">${icons.prev}</button>
     <button class="lb-nav lb-next" id="lb-next">${icons.next}</button>
   </div>
@@ -8038,7 +9741,8 @@ function updateLightboxHeaderLayout() {
   const applyMode = mode => {
     header.classList.toggle('lightbox-hide-slideshow-controls', mode >= 1);
     header.classList.toggle('lightbox-hide-zoom-controls', mode >= 2);
-    header.classList.toggle('lightbox-compact-controls', mode >= 3 || isMobileLayout());
+    const forceCompact = isMobileLayout() || (isTouchLikeDevice() && currentLightboxViewportOrientation() === 'portrait');
+    header.classList.toggle('lightbox-compact-controls', mode >= 3 || forceCompact);
     main.style.maxWidth = '';
   };
   const constrainTitle = () => {
@@ -8063,7 +9767,7 @@ function updateLightboxHeaderLayout() {
     }
     return false;
   };
-  if (isMobileLayout()) {
+  if (isMobileLayout() || (isTouchLikeDevice() && currentLightboxViewportOrientation() === 'portrait')) {
     applyMode(3);
     return;
   }
@@ -8102,6 +9806,29 @@ function unlockPageScrollForLightbox() {
   state.lightboxPageScrollTop = 0;
 }
 function bindGlobal() {
+  bindHoldAction($('#lb-favorite'), e => {
+    e.preventDefault();
+    e.stopPropagation();
+    void toggleFavorite(state.lightboxPhotos[state.lightboxIndex], {
+      mode: 'hold',
+      sourceButton: $('#lb-favorite'),
+    });
+  });
+  bindHoldAction($('#lb-video-bookmark'), e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    const result = addVideoBookmarkAtCurrentTime(photo, $('#lb-video'));
+    if (result.ok) {
+      showToast(`已添加书签 ${result.slot}`);
+      refreshVideoBookmarkMenu();
+      showVideoProgressActivity();
+      return;
+    }
+    if (result.reason === 'full') showToast('最多只能添加 10 个视频书签');
+    else if (result.reason === 'nearby') showToast('附近 1 秒内已有书签，未新增');
+    else showToast('当前无法添加视频书签');
+  });
   document.addEventListener('click', e => {
     if (!e.target.closest('.context-menu')) closeContextMenu();
   });
@@ -8124,7 +9851,7 @@ function bindGlobal() {
       }
       if (!$('#lightbox').classList.contains('open') && state.view === 'album-detail' && !document.querySelector('.modal-overlay.open')) {
         e.preventDefault();
-        switchView('albums');
+        returnToAlbumParent();
         return;
       }
       closeContextMenu();
@@ -8138,11 +9865,28 @@ function bindGlobal() {
     if (!e.altKey && e.key === 'Alt') syncLightboxTemporaryZoom(false);
   }, true);
   window.addEventListener('blur', () => resetLightboxTemporaryZoom());
+  window.addEventListener('orientationchange', () => scheduleLightboxViewportChangeCheck(true));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => scheduleLightboxViewportChangeCheck(false));
+  }
   document.addEventListener('fullscreenchange', () => {
     const lightbox = $('#lightbox');
     if (!lightbox || !lightbox.classList.contains('open')) return;
     if (!document.fullscreenElement) exitLightboxToContext();
   });
+  document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+  document.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
+  document.addEventListener('gestureend', e => e.preventDefault(), { passive: false });
+  document.addEventListener('touchstart', e => {
+    if (e.touches && e.touches.length >= 2) beginTouchPinch(e);
+  }, { passive: false });
+  document.addEventListener('touchmove', e => {
+    if (e.touches && e.touches.length >= 2) {
+      updateTouchPinch(e);
+    }
+  }, { passive: false });
+  document.addEventListener('touchend', endTouchPinch, { passive: false });
+  document.addEventListener('touchcancel', endTouchPinch, { passive: false });
   document.addEventListener('mousemove', e => {
     if (!$('#lightbox').classList.contains('open')) return;
     refreshLightboxUiActivity();
@@ -8150,9 +9894,23 @@ function bindGlobal() {
     if (state.lightboxBoostActive && state.lightboxPointerInside) applyLightboxZoom();
   }, { passive: true });
   document.addEventListener('click', e => {
+    if (Date.now() < state.lightboxSwipeClickSuppressUntil) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.target.closest('#lb-close')) exitLightboxToContext();
     if (e.target.closest('#lb-prev')) void lbNav(-1);
     if (e.target.closest('#lb-next')) void lbNav(1);
+    const touchPlaybackToggle = e.target.closest('#lb-touch-playback-toggle');
+    if (touchPlaybackToggle) {
+      e.preventDefault();
+      e.stopPropagation();
+      touchPlaybackToggle.classList.add('is-pressed');
+      setTimeout(() => touchPlaybackToggle.classList.remove('is-pressed'), 170);
+      toggleVideoPlayback();
+      return;
+    }
     if (e.target.closest('#lb-download')) downloadCurrentPhoto();
     if (e.target.closest('#lb-video-bookmark')) showVideoBookmarkMenu();
     if (e.target.closest('#lb-favorite')) toggleCurrentLightboxFavorite();
@@ -8160,6 +9918,13 @@ function bindGlobal() {
     if (e.target.closest('#lb-more')) showCurrentLightboxContextMenu();
     if (e.target.closest('#lb-fit-height')) setLightboxFit();
     if (e.target.closest('#lb-slideshow-toggle')) toggleSlideshow();
+    const progressMarker = e.target.closest('#lb-video-progress [data-video-bookmark-slot], #lb-video-progress [data-video-section]');
+    if (progressMarker) {
+      e.preventDefault();
+      e.stopPropagation();
+      jumpVideoToProgressMarker(progressMarker);
+      return;
+    }
     const bookmarkDelete = e.target.closest('[data-video-bookmark-delete]');
     if (bookmarkDelete) {
       e.preventDefault();
@@ -8196,18 +9961,6 @@ function bindGlobal() {
       seekVideoFromProgressClientX(progressTrack, e.clientX);
       return;
     }
-    const sectionMarker = e.target.closest('[data-video-section]');
-    if (sectionMarker) {
-      const video = $('#lb-video');
-      const section = Number(sectionMarker.dataset.videoSection);
-      if (video && Number.isFinite(video.duration) && section > 0) {
-        video.currentTime = video.duration / 10 * section;
-        updateVideoBookmarkProgress(video);
-        showVideoProgressActivity();
-      }
-      return;
-    }
-    if (handleLightboxVideoSurfaceClick(e)) return;
     if (shouldStopSlideshowFromClick(e.target)) stopSlideshow();
     if (e.target.closest('#global-search-btn, #floating-search-btn')) openGlobalSearch();
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
@@ -8229,14 +9982,34 @@ function bindGlobal() {
     state.lightboxLastPointerType = e.pointerType || '';
     const progressTrack = e.target.closest('.lightbox-video-progress-track');
     if (progressTrack) beginVideoProgressScrub(e, progressTrack);
+    else {
+      if (beginVideoSurfaceSwipe(e)) return;
+      else beginLightboxSwipe(e);
+    }
   }, true);
   document.addEventListener('pointermove', e => {
+    if (state.videoSurfaceSwipe && updateVideoSurfaceSwipe(e)) return;
+    if (state.lightboxSwipe && updateLightboxSwipe(e)) return;
     if (state.videoProgressScrubPointerId != null) updateVideoProgressScrub(e);
   }, true);
   document.addEventListener('pointerup', e => {
+    if (state.videoSurfaceSwipe) {
+      if (endVideoSurfaceSwipe(e)) return;
+    }
+    if (state.lightboxSwipe) {
+      void endLightboxSwipe(e);
+      return;
+    }
     if (state.videoProgressScrubPointerId != null) endVideoProgressScrub(e);
   }, true);
   document.addEventListener('pointercancel', e => {
+    if (state.videoSurfaceSwipe) {
+      if (endVideoSurfaceSwipe(e)) return;
+    }
+    if (state.lightboxSwipe) {
+      void endLightboxSwipe(e);
+      return;
+    }
     if (state.videoProgressScrubPointerId != null) endVideoProgressScrub(e);
   }, true);
   document.addEventListener('pointerup', e => {
@@ -8262,13 +10035,6 @@ function bindGlobal() {
       syncSearchInputs(e.target.value);
       scheduleGlobalSearch();
     }
-  });
-  window.addEventListener('storage', e => {
-    if (e.key !== videoBookmarksStorageKey && e.key !== legacyVideoBookmarksStorageKey) return;
-    state.videoBookmarks = loadVideoBookmarks();
-    refreshVideoBookmarkThumbIndicators();
-    updateVideoBookmarkButton();
-    updateVideoBookmarkProgress();
   });
   document.addEventListener('change', async e => {
     if (!e.target.matches('#library-build-exit-after')) return;
@@ -8302,7 +10068,7 @@ function bindGlobal() {
     e.preventDefault();
     const photo = state.lightboxPhotos[state.lightboxIndex];
     if (!photo) return;
-    showPhotoContextMenu(e.clientX, e.clientY, photo, findPhotoThumb(photo.id), state.lightboxPhotos);
+    showPhotoContextMenu(e.clientX, e.clientY, photo, findPhotoThumb(photo.id), state.lightboxPhotos, { lightbox: true, mobile: isTouchLikeDevice() });
   });
   document.addEventListener('change', e => {
     if (e.target.matches('#lb-slideshow-interval')) updateSlideshowSetting('interval', parseInt(e.target.value, 10) * 1000);
@@ -8331,6 +10097,42 @@ function handlePhotoGridKeyboard(e) {
   }
   return false;
 }
+function ensureAppleStatusBarStyle() {
+  let meta = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'apple-mobile-web-app-status-bar-style';
+    document.head.appendChild(meta);
+  }
+  meta.content = 'black-translucent';
+}
+function applyLightboxStatusBarSurface() {
+  ensureAppleStatusBarStyle();
+  syncLightboxViewportGeometry();
+  let themeMeta = document.querySelector('meta[name="theme-color"]');
+  state.lightboxHadThemeColorMeta = !!themeMeta;
+  state.lightboxPreviousThemeColor = themeMeta ? themeMeta.content : '';
+  if (!themeMeta) {
+    themeMeta = document.createElement('meta');
+    themeMeta.name = 'theme-color';
+    document.head.appendChild(themeMeta);
+  }
+  themeMeta.content = '#000000';
+  document.documentElement.classList.add('lightbox-open');
+}
+function restoreLightboxStatusBarSurface() {
+  document.documentElement.classList.remove('lightbox-open');
+  document.documentElement.style.removeProperty('--eg-lightbox-viewport-height');
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (!themeMeta) return;
+  if (!state.lightboxHadThemeColorMeta) {
+    themeMeta.remove();
+    return;
+  }
+  if (state.lightboxPreviousThemeColor) {
+    themeMeta.content = state.lightboxPreviousThemeColor;
+  }
+}
 async function openLightbox(photos, index, options = {}) {
   interruptThumbnailBuildForForegroundTask();
   const target = photos[Math.max(0, index)];
@@ -8343,6 +10145,10 @@ async function openLightbox(photos, index, options = {}) {
       return;
     }
   }
+  applyLightboxStatusBarSurface();
+  clearLightboxUnderzoomState();
+  clearLightboxDismissGesture();
+  resetLightboxZoomToDefault();
   state.lightboxPhotos = photos;
   state.lightboxIndex  = Math.max(0, index);
   state.lightboxSeedPhotoID = target && target.id ? Number(target.id) : null;
@@ -8350,6 +10156,12 @@ async function openLightbox(photos, index, options = {}) {
   state.lightboxReturnView = options.returnView || state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
   state.slideshowRandomQueue = [];
+  state.videoSurfaceSwipe = null;
+  state.lightboxSwipe = null;
+  state.lightboxSwipeClickSuppressUntil = 0;
+  state.lightboxPinchZoomActive = false;
+  state.lightboxViewportOrientation = currentLightboxViewportOrientation();
+  resetLightboxSwipeVisual();
   resetLightboxFocusPoint();
   resetLightboxTemporaryZoom();
   setLightboxMediaLoading(true);
@@ -8363,19 +10175,29 @@ async function openLightbox(photos, index, options = {}) {
 }
 function closeLightbox() {
   stopSlideshow();
+  clearLightboxUnderzoomState();
+  clearLightboxDismissGesture();
   clearLightboxUiIdleTimer();
   clearTimeout(state.lightboxVideoProgressTimer);
   clearTimeout(state.videoSurfaceTapTimer);
   state.videoProgressScrubPointerId = null;
   state.videoSurfaceLastTap = null;
+  state.videoSurfaceSwipe = null;
+  state.lightboxSwipe = null;
+  state.lightboxSwipeClickSuppressUntil = 0;
+  state.lightboxPinchZoomActive = false;
+  resetLightboxSwipeVisual();
   state.lightboxLastPointerType = '';
   $('#lb-video-progress')?.classList.remove('active', 'scrubbing', 'touching');
+  $('#lb-touch-playback-toggle')?.classList.remove('active');
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
   setLightboxMediaLoading(false);
   resetLightboxFocusPoint();
   resetLightboxTemporaryZoom();
   saveCurrentVideoResumePosition({ quiet: true });
+  syncTouchPlaybackButton(null, null);
+  clearLightboxMediaSession();
   const video = $('#lb-video');
   if (video) {
     video.pause();
@@ -8389,6 +10211,7 @@ function closeLightbox() {
   }
   $('#lightbox').classList.remove('open');
   unlockPageScrollForLightbox();
+  restoreLightboxStatusBarSurface();
   state.lightboxSeedPhotoID = null;
   state.lightboxSeedPreviewURL = '';
   state.lightboxReturnView = '';
@@ -8505,11 +10328,18 @@ function playNextVideoFromLightbox() {
 async function lbGoTo(index, options = {}) {
   if (index < 0) return;
   if (!(await ensureLightboxIndexAvailable(index))) return;
+  clearLightboxUnderzoomState();
+  clearLightboxDismissGesture();
+  if (state.lightboxPinchZoomActive) {
+    resetLightboxZoomToDefault();
+  }
   state.lightboxPlaybackToken += 1;
   const video = $('#lb-video');
   if (video) {
     saveCurrentVideoResumePosition({ quiet: true });
     video.pause();
+    syncTouchPlaybackButton(null, null);
+    clearLightboxMediaSession();
     video.removeAttribute('src');
     video.removeAttribute('controls');
     video.removeAttribute('controlslist');
@@ -8525,6 +10355,9 @@ async function lbGoTo(index, options = {}) {
 function lbRender() {
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
+  state.videoSurfaceSwipe = null;
+  state.lightboxSwipe = null;
+  resetLightboxSwipeVisual();
   rememberPhoto(p);
   resetLightboxFocusPoint();
   const img = $('#lb-img');
@@ -8562,13 +10395,25 @@ function lbRender() {
       handleVideoResumeTimeUpdate(video);
       updateVideoBookmarkProgress(video, p);
     };
+    video.onplay = () => {
+      syncTouchPlaybackButton(video, p);
+      updateMediaSessionPlaybackState(video);
+    };
+    video.onpause = () => {
+      syncTouchPlaybackButton(video, p);
+      updateMediaSessionPlaybackState(video);
+    };
     video.onended = () => {
+      syncTouchPlaybackButton(video, p);
+      updateMediaSessionPlaybackState(video);
       if (!playNextVideoFromLightbox()) updateVideoBookmarkProgress(video, p);
     };
     restoreVideoPlaybackPreference(video, p);
-    video.src = mediaFileURL(p);
+    video.src = mediaPlaybackURL(p);
     video.poster = mediaThumbURL(p);
     video.load();
+    syncTouchPlaybackButton(video, p);
+    syncLightboxMediaSession(p, video);
     if (video.readyState >= 2) {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
@@ -8585,6 +10430,8 @@ function lbRender() {
     video.onerror = null;
     video.onfocus = null;
     video.ontimeupdate = null;
+    video.onplay = null;
+    video.onpause = null;
     video.onended = null;
     video.removeAttribute('src');
     video.removeAttribute('controls');
@@ -8593,6 +10440,8 @@ function lbRender() {
     video.removeAttribute('disableremoteplayback');
     video.removeAttribute('x-webkit-airplay');
     video.load();
+    syncTouchPlaybackButton(null, p);
+    clearLightboxMediaSession();
     updateVideoBookmarkProgress(video, p);
     img.classList.remove('hidden');
     const thumbURL = mediaThumbURL(p);
@@ -8655,15 +10504,8 @@ function lbRender() {
   updateLightboxHeaderLayout();
   updateSlideshowControls();
   if (state.slideshowPlaying) scheduleSlideshowStep();
-  if (state.experimentalPrefetchNeighbors) prefetchAdjacentMedia();
-  const items = [
-    [isVideoMedia(p) ? icons.mediaVideo : icons.mediaImage, '类型', isVideoMedia(p) ? '视频' : '图片'],
-    [icons.infoMime, 'MIME', p.mime_type || '—'],
-    [icons.infoDate, '拍摄时间', formatDateTime(p.taken_at)],
-    [icons.infoDimensions, '尺寸', p.width && p.height ? `${p.width} × ${p.height}` : '—'],
-    [icons.infoRatio, '宽高比（近似）', aspectRatioLabel(p.width, p.height)],
-    [icons.infoFileSize, '大小（MB）', formatSizeMB(p.size)],
-  ].concat(buildExifInfoItems(p));
+  if (state.experimentalPrefetchNeighbors || isTouchLikeDevice()) prefetchAdjacentMedia();
+  const items = buildLightboxInfoItems(p);
   $('#lb-info').innerHTML = items.map(([icon, k, v]) => `<div class="lb-info-item" title="${escapeHTML(`${k}: ${v}`)}" aria-label="${escapeHTML(`${k}: ${v}`)}"><span class="lb-info-key">${icon}</span><span class="lb-info-value">${escapeHTML(v)}</span></div>`).join('');
 }
 
@@ -8695,6 +10537,17 @@ function prefetchAdjacentMedia() {
     img.src = mediaFileURL(photo);
   });
 }
+function warmLightboxIndex(index) {
+  if (!Number.isFinite(index) || index < 0) return;
+  if (index >= state.lightboxPhotos.length) {
+    if (!lightboxCanLoadMoreForward()) return;
+    const pageKey = `lightbox-page:${state.lightboxReturnView || state.view}:${index}`;
+    if (!rememberPrefetchedMedia(pageKey)) return;
+    void ensureLightboxIndexAvailable(index).then(() => prefetchAdjacentMedia()).catch(() => {});
+    return;
+  }
+  prefetchPhotosForLightboxIntent(state.lightboxPhotos, index);
+}
 async function lbShare() {
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
@@ -8711,6 +10564,11 @@ function triggerDownload(url) {
 	document.body.appendChild(a);
 	a.click();
 	a.remove();
+}
+function confirmDownloadAction(message, action) {
+  if (!confirm(message || '确定要下载吗？')) return false;
+  if (typeof action === 'function') action();
+  return true;
 }
 
 async function withButtonBusy(button, busyText, fn) {
@@ -8754,7 +10612,13 @@ async function triggerPostDownload(url, payload, fallbackName, options = {}) {
 function downloadCurrentPhoto() {
 	const p = state.lightboxPhotos[state.lightboxIndex];
 	if (!p) return;
-	withButtonBusy($('#lb-download'), '下载中…', async () => {
+  if (!confirm('确定要下载这个媒体吗？')) return;
+	const btn = $('#lb-download');
+	if (!btn) {
+		triggerDownload(`/api/media/${p.id}/download`);
+		return;
+	}
+	withButtonBusy(btn, '下载中…', async () => {
 		triggerDownload(`/api/media/${p.id}/download`);
 		await new Promise(resolve => setTimeout(resolve, 600));
 	});
@@ -8762,6 +10626,7 @@ function downloadCurrentPhoto() {
 
 async function downloadSelected() {
 	if (!state.selected.size) return;
+  if (!confirm(`确定要下载选中的 ${state.selected.size} 条媒体吗？`)) return;
 	const btn = $('#download-sel-btn');
 	try {
 		await withButtonBusy(btn, '打包中…', async () => {
@@ -8805,6 +10670,41 @@ async function downloadAllFavorites() {
     });
   } catch (e) {
     alert('下载失败: ' + (e.error || e));
+  }
+}
+
+async function buildBrowserPlaybackCacheForPhoto(photo) {
+  if (!photo || !photo.id) return;
+  if (!confirm(`确定要将“${photo.original_name || '这个视频'}”转换为受支持的 MP4 格式吗？`)) return;
+  try {
+    showToast('正在转换为受支持的格式…', 2200);
+    const resp = await api.post(`/api/media/${photo.id}/playback-cache`, {});
+    state.playbackCacheItemsLoaded = true;
+    if (!playbackCacheExistsForPhoto(photo)) {
+      state.playbackCacheItems = [...(state.playbackCacheItems || []), (resp && resp.data) || { uuid: photo.uuid, original_name: photo.original_name }];
+    }
+    showToast((resp && resp.message) || '已转换为受支持的格式');
+    if ($('#lightbox').classList.contains('open')) {
+      const current = state.lightboxPhotos[state.lightboxIndex];
+      if (current && Number(current.id) === Number(photo.id)) {
+        const video = $('#lb-video');
+        if (video && !video.classList.contains('hidden')) {
+          const wasPaused = video.paused;
+          const currentTime = Number(video.currentTime) || 0;
+          video.src = `${mediaPlaybackURL(photo)}?converted=${Date.now()}`;
+          video.load();
+          video.addEventListener('loadedmetadata', function onLoadedMetadata() {
+            video.removeEventListener('loadedmetadata', onLoadedMetadata);
+            if (currentTime > 0 && Number.isFinite(video.duration)) {
+              video.currentTime = Math.max(0, Math.min(video.duration - 0.2, currentTime));
+            }
+            if (!wasPaused) video.play().catch(() => {});
+          }, { once: true });
+        }
+      }
+    }
+  } catch (e) {
+    alert('转换失败: ' + ((e && e.error) || e));
   }
 }
 
@@ -9276,6 +11176,16 @@ function renderShareListModal() {
 </div>`;
 }
 
+function renderPlaybackCacheModal() {
+  return `<div class="modal-overlay" id="playback-cache-modal">
+  <div class="modal playback-cache-modal">
+    <div class="modal-title">播放兼容缓存</div>
+    <p class="modal-copy">查看、勾选和删除已经为浏览器播放生成的转码 / 封装文件；原始媒体不会被修改。</p>
+    <div id="playback-cache-content">${renderPlaybackCacheModalContent()}</div>
+  </div>
+</div>`;
+}
+
 function renderLibraryLogoGuideModal() {
   return `<div class="modal-overlay" id="library-logo-guide-modal">
   <div class="modal library-logo-crop-modal">
@@ -9499,6 +11409,7 @@ async function logout() {
 }
 
 // ── 启动 ──────────────────────────────────────────────
+initDeviceClasses();
 initTheme();
 initGridScale();
 initDisplaySettings();

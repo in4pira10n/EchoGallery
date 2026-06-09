@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="eg-pwa-bg" x1="84" y1="48" x2="430" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7bd7a7"/>
+      <stop offset=".48" stop-color="#2d6a5f"/>
+      <stop offset="1" stop-color="#08151b"/>
+    </linearGradient>
+    <radialGradient id="eg-pwa-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(166 126) rotate(54) scale(356)">
+      <stop stop-color="#f5efe6" stop-opacity=".82"/>
+      <stop offset=".36" stop-color="#f5efe6" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#f5efe6" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="eg-pwa-shadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#061015" flood-opacity=".32"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#eg-pwa-bg)"/>
+  <rect width="512" height="512" rx="112" fill="url(#eg-pwa-glow)"/>
+  <g filter="url(#eg-pwa-shadow)">
+    <rect x="112" y="136" width="288" height="240" rx="48" fill="#f5efe6" fill-opacity=".94"/>
+    <path d="M144 322l70-78 55 58 36-42 63 62v6c0 13.3-10.7 24-24 24H168c-13.3 0-24-10.7-24-24v-6z" fill="#2d6a5f"/>
+    <circle cx="318" cy="206" r="34" fill="#7bd7a7"/>
+  </g>
+</svg>

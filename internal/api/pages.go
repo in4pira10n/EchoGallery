@@ -14,13 +14,55 @@ const appPageFallbackHTML = `<!doctype html>
 <html lang="zh-CN" data-theme="">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2d6a5f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="EchoGallery">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>EchoGallery</title>
-  <link rel="stylesheet" href="/pages/app.css">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
+  <link rel="stylesheet" href="/pages/app.css?v=eg-20260609-17">
+  <script src="/static/pwa.js?v=eg-20260609-17" defer></script>
 </head>
 <body>
   <div id="app"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=eg-20260609-17"></script>
+</body>
+</html>`
+
+const galleryChooserPageFallbackHTML = `<!doctype html>
+<html lang="zh-CN" data-theme="">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2d6a5f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="EchoGallery">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Gallery 选择 - EchoGallery</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
+  <link rel="stylesheet" href="/pages/common.css">
+  <link rel="stylesheet" href="/pages/setup.css">
+  <link rel="stylesheet" href="/pages/gallery-chooser.css?v=eg-20260609-17">
+  <script src="/static/pwa.js?v=eg-20260609-17" defer></script>
+  <script src="/static/gallery-chooser.js?v=eg-20260609-17" defer></script>
+</head>
+<body data-gallery-chooser="1">
+<script>
+  (function(){
+    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<div class="login-wrap gallery-chooser-wrap">
+  <div class="login-card setup-card setup-recovery-card gallery-chooser-shell" id="gallery-chooser-root"></div>
+</div>
 </body>
 </html>`
 
@@ -29,9 +71,18 @@ const loginPageFallbackHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2d6a5f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="EchoGallery">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>登录 - EchoGallery</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
   <link rel="stylesheet" href="/pages/common.css">
   <link rel="stylesheet" href="/pages/login.css">
+  <script src="/static/pwa.js" defer></script>
 </head>
 <body>
 <div class="login-wrap">
@@ -97,9 +148,18 @@ const registerPageFallbackHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2d6a5f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="EchoGallery">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>注册 - EchoGallery</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
   <link rel="stylesheet" href="/pages/common.css">
   <link rel="stylesheet" href="/pages/login.css">
+  <script src="/static/pwa.js" defer></script>
 </head>
 <body>
 <div class="login-wrap">
@@ -185,6 +245,41 @@ func readPageAsset(staticFS fs.FS, relPath string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func readStaticAsset(staticFS fs.FS, relPath string) ([]byte, error) {
+	path := "web/static/" + relPath
+	if staticFS != nil {
+		if data, err := fs.ReadFile(staticFS, path); err == nil {
+			return data, nil
+		}
+	}
+	return os.ReadFile(path)
+}
+
+func handleWebManifest(staticFS fs.FS) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		data, err := readStaticAsset(staticFS, "manifest.webmanifest")
+		if err != nil {
+			c.String(http.StatusNotFound, "manifest not found")
+			return
+		}
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, "application/manifest+json; charset=utf-8", data)
+	}
+}
+
+func handleServiceWorker(staticFS fs.FS) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		data, err := readStaticAsset(staticFS, "sw.js")
+		if err != nil {
+			c.String(http.StatusNotFound, "service worker not found")
+			return
+		}
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Service-Worker-Allowed", "/")
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
+	}
+}
+
 func handleAppPage(staticFS fs.FS) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "app.html", appPageFallbackHTML, []string{`id="app"`, `/static/app.js`})
@@ -202,6 +297,13 @@ func handleLoginPage(staticFS fs.FS) gin.HandlerFunc {
 func handleRegisterPage(staticFS fs.FS) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "register.html", registerPageFallbackHTML, []string{`id="register-btn"`, `/api/auth/register`})
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+	}
+}
+
+func handleGalleryChooserPage(staticFS fs.FS) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		html := pageHTML(staticFS, "gallery-chooser.html", galleryChooserPageFallbackHTML, []string{`id="gallery-chooser-root"`, `/static/gallery-chooser.js`})
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 	}
 }

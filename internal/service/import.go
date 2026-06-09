@@ -537,6 +537,7 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		Width:         videoMeta.Width,
 		Height:        videoMeta.Height,
 		DurationMS:    videoMeta.DurationMS,
+		EXIF:          videoMetaEXIF(videoMeta),
 		SourceRelPath: job.sourceRelPath,
 		SourceModUnix: info.ModTime().UnixNano(),
 		TakenAt:       info.ModTime(),

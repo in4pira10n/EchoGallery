@@ -1,0 +1,36 @@
+{
+  "id": "/",
+  "name": "EchoGallery",
+  "short_name": "EchoGallery",
+  "description": "A local-first gallery for browsing, organizing, and remembering your media library.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "background_color": "#08151b",
+  "theme_color": "#2d6a5f",
+  "orientation": "any",
+  "categories": ["photo", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/static/pwa-icon.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "打开资源库",
+      "short_name": "资源库",
+      "url": "/",
+      "icons": [{ "src": "/static/pwa-icon.png", "sizes": "256x256", "type": "image/png" }]
+    },
+    {
+      "name": "登录",
+      "short_name": "登录",
+      "url": "/login",
+      "icons": [{ "src": "/static/pwa-icon.png", "sizes": "256x256", "type": "image/png" }]
+    }
+  ]
+}

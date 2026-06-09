@@ -30,7 +30,7 @@ type Repository interface {
 	GetVideoPlaybackPreference(photoID int64, userID int64) (*VideoPlaybackPreference, error)
 
 	// UpsertVideoPlaybackPreference 保存单个视频的播放偏好。
-	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*VideoPlaybackPreference, error)
+	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []VideoPlaybackBookmark) (*VideoPlaybackPreference, error)
 
 	// ListPhotos 查询用户图片（时间线，游标分页，不包含已删除）
 	ListPhotos(params ListPhotosParams) (*PhotoPage, error)
@@ -60,7 +60,7 @@ type Repository interface {
 	HardDeleteTrashedPhotos(userID int64) ([]*Photo, error)
 
 	// SetPhotoFavorite 设置收藏状态
-	SetPhotoFavorite(id int64, userID int64, favorite bool) error
+	SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error
 
 	// UpdatePhotoEXIF 更新图片 EXIF 数据。
 	UpdatePhotoEXIF(id int64, userID int64, exif *PhotoEXIF) error

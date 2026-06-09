@@ -8,15 +8,25 @@
   <meta name="apple-mobile-web-app-title" content="EchoGallery">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>EchoGallery</title>
+  <title>Gallery 选择 - EchoGallery</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/pwa-icon.png" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/app.css?v=eg-20260609-17">
+  <link rel="stylesheet" href="/pages/common.css">
+  <link rel="stylesheet" href="/pages/setup.css">
+  <link rel="stylesheet" href="/pages/gallery-chooser.css?v=eg-20260609-17">
   <script src="/static/pwa.js?v=eg-20260609-17" defer></script>
+  <script src="/static/gallery-chooser.js?v=eg-20260609-17" defer></script>
 </head>
-<body>
-  <div id="app"></div>
-  <script src="/static/app.js?v=eg-20260609-17"></script>
+<body data-gallery-chooser="1">
+<script>
+  (function(){
+    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<div class="login-wrap gallery-chooser-wrap">
+  <div class="login-card setup-card setup-recovery-card gallery-chooser-shell" id="gallery-chooser-root"></div>
+</div>
 </body>
 </html>

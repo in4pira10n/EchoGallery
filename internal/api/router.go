@@ -28,6 +28,50 @@ import (
 
 const authCookieName = "echogallery_token"
 
+func authCookieNameForConfig(cfg *config.Config) string {
+	if cfg == nil || cfg.Port <= 0 {
+		return authCookieName
+	}
+	return fmt.Sprintf("%s_%d", authCookieName, cfg.Port)
+}
+
+func authCookieNamesForConfig(cfg *config.Config) []string {
+	scopedName := authCookieNameForConfig(cfg)
+	if scopedName == authCookieName {
+		return []string{authCookieName}
+	}
+	return []string{scopedName, authCookieName}
+}
+
+func setAuthCookie(w http.ResponseWriter, cfg *config.Config, token string) {
+	http.SetCookie(w, &http.Cookie{Name: authCookieNameForConfig(cfg), Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(7 * 24 * time.Hour)})
+	if authCookieNameForConfig(cfg) != authCookieName {
+		clearAuthCookieName(w, authCookieName)
+	}
+}
+
+func clearAuthCookieName(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+}
+
+func clearAuthCookies(w http.ResponseWriter, cfg *config.Config) {
+	for _, name := range authCookieNamesForConfig(cfg) {
+		clearAuthCookieName(w, name)
+	}
+}
+
+func readAuthCookie(c *gin.Context, cfg *config.Config) (string, error) {
+	var lastErr error
+	for _, name := range authCookieNamesForConfig(cfg) {
+		value, err := c.Cookie(name)
+		if err == nil {
+			return value, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
 type thumbnailRequestTask struct {
 	done chan struct{}
 	path string
@@ -114,10 +158,17 @@ type videoRegistrar interface {
 	StartVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error)
 	GetVideoThumbnailRefreshStatus(userID int64) service.VideoThumbnailRefreshStatus
 	CancelVideoThumbnailRefresh(userID int64) (service.VideoThumbnailRefreshStatus, error)
-	SetPhotoFavorite(id int64, userID int64, favorite bool) error
+	ListPlaybackCaches(userID int64) ([]service.PlaybackCacheEntry, error)
+	BuildBrowserPlaybackCache(photoID int64, userID int64) (*service.PlaybackCacheEntry, error)
+	DeletePlaybackCaches(userID int64, uuids []string) (int, error)
+	StartPlaybackCacheBuild(userID int64) service.PlaybackCacheBuildStatus
+	GetPlaybackCacheBuildStatus(userID int64) service.PlaybackCacheBuildStatus
+	CancelPlaybackCacheBuild(userID int64) service.PlaybackCacheBuildStatus
+	SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error
 	GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	Upload(input service.UploadInput) (*service.UploadResult, error)
 	MediaPath(photo *storage.Photo) string
+	BrowserPlaybackPath(photo *storage.Photo) (string, string, error)
 	PosterPath(photo *storage.Photo) string
 	ThumbnailPath(photo *storage.Photo) string
 	ThumbnailCandidates(photo *storage.Photo) []string
@@ -134,12 +185,15 @@ type albumMediaRequest struct {
 }
 
 type favoriteRequest struct {
-	Favorite bool `json:"favorite"`
+	Favorite      bool `json:"favorite"`
+	SuperFavorite bool `json:"super_favorite"`
 }
 
 type videoPlaybackPreferenceRequest struct {
-	Volume *float64 `json:"volume"`
-	Muted  *bool    `json:"muted"`
+	Volume     *float64                         `json:"volume"`
+	Muted      *bool                            `json:"muted"`
+	ResumeTime *int64                           `json:"resume_time"`
+	Bookmarks  *[]storage.VideoPlaybackBookmark `json:"bookmarks"`
 }
 
 type thumbnailWarmRequest struct {
@@ -222,10 +276,12 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(compactGinLogger(), gin.Recovery())
 
 	r.GET("/static/*filepath", gin.WrapH(buildStaticHandler(staticFS)))
 	r.GET("/pages/*filepath", gin.WrapH(buildPagesHandler(staticFS)))
+	r.GET("/manifest.webmanifest", handleWebManifest(staticFS))
+	r.GET("/sw.js", handleServiceWorker(staticFS))
 
 	r.GET("/", pageAuthMiddleware(cfg), handleAppPage(staticFS))
 	r.GET("/albums", pageAuthMiddleware(cfg), handleAppPage(staticFS))
@@ -233,11 +289,12 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/trash", pageAuthMiddleware(cfg), handleAppPage(staticFS))
 	r.GET("/login", handleLoginPage(staticFS))
 	r.GET("/register", handleRegisterPage(staticFS))
+	r.GET("/gallery-chooser", handleGalleryChooserPage(staticFS))
 	r.GET("/api/login/hero", handleLoginHero(cfg, registrar))
 	r.GET("/api/login/hero/:kind/:name", handleServeLoginHeroAsset(cfg, registrar))
 	r.POST("/api/auth/login", handleLogin(cfg))
 	r.POST("/api/auth/register", handleRegister(cfg))
-	r.POST("/api/auth/logout", handleLogout())
+	r.POST("/api/auth/logout", handleLogout(cfg))
 	r.GET("/api/settings", authMiddleware(cfg), handleGetSettings(cfg))
 	r.PUT("/api/settings", authMiddleware(cfg), handleUpdateSettings(cfg))
 	r.POST("/api/settings/restart", authMiddleware(cfg), handleRestartApp(restart))
@@ -265,6 +322,11 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleGetVideoThumbnailRefreshStatus(cfg, registrar))
 	r.POST("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleStartVideoThumbnailRefresh(cfg, registrar))
 	r.DELETE("/api/settings/video-thumbnails/refresh", authMiddleware(cfg), handleCancelVideoThumbnailRefresh(cfg, registrar))
+	r.GET("/api/settings/playback-cache", authMiddleware(cfg), handleListPlaybackCaches(cfg, registrar))
+	r.DELETE("/api/settings/playback-cache", authMiddleware(cfg), handleDeletePlaybackCaches(cfg, registrar))
+	r.GET("/api/settings/playback-cache/build", authMiddleware(cfg), handleGetPlaybackCacheBuildStatus(cfg, registrar))
+	r.POST("/api/settings/playback-cache/build", authMiddleware(cfg), handleStartPlaybackCacheBuild(cfg, registrar))
+	r.DELETE("/api/settings/playback-cache/build", authMiddleware(cfg), handleCancelPlaybackCacheBuild(cfg, registrar))
 	r.POST("/api/settings/exif/backfill", authMiddleware(cfg), handleBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authMiddleware(cfg), handleGetPlayerKeymap(cfg))
 
@@ -292,6 +354,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/:id/albums", authMiddleware(cfg), handleListMediaAlbums(cfg, registrar))
 		media.GET("/:id/playback", authMiddleware(cfg), handleGetVideoPlaybackPreference(cfg, registrar))
 		media.PUT("/:id/playback", authMiddleware(cfg), handleSaveVideoPlaybackPreference(cfg, registrar))
+		media.POST("/:id/playback-cache", authMiddleware(cfg), handleBuildBrowserPlaybackCache(cfg, registrar))
 		media.GET("/:id", authMiddleware(cfg), handleGetMedia(cfg, registrar))
 		media.GET("/:id/download", authMiddleware(cfg), handleDownloadMedia(cfg, registrar))
 		media.POST("/:id/play", authMiddleware(cfg), handlePlayMediaWithSystemPlayer(cfg, registrar))
@@ -306,6 +369,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	}
 
 	r.GET("/media/files/:uuid", authMiddleware(cfg), handleServeMediaFile(cfg, registrar))
+	r.GET("/media/playback/:uuid", authMiddleware(cfg), handleServeBrowserPlaybackFile(cfg, registrar))
 	r.GET("/media/photos/:uuid", authMiddleware(cfg), handleServePhotoFile(cfg, registrar))
 	r.GET("/media/thumbnails/:uuid", authMiddleware(cfg), handleServeThumbnailFile(cfg, registrar))
 	r.GET("/media/posters/:uuid", authMiddleware(cfg), handleServePoster(cfg, registrar))
@@ -323,6 +387,86 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	})
 
 	return r
+}
+
+func compactGinLogger() gin.HandlerFunc {
+	return gin.LoggerWithFormatter(func(p gin.LogFormatterParams) string {
+		path := compactLogPath(p.Path)
+		timeText := p.TimeStamp.Format("15:04:05")
+		statusText := fmt.Sprintf("%3d", p.StatusCode)
+		methodText := fmt.Sprintf("%-6s", p.Method)
+		latencyText := compactLogLatency(p.Latency)
+		if p.IsOutputColor() {
+			prefixPlain := fmt.Sprintf("%s %s %s %s", timeText, statusText, strings.TrimSpace(methodText), path)
+			padding := compactLogLatencyPadding(prefixPlain, latencyText)
+			line := fmt.Sprintf("%s %s%s%s %s%s%s %s%s%s",
+				timeText,
+				p.StatusCodeColor(),
+				statusText,
+				p.ResetColor(),
+				p.MethodColor(),
+				methodText,
+				p.ResetColor(),
+				path,
+				padding,
+				latencyText,
+			)
+			if p.ErrorMessage != "" {
+				line += " | " + strings.TrimSpace(p.ErrorMessage)
+			}
+			return line + "\n"
+		}
+		prefixPlain := fmt.Sprintf("%s %s %s %s", timeText, statusText, strings.TrimSpace(methodText), path)
+		padding := compactLogLatencyPadding(prefixPlain, latencyText)
+		line := fmt.Sprintf("%s %s %s %s%s%s",
+			timeText,
+			statusText,
+			methodText,
+			path,
+			padding,
+			latencyText,
+		)
+		if p.ErrorMessage != "" {
+			line += " | " + strings.TrimSpace(p.ErrorMessage)
+		}
+		return line + "\n"
+	})
+}
+
+func compactLogPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	const maxLen = 46
+	if len(path) <= maxLen {
+		return path
+	}
+	const head = 28
+	const tail = maxLen - head - 3
+	return path[:head] + "..." + path[len(path)-tail:]
+}
+
+func compactLogLatency(latency time.Duration) string {
+	switch {
+	case latency >= time.Second:
+		return fmt.Sprintf("%.2fs", latency.Seconds())
+	case latency >= time.Millisecond:
+		return fmt.Sprintf("%.1fms", float64(latency)/float64(time.Millisecond))
+	case latency >= time.Microsecond:
+		return fmt.Sprintf("%dus", latency.Microseconds())
+	default:
+		return fmt.Sprintf("%dns", latency.Nanoseconds())
+	}
+}
+
+func compactLogLatencyPadding(prefix, latency string) string {
+	const targetWidth = 96
+	padding := targetWidth - len(prefix) - len(latency)
+	if padding < 2 {
+		padding = 2
+	}
+	return strings.Repeat(" ", padding)
 }
 
 func buildStaticHandler(staticFS fs.FS) http.Handler {
@@ -362,7 +506,7 @@ func handleLogin(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "生成令牌失败"})
 			return
 		}
-		http.SetCookie(c.Writer, &http.Cookie{Name: authCookieName, Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(7 * 24 * time.Hour)})
+		setAuthCookie(c.Writer, cfg, token)
 		c.JSON(http.StatusOK, gin.H{"message": "登录成功"})
 	}
 }
@@ -387,9 +531,9 @@ func handleRegister(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func handleLogout() gin.HandlerFunc {
+func handleLogout(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		http.SetCookie(c.Writer, &http.Cookie{Name: authCookieName, Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
+		clearAuthCookies(c.Writer, cfg)
 		c.JSON(http.StatusOK, gin.H{"message": "已退出登录"})
 	}
 }
@@ -652,12 +796,17 @@ func handleSetMediaFavorite(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
-		if err := registrar.SetPhotoFavorite(id, userID, req.Favorite); err != nil {
+		if req.SuperFavorite {
+			req.Favorite = true
+		}
+		if err := registrar.SetPhotoFavorite(id, userID, req.Favorite, req.SuperFavorite); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		message := "已取消收藏"
-		if req.Favorite {
+		if req.SuperFavorite {
+			message = "已加入特别喜欢"
+		} else if req.Favorite {
 			message = "已加入个人收藏"
 		}
 		c.JSON(http.StatusOK, gin.H{"message": message})
@@ -696,7 +845,7 @@ func handleGetVideoPlaybackPreference(cfg *config.Config, registrar interface{})
 func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	type playbackSaver interface {
 		GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
-		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*storage.VideoPlaybackPreference, error)
+		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error)
 	}
 	return func(c *gin.Context) {
 		saver, ok := registrar.(playbackSaver)
@@ -721,9 +870,13 @@ func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}
 		}
 		volume := 1.0
 		muted := false
+		resumeTime := int64(0)
+		var bookmarks []storage.VideoPlaybackBookmark
 		if existing, err := saver.GetVideoPlaybackPreference(id, userID); err == nil && existing != nil {
 			volume = existing.Volume
 			muted = existing.Muted
+			resumeTime = existing.ResumeTime
+			bookmarks = append([]storage.VideoPlaybackBookmark(nil), existing.Bookmarks...)
 		}
 		if req.Volume != nil {
 			volume = *req.Volume
@@ -731,7 +884,13 @@ func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}
 		if req.Muted != nil {
 			muted = *req.Muted
 		}
-		pref, err := saver.SaveVideoPlaybackPreference(id, userID, volume, muted)
+		if req.ResumeTime != nil {
+			resumeTime = *req.ResumeTime
+		}
+		if req.Bookmarks != nil {
+			bookmarks = append([]storage.VideoPlaybackBookmark(nil), (*req.Bookmarks)...)
+		}
+		pref, err := saver.SaveVideoPlaybackPreference(id, userID, volume, muted, resumeTime, bookmarks)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -1760,6 +1919,70 @@ func handleServeMediaFile(cfg *config.Config, registrar videoRegistrar) gin.Hand
 	}
 }
 
+func handleServeBrowserPlaybackFile(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		uuid := strings.TrimSuffix(c.Param("uuid"), filepath.Ext(c.Param("uuid")))
+		photo, err := registrar.GetPhotoByUUIDAny(uuid, userID)
+		if err != nil || photo == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
+			return
+		}
+		playbackPath, mimeType, err := registrar.BrowserPlaybackPath(photo)
+		if err != nil {
+			c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "当前浏览器暂不支持直接播放该文件，请先在“更多操作”里转换为受支持的格式"})
+			return
+		}
+		if strings.TrimSpace(mimeType) != "" {
+			c.Header("Content-Type", mimeType)
+		} else if strings.TrimSpace(photo.MimeType) != "" {
+			c.Header("Content-Type", photo.MimeType)
+		}
+		c.Header("Accept-Ranges", "bytes")
+		c.File(playbackPath)
+	}
+}
+
+func handleBuildBrowserPlaybackCache(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	type playbackBuilder interface {
+		BuildBrowserPlaybackCache(photoID int64, userID int64) (*service.PlaybackCacheEntry, error)
+	}
+	return func(c *gin.Context) {
+		builder, ok := registrar.(playbackBuilder)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "播放兼容转换服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "照片/视频ID 无效"})
+			return
+		}
+		entry, err := builder.BuildBrowserPlaybackCache(id, userID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message": "已转换为受支持的格式",
+			"data":    entry,
+		})
+	}
+}
+
 func handleServePoster(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if registrar == nil {
@@ -1932,7 +2155,7 @@ func parseClientLastModified(value string) time.Time {
 
 func authMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Cookie(authCookieName)
+		cookie, err := readAuthCookie(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录或登录已过期"})
 			c.Abort()
@@ -1958,7 +2181,7 @@ func authMiddleware(cfg *config.Config) gin.HandlerFunc {
 
 func pageAuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Cookie(authCookieName)
+		cookie, err := readAuthCookie(c, cfg)
 		if err != nil {
 			c.Redirect(http.StatusSeeOther, "/login")
 			c.Abort()

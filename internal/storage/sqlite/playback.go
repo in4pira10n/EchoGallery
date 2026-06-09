@@ -2,7 +2,10 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"echogallery/internal/storage"
@@ -11,44 +14,106 @@ import (
 // GetVideoPlaybackPreference 获取指定用户在单个视频上的播放偏好。
 func (s *DB) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
 	row := s.db.QueryRow(`
-		SELECT photo_id, volume, muted, updated_at
+		SELECT photo_id, volume, muted, resume_time, bookmarks_json, updated_at
 		FROM video_playback_preferences
 		WHERE photo_id = ? AND user_id = ?`, photoID, userID)
 
 	var pref storage.VideoPlaybackPreference
 	var muted int
-	if err := row.Scan(&pref.PhotoID, &pref.Volume, &muted, &pref.UpdatedAt); err != nil {
+	var bookmarksJSON string
+	if err := row.Scan(&pref.PhotoID, &pref.Volume, &muted, &pref.ResumeTime, &bookmarksJSON, &pref.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
 	pref.Muted = muted != 0
+	pref.Bookmarks = decodePlaybackBookmarks(bookmarksJSON)
 	return &pref, nil
 }
 
 // UpsertVideoPlaybackPreference 保存指定用户在单个视频上的播放偏好。
-func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool) (*storage.VideoPlaybackPreference, error) {
+func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
 	updatedAt := time.Now()
 	mutedValue := 0
 	if muted {
 		mutedValue = 1
 	}
+	normalizedBookmarks := normalizePlaybackBookmarks(bookmarks)
+	bookmarksJSON := encodePlaybackBookmarks(normalizedBookmarks)
 	if _, err := s.db.Exec(`
-		INSERT INTO video_playback_preferences (photo_id, user_id, volume, muted, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO video_playback_preferences (photo_id, user_id, volume, muted, resume_time, bookmarks_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(photo_id, user_id) DO UPDATE SET
 		    volume = excluded.volume,
 		    muted = excluded.muted,
+		    resume_time = excluded.resume_time,
+		    bookmarks_json = excluded.bookmarks_json,
 		    updated_at = excluded.updated_at`,
-		photoID, userID, volume, mutedValue, updatedAt,
+		photoID, userID, volume, mutedValue, resumeTime, bookmarksJSON, updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("保存视频播放偏好失败: %w", err)
 	}
 	return &storage.VideoPlaybackPreference{
-		PhotoID:   photoID,
-		Volume:    volume,
-		Muted:     muted,
-		UpdatedAt: updatedAt,
+		PhotoID:    photoID,
+		Volume:     volume,
+		Muted:      muted,
+		ResumeTime: resumeTime,
+		Bookmarks:  normalizedBookmarks,
+		UpdatedAt:  updatedAt,
 	}, nil
+}
+
+func encodePlaybackBookmarks(bookmarks []storage.VideoPlaybackBookmark) string {
+	if len(bookmarks) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(normalizePlaybackBookmarks(bookmarks))
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodePlaybackBookmarks(raw string) []storage.VideoPlaybackBookmark {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var bookmarks []storage.VideoPlaybackBookmark
+	if err := json.Unmarshal([]byte(raw), &bookmarks); err != nil {
+		return nil
+	}
+	return normalizePlaybackBookmarks(bookmarks)
+}
+
+func normalizePlaybackBookmarks(bookmarks []storage.VideoPlaybackBookmark) []storage.VideoPlaybackBookmark {
+	if len(bookmarks) == 0 {
+		return nil
+	}
+	normalized := make([]storage.VideoPlaybackBookmark, 0, len(bookmarks))
+	seen := make(map[int]struct{}, len(bookmarks))
+	for _, bookmark := range bookmarks {
+		slot := bookmark.Slot
+		if slot < 1 || slot > 10 {
+			continue
+		}
+		if _, exists := seen[slot]; exists {
+			continue
+		}
+		seen[slot] = struct{}{}
+		timeValue := bookmark.Time
+		if timeValue < 0 {
+			timeValue = 0
+		}
+		normalized = append(normalized, storage.VideoPlaybackBookmark{
+			Slot: slot,
+			Time: timeValue,
+			Name: strings.TrimSpace(bookmark.Name),
+		})
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		return normalized[i].Slot < normalized[j].Slot
+	})
+	return normalized
 }
