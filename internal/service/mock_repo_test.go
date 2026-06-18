@@ -10,13 +10,17 @@ import (
 
 // mockRepo 用于测试的 Repository mock 实现
 type mockRepo struct {
-	photos                   map[int64]*storage.Photo
-	albums                   map[int64]*storage.Album
-	albumPhotos              map[int64][]int64 // albumID -> []photoID
-	shareLinks               map[int64]*storage.ShareLink
-	playbackPrefs            map[string]*storage.VideoPlaybackPreference
-	nextID                   int64
-	sourceRelPathLookupCount int
+	photos                    map[int64]*storage.Photo
+	albums                    map[int64]*storage.Album
+	albumPhotos               map[int64][]int64 // albumID -> []photoID
+	shareLinks                map[int64]*storage.ShareLink
+	playbackPrefs             map[string]*storage.VideoPlaybackPreference
+	nextID                    int64
+	sourceRelPathLookupCount  int
+	sourceMediaIndexLoadCount int
+	libraryScanSnapshot       *storage.LibraryScanSnapshot
+	libraryVideoVolume        float64
+	libraryVideoVolumeSet     bool
 }
 
 func newMockRepo() *mockRepo {
@@ -87,6 +91,7 @@ func (m *mockRepo) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (
 }
 
 func (m *mockRepo) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaInfo, error) {
+	m.sourceMediaIndexLoadCount++
 	index := make(map[string]storage.SourceMediaInfo)
 	for _, p := range m.photos {
 		if p.UploadedBy == userID && p.SourceRelPath != "" {
@@ -99,6 +104,32 @@ func (m *mockRepo) ListSourceMediaIndex(userID int64) (map[string]storage.Source
 		}
 	}
 	return index, nil
+}
+
+func (m *mockRepo) GetLibraryScanSnapshot() (*storage.LibraryScanSnapshot, error) {
+	if m.libraryScanSnapshot == nil {
+		return nil, nil
+	}
+	snapshot := *m.libraryScanSnapshot
+	return &snapshot, nil
+}
+
+func (m *mockRepo) SaveLibraryScanSnapshot(snapshot storage.LibraryScanSnapshot) error {
+	m.libraryScanSnapshot = &snapshot
+	return nil
+}
+
+func (m *mockRepo) GetLibraryVideoVolume() (float64, bool, error) {
+	if !m.libraryVideoVolumeSet {
+		return 1, false, nil
+	}
+	return m.libraryVideoVolume, true, nil
+}
+
+func (m *mockRepo) SaveLibraryVideoVolume(volume float64) error {
+	m.libraryVideoVolume = volume
+	m.libraryVideoVolumeSet = true
+	return nil
 }
 
 func (m *mockRepo) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
@@ -241,6 +272,19 @@ func (m *mockRepo) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath 
 	p.OriginalName = originalName
 	p.Size = size
 	p.SourceModUnix = sourceModUnix
+	return nil
+}
+
+func (m *mockRepo) UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *storage.PhotoEXIF, width int, height int, durationMS int64) error {
+	p, ok := m.photos[id]
+	if !ok || p.UploadedBy != userID {
+		return fmt.Errorf("图片不存在")
+	}
+	p.TakenAt = takenAt
+	p.EXIF = exif
+	p.Width = width
+	p.Height = height
+	p.DurationMS = durationMS
 	return nil
 }
 

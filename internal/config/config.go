@@ -21,10 +21,19 @@ const (
 // configPathOverride 用于测试时覆盖配置文件路径
 var configPathOverride string
 
+const (
+	UserRoleAdmin   = "admin"
+	UserRoleRoot    = "root"
+	UserRoleVisitor = "visitor"
+)
+
 // User 表示一个用户
 type User struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
+	Username          string   `json:"username"`
+	PasswordHash      string   `json:"password_hash"`
+	Role              string   `json:"role,omitempty"`
+	AllowedLibraryIDs []string `json:"allowed_library_ids,omitempty"`
+	DefaultLibraryID  string   `json:"default_library_id,omitempty"`
 }
 
 type Workshop struct {
@@ -79,45 +88,51 @@ type configDefaultsProbe struct {
 }
 
 type Library struct {
-	ID          string `json:"id,omitempty"`
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	LogoAsset   string `json:"logo_asset,omitempty"`
-	AccentColor string `json:"accent_color,omitempty"`
+	ID            string `json:"id,omitempty"`
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	LogoAsset     string `json:"logo_asset,omitempty"`
+	AccentColor   string `json:"accent_color,omitempty"`
+	Status        string `json:"status,omitempty"`
+	OwnerUsername string `json:"owner_username,omitempty"`
 }
 
 type persistedConfig struct {
-	Port            int          `json:"port"`
-	ActiveProfile   string       `json:"active_profile,omitempty"`
-	ActiveLibraryID string       `json:"active_library_id,omitempty"`
-	StoragePath     string       `json:"storage_path,omitempty"`
-	Libraries       []Library    `json:"libraries,omitempty"`
-	ThumbnailDir    string       `json:"thumbnail_dir,omitempty"`
-	ThumbnailSize   int          `json:"thumbnail_size,omitempty"`
-	TrashDir        string       `json:"trash_dir,omitempty"`
-	JWTSecret       string       `json:"jwt_secret"`
-	UseSystemPlayer bool         `json:"use_system_player,omitempty"`
-	Users           []User       `json:"users"`
-	Preferences     *Preferences `json:"preferences,omitempty"`
-	Workshop        Workshop     `json:"workshop"`
+	Port            int            `json:"port"`
+	ActiveProfile   string         `json:"active_profile,omitempty"`
+	ActiveLibraryID string         `json:"active_library_id,omitempty"`
+	StoragePath     string         `json:"storage_path,omitempty"`
+	Libraries       []Library      `json:"libraries,omitempty"`
+	BatchScan       BatchTaskState `json:"batch_scan,omitempty"`
+	BatchThumbnails BatchTaskState `json:"batch_thumbnails,omitempty"`
+	ThumbnailDir    string         `json:"thumbnail_dir,omitempty"`
+	ThumbnailSize   int            `json:"thumbnail_size,omitempty"`
+	TrashDir        string         `json:"trash_dir,omitempty"`
+	JWTSecret       string         `json:"jwt_secret"`
+	UseSystemPlayer bool           `json:"use_system_player,omitempty"`
+	Users           []User         `json:"users"`
+	Preferences     *Preferences   `json:"preferences,omitempty"`
+	Workshop        Workshop       `json:"workshop"`
 }
 
 // Config 应用配置
 type Config struct {
-	Port            int         `json:"port"`
-	ActiveProfile   string      `json:"active_profile,omitempty"`
-	ActiveLibraryID string      `json:"active_library_id,omitempty"`
-	StoragePath     string      `json:"storage_path"`
-	Libraries       []Library   `json:"libraries,omitempty"`
-	ThumbnailDir    string      `json:"thumbnail_dir"`
-	ThumbnailSize   int         `json:"thumbnail_size"`
-	TrashDir        string      `json:"trash_dir"`
-	JWTSecret       string      `json:"jwt_secret"`
-	UseSystemPlayer bool        `json:"use_system_player"`
-	Users           []User      `json:"users"`
-	Preferences     Preferences `json:"preferences"`
-	Workshop        Workshop    `json:"workshop"`
-	AppDataDir      string      `json:"-"`
+	Port            int            `json:"port"`
+	ActiveProfile   string         `json:"active_profile,omitempty"`
+	ActiveLibraryID string         `json:"active_library_id,omitempty"`
+	StoragePath     string         `json:"storage_path"`
+	Libraries       []Library      `json:"libraries,omitempty"`
+	BatchScan       BatchTaskState `json:"batch_scan,omitempty"`
+	BatchThumbnails BatchTaskState `json:"batch_thumbnails,omitempty"`
+	ThumbnailDir    string         `json:"thumbnail_dir"`
+	ThumbnailSize   int            `json:"thumbnail_size"`
+	TrashDir        string         `json:"trash_dir"`
+	JWTSecret       string         `json:"jwt_secret"`
+	UseSystemPlayer bool           `json:"use_system_player"`
+	Users           []User         `json:"users"`
+	Preferences     Preferences    `json:"preferences"`
+	Workshop        Workshop       `json:"workshop"`
+	AppDataDir      string         `json:"-"`
 }
 
 // configPath 返回配置文件的绝对路径（与可执行程序同级）
@@ -189,7 +204,7 @@ func (c *Config) applyActiveProfile() error {
 		}
 		return fmt.Errorf("failed to load active profile: %w", err)
 	}
-	c.ApplyProfile(profile)
+	c.ApplyProfileForUser(active, profile)
 	return nil
 }
 
@@ -236,7 +251,9 @@ func (c *Config) validateGlobal() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Port)
 	}
+	c.normalizeUsers()
 	c.normalizeLibraries()
+	c.normalizeUserLibraries()
 	c.ThumbnailDir = strings.TrimSpace(c.ThumbnailDir)
 	if c.ThumbnailSize != 512 {
 		c.ThumbnailSize = 512
@@ -245,6 +262,104 @@ func (c *Config) validateGlobal() error {
 		return fmt.Errorf("jwt_secret cannot be empty")
 	}
 	return nil
+}
+
+func NormalizeUserRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case UserRoleRoot:
+		return UserRoleRoot
+	case UserRoleVisitor:
+		return UserRoleVisitor
+	case UserRoleAdmin:
+		return UserRoleAdmin
+	default:
+		return UserRoleAdmin
+	}
+}
+
+func (c *Config) normalizeUsers() {
+	if len(c.Users) == 0 {
+		return
+	}
+	normalized := make([]User, 0, len(c.Users))
+	for _, user := range c.Users {
+		username := strings.TrimSpace(user.Username)
+		if username == "" {
+			continue
+		}
+		normalized = append(normalized, User{
+			Username:          username,
+			PasswordHash:      strings.TrimSpace(user.PasswordHash),
+			Role:              NormalizeUserRole(user.Role),
+			AllowedLibraryIDs: append([]string(nil), user.AllowedLibraryIDs...),
+			DefaultLibraryID:  strings.TrimSpace(user.DefaultLibraryID),
+		})
+	}
+	c.Users = normalized
+}
+
+func (c *Config) normalizeUserLibraries() {
+	allowed := make(map[string]Library, len(c.Libraries))
+	allIDs := make([]string, 0, len(c.Libraries))
+	for _, library := range c.Libraries {
+		id := strings.TrimSpace(library.ID)
+		if id == "" {
+			continue
+		}
+		allowed[id] = library
+		allIDs = append(allIDs, id)
+	}
+	for index := range c.Users {
+		if NormalizeUserRole(c.Users[index].Role) == UserRoleRoot {
+			c.Users[index].AllowedLibraryIDs = nil
+			c.Users[index].DefaultLibraryID = ""
+			continue
+		}
+		if NormalizeUserRole(c.Users[index].Role) == UserRoleAdmin {
+			c.Users[index].AllowedLibraryIDs = append([]string(nil), allIDs...)
+			defaultID := normalizeLibraryID(c.Users[index].DefaultLibraryID)
+			if defaultID == "" || !containsString(allIDs, defaultID) {
+				if len(allIDs) > 0 {
+					defaultID = allIDs[0]
+				} else {
+					defaultID = ""
+				}
+			}
+			c.Users[index].DefaultLibraryID = defaultID
+			continue
+		}
+		selected := make([]string, 0, len(c.Users[index].AllowedLibraryIDs))
+		seen := make(map[string]struct{}, len(c.Users[index].AllowedLibraryIDs))
+		for _, id := range c.Users[index].AllowedLibraryIDs {
+			id = normalizeLibraryID(id)
+			if id == "" {
+				continue
+			}
+			if _, ok := allowed[id]; !ok {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			selected = append(selected, id)
+		}
+		c.Users[index].AllowedLibraryIDs = selected
+		if len(c.Users[index].AllowedLibraryIDs) == 0 {
+			if primaryID := c.PrimaryLibraryID(); primaryID != "" {
+				c.Users[index].AllowedLibraryIDs = []string{primaryID}
+			}
+		}
+		defaultID := normalizeLibraryID(c.Users[index].DefaultLibraryID)
+		if defaultID == "" || !containsString(c.Users[index].AllowedLibraryIDs, defaultID) {
+			if len(c.Users[index].AllowedLibraryIDs) > 0 {
+				defaultID = c.Users[index].AllowedLibraryIDs[0]
+			} else {
+				defaultID = ""
+			}
+		}
+		c.Users[index].DefaultLibraryID = defaultID
+	}
 }
 
 func (c *Config) validateRuntime() error {
@@ -344,16 +459,18 @@ func (c *Config) ensureActiveProfilePersisted() error {
 
 func (c *Config) persisted() persistedConfig {
 	cfg := persistedConfig{
-		Port:          c.Port,
-		ActiveProfile: strings.TrimSpace(c.ActiveProfile),
-		JWTSecret:     c.JWTSecret,
-		Users:         append([]User(nil), c.Users...),
-		Workshop:      c.Workshop,
+		Port:            c.Port,
+		ActiveProfile:   strings.TrimSpace(c.ActiveProfile),
+		Libraries:       append([]Library(nil), c.Libraries...),
+		BatchScan:       c.BatchScan,
+		BatchThumbnails: c.BatchThumbnails,
+		JWTSecret:       c.JWTSecret,
+		Users:           append([]User(nil), c.Users...),
+		Workshop:        c.Workshop,
 	}
 	if cfg.ActiveProfile == "" {
 		cfg.ActiveLibraryID = strings.TrimSpace(c.ActiveLibraryID)
 		cfg.StoragePath = c.StoragePath
-		cfg.Libraries = append([]Library(nil), c.Libraries...)
 		cfg.ThumbnailDir = c.ThumbnailDir
 		cfg.ThumbnailSize = c.ThumbnailSize
 		cfg.TrashDir = c.TrashDir
@@ -393,11 +510,13 @@ func (c *Config) normalizeLibraries() {
 		}
 		id := ensureLibraryIDForPath(lib.ID, path, usedIDs)
 		normalized = append(normalized, Library{
-			ID:          id,
-			Name:        name,
-			Path:        path,
-			LogoAsset:   strings.TrimSpace(lib.LogoAsset),
-			AccentColor: strings.TrimSpace(lib.AccentColor),
+			ID:            id,
+			Name:          name,
+			Path:          path,
+			LogoAsset:     strings.TrimSpace(lib.LogoAsset),
+			AccentColor:   strings.TrimSpace(lib.AccentColor),
+			Status:        normalizeLibraryStatus(strings.TrimSpace(lib.Status)),
+			OwnerUsername: c.normalizeLibraryOwnerUsername(strings.TrimSpace(lib.OwnerUsername)),
 		})
 	}
 	c.Libraries = normalized
@@ -432,6 +551,34 @@ func (c *Config) normalizeLibraries() {
 		c.ActiveLibraryID = c.Libraries[0].ID
 		c.StoragePath = c.Libraries[0].Path
 	}
+}
+
+func (c *Config) normalizeLibraryOwnerUsername(username string) string {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return c.defaultLibraryOwnerUsername()
+	}
+	if user, _ := FindUser(c, username); user != nil {
+		return user.Username
+	}
+	return c.defaultLibraryOwnerUsername()
+}
+
+func (c *Config) defaultLibraryOwnerUsername() string {
+	if user, _ := FindUser(c, c.ActiveProfile); user != nil && UserIsAdmin(user) {
+		return user.Username
+	}
+	for _, user := range c.Users {
+		if UserIsAdmin(&user) {
+			return user.Username
+		}
+	}
+	for _, user := range c.Users {
+		if strings.TrimSpace(user.Username) != "" {
+			return user.Username
+		}
+	}
+	return ""
 }
 
 func normalizeLibraryID(id string) string {
@@ -520,6 +667,97 @@ func reserveLibraryIDCandidate(candidate string, used map[string]struct{}) strin
 
 func defaultLibraryName(index int) string {
 	return fmt.Sprintf("资源库 %d", index+1)
+}
+
+func (c *Config) PrimaryLibrary() (Library, bool) {
+	if c == nil || len(c.Libraries) == 0 {
+		return Library{}, false
+	}
+	return c.Libraries[0], true
+}
+
+func (c *Config) PrimaryLibraryID() string {
+	library, ok := c.PrimaryLibrary()
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(library.ID)
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(needle)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) VisibleLibrariesForUser(username string) []Library {
+	user, _ := FindUser(c, username)
+	if user == nil {
+		return append([]Library(nil), c.Libraries...)
+	}
+	if UserIsAdmin(user) || UserIsRoot(user) {
+		return append([]Library(nil), c.Libraries...)
+	}
+	if len(c.Libraries) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(user.AllowedLibraryIDs))
+	for _, id := range user.AllowedLibraryIDs {
+		id = normalizeLibraryID(id)
+		if id != "" {
+			allowed[id] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		if primary, ok := c.PrimaryLibrary(); ok {
+			return []Library{primary}
+		}
+		return nil
+	}
+	visible := make([]Library, 0, len(c.Libraries))
+	for _, library := range c.Libraries {
+		if _, ok := allowed[strings.TrimSpace(library.ID)]; ok {
+			visible = append(visible, library)
+		}
+	}
+	return visible
+}
+
+func (c *Config) ResolveUserLibrarySelection(username string, activeLibraryID string, storagePath string) (Library, bool) {
+	visible := c.VisibleLibrariesForUser(username)
+	if len(visible) == 0 {
+		return Library{}, false
+	}
+	activeLibraryID = normalizeLibraryID(activeLibraryID)
+	if activeLibraryID != "" {
+		for _, library := range visible {
+			if library.ID == activeLibraryID {
+				return library, true
+			}
+		}
+	}
+	activeKey := NormalizeStoragePath(strings.TrimSpace(storagePath))
+	if activeKey != "" {
+		for _, library := range visible {
+			if NormalizeStoragePath(library.Path) == activeKey {
+				return library, true
+			}
+		}
+	}
+	if user, _ := FindUser(c, username); user != nil {
+		defaultID := normalizeLibraryID(user.DefaultLibraryID)
+		if defaultID != "" {
+			for _, library := range visible {
+				if library.ID == defaultID {
+					return library, true
+				}
+			}
+		}
+	}
+	return visible[0], true
 }
 
 func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
@@ -623,6 +861,20 @@ func (c *Config) ThumbnailStoragePath() (string, error) {
 		return "", err
 	}
 	return NormalizeStoragePath(c.ThumbnailDir), nil
+}
+
+func (c *Config) LibraryLockDBPath() (string, error) {
+	if err := c.prepareRuntimePaths(); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.AppDataDir, "db", "library-locks.db"), nil
+}
+
+func (c *Config) PageSessionDBPath() (string, error) {
+	if err := c.prepareRuntimePaths(); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.AppDataDir, "db", "page-sessions.db"), nil
 }
 
 // ErrConfigNotFound 配置文件不存在错误

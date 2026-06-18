@@ -1,0 +1,27 @@
+{
+  "active_library_id": "lib_64e1051cea71",
+  "storage_path": ".",
+  "thumbnail_dir": "thumbnails",
+  "thumbnail_size": 512,
+  "trash_dir": "Trash",
+  "use_system_player": false,
+  "preferences": {
+    "theme": "light",
+    "grid_size": 180,
+    "grid_gap": 2,
+    "thumb_radius": 2,
+    "sidebar_auto_hide": false,
+    "slideshow_mode": "random",
+    "slideshow_loop": false,
+    "slideshow_interval": 5000,
+    "lightbox_zoom": 100,
+    "experimental_autoplay_video": false,
+    "video_autoplay_next": false,
+    "video_section_min_minutes": 10,
+    "experimental_prefetch_neighbors": false,
+    "experimental_restore_last_view": false,
+    "continue_last_video_position": false,
+    "low_resource_mode": false,
+    "player_keymap": ""
+  }
+}

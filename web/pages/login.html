@@ -9,12 +9,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="mobile-web-app-capable" content="yes">
     <title id="login-page-title">登录 - EchoGallery</title>
-    <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-    <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-    <link rel="stylesheet" href="/pages/common.css">
-    <link rel="stylesheet" href="/pages/login.css">
-    <script src="/static/pwa.js" defer></script>
+    <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+    <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+    <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+    <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
   </head>
   <body>
     <script>
@@ -117,6 +117,49 @@
   bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
   var btn = document.getElementById('login-btn');
   var errEl = document.getElementById('login-error');
+  function ensurePageSessionID() {
+    try {
+      var key = 'echogallery_page_session_id_v1';
+      var current = sessionStorage.getItem(key) || '';
+      if (!current) {
+        current = (window.crypto && typeof window.crypto.randomUUID === 'function')
+          ? window.crypto.randomUUID()
+          : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+        sessionStorage.setItem(key, current);
+      }
+      return current;
+    } catch (_) {
+      return (window.crypto && typeof window.crypto.randomUUID === 'function')
+        ? window.crypto.randomUUID()
+        : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+    }
+  }
+  function resetPageSessionID() {
+    var next = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+    try {
+      sessionStorage.setItem('echogallery_page_session_id_v1', next);
+    } catch (_) {}
+    return next;
+  }
+  function markPageSessionTransfer(sessionID) {
+    try {
+      sessionStorage.setItem('echogallery_page_session_transfer_v1', sessionID);
+    } catch (_) {}
+  }
+  function loginReasonMessage(reason) {
+    switch (String(reason || '').trim()) {
+      case 'duplicate':
+        return '该账号已在新页面登录，当前页面已退出';
+      case 'expired':
+        return '页面会话已过期，请重新登录';
+      case 'no-library':
+        return '当前没有可进入的资源库，请稍后再试';
+      default:
+        return '';
+    }
+  }
   var copy = applyCopy();
   fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
     .then(function (response) { return response.ok ? response.json() : null; })
@@ -131,25 +174,33 @@
     var p = document.getElementById('password').value;
     if (!u || !p) { errEl.textContent = copy.errors.missingFields || copyDefaults.errors.missingFields; return; }
     btn.disabled = true; btn.textContent = copy.submit + '中…';
+    var pageSessionID = resetPageSessionID();
     try {
       var r = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-EG-Page-Session': pageSessionID
+        },
         body: JSON.stringify({username: u, password: p})
       });
       var d = await r.json().catch(function () { return {}; });
       if (r.ok) {
         errEl.style.color = 'var(--accent)';
         errEl.textContent = d.message || '';
+        markPageSessionTransfer(pageSessionID);
         var target = d.redirect || '/';
         var delay = Math.max(0, Number(d.delay_ms) || 0);
         setTimeout(function () { location.href = target; }, delay);
         return;
       }
-      errEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
+      errEl.textContent = d.error || loginReasonMessage(d.reason) || copy.errors.failed || copyDefaults.errors.failed;
     } catch(e) { errEl.textContent = copy.errors.network || copyDefaults.errors.network; }
     btn.disabled = false; btn.textContent = copy.submit || copyDefaults.submit;
   }
+  var initialReason = new URLSearchParams(location.search).get('reason');
+  var reasonCopy = loginReasonMessage(initialReason);
+  if (reasonCopy) errEl.textContent = reasonCopy;
   btn.addEventListener('click', doLogin);
   document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doLogin(); });
 })();

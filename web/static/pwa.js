@@ -2,8 +2,6 @@
   'use strict';
 
   var STORAGE_KEY = 'echogallery_pwa_settings_v1';
-  var RECENT_GALLERIES_KEY = 'echogallery_recent_galleries_v1';
-  var MAX_RECENT_GALLERIES = 12;
   var DEFAULTS = {
     name: 'EchoGallery',
     iconSource: 'favicon',
@@ -39,110 +37,14 @@
     }
   }
 
-  function bodyIsGalleryChooser() {
-    return !!(document.body && document.body.dataset && document.body.dataset.galleryChooser === '1');
-  }
-
-  function normalizeGalleryURL(value) {
-    var text = String(value || '').trim();
-    if (!text) return '';
-    if (!/^[a-z]+:\/\//i.test(text)) text = 'http://' + text;
-    try {
-      var url = new URL(text);
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
-      url.hash = '';
-      url.search = '';
-      url.pathname = '/';
-      return url.toString();
-    } catch (_) {
-      return '';
-    }
-  }
-
-  function safeParseJSON(text, fallback) {
-    try {
-      var parsed = JSON.parse(text);
-      return parsed == null ? fallback : parsed;
-    } catch (_) {
-      return fallback;
-    }
-  }
-
-  function loadRecentGalleries() {
-    var raw = '[]';
-    try {
-      raw = localStorage.getItem(RECENT_GALLERIES_KEY) || '[]';
-    } catch (_) {}
-    var list = safeParseJSON(raw, []);
-    if (!Array.isArray(list)) return [];
-    return list.map(function (item) {
-      if (!item || typeof item !== 'object') return null;
-      var url = normalizeGalleryURL(item.url || item.origin || '');
-      if (!url) return null;
-      return {
-        url: url,
-        origin: safeOrigin(url),
-        displayName: String(item.displayName || item.title || item.name || 'EchoGallery').trim() || 'EchoGallery',
-        title: String(item.title || item.displayName || 'EchoGallery').trim() || 'EchoGallery',
-        icon: typeof item.icon === 'string' ? item.icon : '',
-        themeColor: normalizeHexColor(item.themeColor),
-        lastSeen: Math.max(0, Number(item.lastSeen) || 0)
-      };
-    }).filter(Boolean).sort(function (a, b) {
-      return (b.lastSeen || 0) - (a.lastSeen || 0);
-    }).slice(0, MAX_RECENT_GALLERIES);
-  }
-
-  function saveRecentGalleries(list) {
-    try {
-      localStorage.setItem(RECENT_GALLERIES_KEY, JSON.stringify((Array.isArray(list) ? list : []).slice(0, MAX_RECENT_GALLERIES)));
-    } catch (_) {}
-  }
-
-  function safeOrigin(url) {
-    try {
-      return new URL(url).origin;
-    } catch (_) {
-      return '';
-    }
-  }
-
   function currentDocumentIcon() {
     var link = document.querySelector('link[rel="icon"]') || document.querySelector('link[rel="apple-touch-icon"]');
     return link && link.href ? link.href : '/static/pwa-icon.png';
   }
 
-  function buildRecentGalleryRecord(extra) {
-    extra = extra && typeof extra === 'object' ? extra : {};
-    var url = normalizeGalleryURL(extra.url || location.origin || location.href);
-    if (!url) return null;
-    var title = String(extra.title || document.title || 'EchoGallery').trim() || 'EchoGallery';
-    var displayName = String(extra.displayName || extra.name || title.replace(/\s*-\s*EchoGallery\s*$/i, '') || 'EchoGallery').trim() || 'EchoGallery';
-    return {
-      url: url,
-      origin: safeOrigin(url),
-      displayName: displayName,
-      title: title,
-      icon: String(extra.icon || currentDocumentIcon() || '/static/pwa-icon.png'),
-      themeColor: normalizeHexColor(extra.themeColor || currentAccentColor(loadSettings())),
-      lastSeen: Date.now()
-    };
-  }
-
-  function recordCurrentGallery(extra) {
-    if (bodyIsGalleryChooser()) return null;
-    var record = buildRecentGalleryRecord(extra);
-    if (!record || !record.url) return null;
-    var list = loadRecentGalleries().filter(function (item) { return item.url !== record.url; });
-    list.unshift(record);
-    saveRecentGalleries(list);
-    return record;
-  }
-
-  function removeRecentGallery(url) {
-    var normalized = normalizeGalleryURL(url);
-    if (!normalized) return;
-    saveRecentGalleries(loadRecentGalleries().filter(function (item) { return item.url !== normalized; }));
+  function currentManifestURL() {
+    var link = document.querySelector('link[rel="manifest"]');
+    return link && link.href ? link.href : '/manifest.webmanifest';
   }
 
   function ensureLink(rel, href, attrs) {
@@ -176,10 +78,10 @@
   }
 
   function manifestIcon(settings) {
-    if (settings.iconSource === 'png') return '/static/pwa-icon.png';
+    if (settings.iconSource === 'png') return currentDocumentIcon() || '/static/pwa-icon.png';
     var favicon = document.querySelector('link[rel="icon"]');
     if (favicon && favicon.href && !favicon.href.startsWith('data:')) return favicon.href;
-    return '/static/pwa-icon.png';
+    return currentDocumentIcon() || '/static/pwa-icon.png';
   }
 
   var dynamicManifestURL = '';
@@ -224,37 +126,22 @@
   }
 
   var settings = loadSettings();
-  window.EchoGalleryPWA = {
-    loadRecentGalleries: loadRecentGalleries,
-    recordCurrentGallery: recordCurrentGallery,
-    removeRecentGallery: removeRecentGallery,
-    normalizeGalleryURL: normalizeGalleryURL
-  };
-  ensureLink('manifest', '/manifest.webmanifest');
-  ensureLink('icon', '/static/pwa-icon.png', { type: 'image/png' });
-  ensureLink('apple-touch-icon', '/static/pwa-icon.png');
+  var defaultIconHref = currentDocumentIcon();
+  ensureLink('manifest', currentManifestURL());
+  ensureLink('icon', defaultIconHref, { type: 'image/png' });
+  ensureLink('apple-touch-icon', defaultIconHref);
   installDynamicManifest(settings);
   registerServiceWorker(settings);
-  window.addEventListener('load', function () {
-    window.setTimeout(function () {
-      recordCurrentGallery();
-    }, 120);
-  });
   window.addEventListener('eg:pwa-settings-change', function () {
     settings = loadSettings();
     installDynamicManifest(settings);
-    recordCurrentGallery({ themeColor: currentAccentColor(settings) });
     if (navigator.serviceWorker && navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'EG_PWA_SETTINGS', cacheStrategy: settings.cacheStrategy });
     }
   });
-  window.addEventListener('eg:pwa-gallery-meta', function (event) {
-    recordCurrentGallery(event && event.detail);
-  });
   window.setTimeout(function () {
     settings = loadSettings();
     installDynamicManifest(settings);
-    recordCurrentGallery();
   }, 1600);
   window.addEventListener('pagehide', function () {
     if (dynamicManifestURL) URL.revokeObjectURL(dynamicManifestURL);

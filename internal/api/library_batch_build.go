@@ -53,7 +53,7 @@ type LibraryBatchBuildStatus struct {
 }
 
 type LibraryBatchBuildHooks struct {
-	Status               func(profile *config.Profile, username string) LibraryBatchBuildStatus
+	Status               func(cfg *config.Config, profile *config.Profile, username string) LibraryBatchBuildStatus
 	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
@@ -87,7 +87,7 @@ func handleGetLibraryBatchBuildStatus(cfg *config.Config, hooks LibraryBatchBuil
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, hooks.Status(profile, currentUsername(c)))
+		c.JSON(http.StatusOK, hooks.Status(cfg, profile, currentUsername(c)))
 	}
 }
 

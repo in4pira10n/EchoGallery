@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -46,6 +47,14 @@ type sourceMoveJob struct {
 	info          fs.FileInfo
 }
 
+type libraryDirectorySnapshot struct {
+	rootInfo       fs.FileInfo
+	dirCount       int
+	dirModHash     string
+	mediaFileHash  string
+	mediaFileCount int
+}
+
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
 // 导入时只建立索引，不在启动阶段预生成缩略图；缩略图在访问时按需生成。
 func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
@@ -57,6 +66,23 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
 	summary := &ImportSummary{}
 	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+	dirSnapshot, err := collectLibraryDirectorySnapshot(ctx, s.sourcePath)
+	if err != nil {
+		return summary, err
+	}
+	rootInfo := dirSnapshot.rootInfo
+	if !rootInfo.IsDir() {
+		return summary, fmt.Errorf("资源库路径不是目录: %s", s.sourcePath)
+	}
+	if snapshot, err := s.repo.GetLibraryScanSnapshot(); err == nil && libraryScanSnapshotMatches(snapshot, s.sourcePath, dirSnapshot) {
+		summary.Skipped = snapshot.FileCount
+		if progress != nil {
+			progress(snapshot.FileCount, snapshot.FileCount)
+		}
+		return summary, nil
+	} else if err != nil {
 		return summary, err
 	}
 	albumCache, err := s.loadAlbumCache(uploadedBy)
@@ -223,6 +249,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		if progress != nil {
 			progress(totalCandidates, totalCandidates)
 		}
+		if err := s.saveLibraryScanSnapshot(dirSnapshot, totalCandidates); err != nil {
+			return summary, err
+		}
 		return summary, nil
 	}
 
@@ -323,8 +352,109 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	if err := s.repo.RefreshFolderAlbumCovers(uploadedBy); err != nil {
 		return summary, err
 	}
+	if err := s.saveLibraryScanSnapshot(dirSnapshot, totalCandidates); err != nil {
+		return summary, err
+	}
 	s.warmImportedThumbnails(importedPhotos)
 	return summary, nil
+}
+
+func (s *PhotoService) saveLibraryScanSnapshot(snapshot libraryDirectorySnapshot, fileCount int) error {
+	if snapshot.rootInfo == nil {
+		return nil
+	}
+	return s.repo.SaveLibraryScanSnapshot(storage.LibraryScanSnapshot{
+		RootPath:         filepath.Clean(s.sourcePath),
+		RootModUnixNano:  snapshot.rootInfo.ModTime().UnixNano(),
+		DirectoryCount:   snapshot.dirCount,
+		DirectoryModHash: snapshot.dirModHash,
+		MediaFileHash:    snapshot.mediaFileHash,
+		FileCount:        fileCount,
+		CompletedAt:      time.Now(),
+	})
+}
+
+func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (libraryDirectorySnapshot, error) {
+	var snapshot libraryDirectorySnapshot
+	rootInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.rootInfo = rootInfo
+	if !rootInfo.IsDir() {
+		return snapshot, nil
+	}
+	dirHasher := fnv.New64a()
+	mediaHasher := fnv.New64a()
+	err = filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != sourcePath && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			relPath := "."
+			if path != sourcePath {
+				relPath, err = filepath.Rel(sourcePath, path)
+				if err != nil {
+					return err
+				}
+				relPath = filepath.ToSlash(filepath.Clean(relPath))
+			}
+			snapshot.dirCount++
+			_, _ = fmt.Fprintf(dirHasher, "%s\x00%d\x00", relPath, info.ModTime().UnixNano())
+			return nil
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, ".") || !d.Type().IsRegular() {
+			return nil
+		}
+		if !imgpkg.SupportedMimeTypes[imgpkg.DetectMimeType(name)] && !media.IsSupportedVideoFilename(name) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(sourcePath, path)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(filepath.Clean(relPath))
+		snapshot.mediaFileCount++
+		_, _ = fmt.Fprintf(mediaHasher, "%s\x00%d\x00%d\x00", relPath, info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.dirModHash = fmt.Sprintf("%016x", dirHasher.Sum64())
+	snapshot.mediaFileHash = fmt.Sprintf("%016x", mediaHasher.Sum64())
+	return snapshot, nil
+}
+
+func libraryScanSnapshotMatches(snapshot *storage.LibraryScanSnapshot, sourcePath string, current libraryDirectorySnapshot) bool {
+	if snapshot == nil || current.rootInfo == nil {
+		return false
+	}
+	return filepath.Clean(snapshot.RootPath) == filepath.Clean(sourcePath) &&
+		snapshot.RootModUnixNano > 0 &&
+		snapshot.RootModUnixNano == current.rootInfo.ModTime().UnixNano() &&
+		snapshot.DirectoryCount > 0 &&
+		snapshot.DirectoryCount == current.dirCount &&
+		snapshot.DirectoryModHash != "" &&
+		snapshot.DirectoryModHash == current.dirModHash &&
+		snapshot.FileCount == current.mediaFileCount &&
+		snapshot.MediaFileHash != "" &&
+		snapshot.MediaFileHash == current.mediaFileHash
 }
 
 func folderAlbumNameForSourceRelPath(sourceRelPath string) string {
@@ -474,6 +604,9 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 	if existing, err := s.repo.GetPhotoBySourceRelPath(job.sourceRelPath, uploadedBy); err != nil {
 		return nil, false, err
 	} else if existing != nil {
+		if err := s.refreshExistingImportedPhotoMetadata(existing, job, uploadedBy); err != nil {
+			return nil, false, err
+		}
 		return existing, false, nil
 	}
 
@@ -527,6 +660,10 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 	if err != nil {
 		videoMeta = &media.VideoMeta{FormatName: strings.TrimPrefix(filepath.Ext(job.originalName), ".")}
 	}
+	takenAt := info.ModTime()
+	if videoMeta != nil && !videoMeta.TakenAt.IsZero() {
+		takenAt = videoMeta.TakenAt
+	}
 	photoUUID := uuid.New().String()
 	photo := &storage.Photo{
 		UUID:          photoUUID,
@@ -540,7 +677,7 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		EXIF:          videoMetaEXIF(videoMeta),
 		SourceRelPath: job.sourceRelPath,
 		SourceModUnix: info.ModTime().UnixNano(),
-		TakenAt:       info.ModTime(),
+		TakenAt:       takenAt,
 		UploadedAt:    time.Now(),
 		UploadedBy:    uploadedBy,
 	}
@@ -549,6 +686,86 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		return nil, false, fmt.Errorf("保存视频记录失败: %w", err)
 	}
 	return photo, true, nil
+}
+
+func (s *PhotoService) refreshExistingImportedPhotoMetadata(existing *storage.Photo, job importJob, uploadedBy int64) error {
+	if existing == nil || !shouldRefreshCapturedMetadata(existing) {
+		return nil
+	}
+	info := job.info
+	if info == nil {
+		var err error
+		info, err = os.Stat(job.path)
+		if err != nil {
+			return err
+		}
+	}
+	mimeType := imgpkg.DetectMimeType(job.originalName)
+	if imgpkg.SupportedMimeTypes[mimeType] {
+		file, err := os.Open(job.path)
+		if err != nil {
+			return err
+		}
+		meta, err := imgpkg.ExtractMeta(file, job.originalName, info.ModTime())
+		_ = file.Close()
+		if err != nil {
+			return nil
+		}
+		exif := copyPhotoEXIF(meta.EXIF)
+		if err := s.repo.UpdatePhotoCapturedMetadata(existing.ID, uploadedBy, meta.TakenAt, exif, meta.Width, meta.Height, existing.DurationMS); err != nil {
+			return err
+		}
+		existing.TakenAt = meta.TakenAt
+		existing.EXIF = exif
+		existing.Width = meta.Width
+		existing.Height = meta.Height
+		return nil
+	}
+
+	videoMeta, err := media.ProbeVideo(job.path)
+	if err != nil || videoMeta == nil {
+		return nil
+	}
+	takenAt := info.ModTime()
+	if !videoMeta.TakenAt.IsZero() {
+		takenAt = videoMeta.TakenAt
+	}
+	exif := videoMetaEXIF(videoMeta)
+	if err := s.repo.UpdatePhotoCapturedMetadata(existing.ID, uploadedBy, takenAt, exif, videoMeta.Width, videoMeta.Height, videoMeta.DurationMS); err != nil {
+		return err
+	}
+	existing.TakenAt = takenAt
+	existing.EXIF = exif
+	existing.Width = videoMeta.Width
+	existing.Height = videoMeta.Height
+	existing.DurationMS = videoMeta.DurationMS
+	return nil
+}
+
+func shouldRefreshCapturedMetadata(photo *storage.Photo) bool {
+	if photo == nil {
+		return false
+	}
+	if photo.TakenAt.IsZero() {
+		return true
+	}
+	if photo.MediaKind == storage.MediaKindImage && photo.EXIF == nil {
+		return true
+	}
+	if photo.MediaKind == storage.MediaKindVideo && (photo.EXIF == nil || photo.EXIF.TakenAt.IsZero()) {
+		return true
+	}
+	if photo.SourceModUnix > 0 {
+		sourceMod := time.Unix(0, photo.SourceModUnix)
+		diff := photo.TakenAt.Sub(sourceMod)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= 2*time.Second {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *PhotoService) loadAlbumCache(uploadedBy int64) (map[string]int64, error) {

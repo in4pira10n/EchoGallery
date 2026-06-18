@@ -1,6 +1,8 @@
 package image
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -8,6 +10,8 @@ import (
 	_ "image/png"
 	"io"
 	"mime"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,6 +55,7 @@ type EXIFData struct {
 	Latitude     float64   `json:"latitude,omitempty"`
 	Longitude    float64   `json:"longitude,omitempty"`
 	HasGPS       bool      `json:"has_gps,omitempty"`
+	Location     string    `json:"location_address,omitempty"`
 }
 
 // ExtractMeta 从 ReadSeeker 中提取图片元数据
@@ -160,9 +165,53 @@ func parseEXIF(rs io.ReadSeeker) (*EXIFData, time.Time, error) {
 		data.Latitude = lat
 		data.Longitude = lon
 		data.HasGPS = true
+		data.Location = reverseGeocodeLocation(lat, lon)
 	}
 
 	return data, takenAt, nil
+}
+
+func reverseGeocodeLocation(lat, lon float64) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+
+	endpoint := "https://nominatim.openstreetmap.org/reverse"
+	params := url.Values{}
+	params.Set("format", "jsonv2")
+	params.Set("lat", fmt.Sprintf("%.7f", lat))
+	params.Set("lon", fmt.Sprintf("%.7f", lon))
+	params.Set("accept-language", "zh-CN,zh;q=0.9,en;q=0.5")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+params.Encode(), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "EchoGallery/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var payload struct {
+		DisplayName string `json:"display_name"`
+		Name        string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(payload.Name, payload.DisplayName))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func orientedDimensions(width, height, orientation int) (int, int) {

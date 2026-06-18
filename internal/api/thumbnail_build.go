@@ -61,6 +61,9 @@ func formatThumbnailBuildTime(value time.Time) string {
 
 func handleGetThumbnailBuildStatus(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(thumbnailBuildManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusOK, thumbnailBuildStatusResponse{Status: "idle", Message: "当前没有缩略图任务"})
@@ -77,6 +80,9 @@ func handleGetThumbnailBuildStatus(cfg *config.Config, registrar interface{}) gi
 
 func handleStartThumbnailBuild(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(thumbnailBuildManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持批量生成缩略图"})
@@ -98,6 +104,9 @@ func handleStartThumbnailBuild(cfg *config.Config, registrar interface{}) gin.Ha
 
 func handleCancelThumbnailBuild(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(thumbnailBuildManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消批量缩略图任务"})

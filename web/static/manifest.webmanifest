@@ -13,7 +13,7 @@
   "categories": ["photo", "productivity", "utilities"],
   "icons": [
     {
-      "src": "/static/pwa-icon.png",
+      "src": "/static/pwa-icon.png?v={{ASSET_VERSION}}",
       "sizes": "256x256",
       "type": "image/png",
       "purpose": "any maskable"
@@ -24,13 +24,13 @@
       "name": "打开资源库",
       "short_name": "资源库",
       "url": "/",
-      "icons": [{ "src": "/static/pwa-icon.png", "sizes": "256x256", "type": "image/png" }]
+      "icons": [{ "src": "/static/pwa-icon.png?v={{ASSET_VERSION}}", "sizes": "256x256", "type": "image/png" }]
     },
     {
       "name": "登录",
       "short_name": "登录",
       "url": "/login",
-      "icons": [{ "src": "/static/pwa-icon.png", "sizes": "256x256", "type": "image/png" }]
+      "icons": [{ "src": "/static/pwa-icon.png?v={{ASSET_VERSION}}", "sizes": "256x256", "type": "image/png" }]
     }
   ]
 }

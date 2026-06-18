@@ -41,11 +41,8 @@ func TestPersistRecoveredLibrarySelection_UpdatesActiveProfile(t *testing.T) {
 	if profile.StoragePath != newLibrary {
 		t.Fatalf("期望 Profile 切换到恢复资源库，得到 %s", profile.StoragePath)
 	}
-	if len(profile.Libraries) != 2 {
-		t.Fatalf("期望 Profile 保留恢复后的资源库列表，得到 %d 个", len(profile.Libraries))
-	}
-	if profile.Libraries[1].Path != newLibrary {
-		t.Fatalf("期望新增资源库写入 Profile，得到 %+v", profile.Libraries)
+	if len(profile.Libraries) != 0 {
+		t.Fatalf("恢复资源库后不应再把全量资源库写回 Profile，得到 %+v", profile.Libraries)
 	}
 	if profile.ActiveLibraryID == "" {
 		t.Fatal("期望恢复资源库后写入 active_library_id")

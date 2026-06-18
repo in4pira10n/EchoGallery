@@ -20,7 +20,9 @@ import (
 	"echogallery/internal/api"
 	"echogallery/internal/config"
 	"echogallery/internal/service"
+	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage/sqlite"
+	"github.com/google/uuid"
 )
 
 const restartDelayEnv = "ECHOGALLERY_RESTART_DELAY_MS"
@@ -70,6 +72,8 @@ type libraryBatchBuildManager struct {
 	shutdownAfterDone func() error
 	defaultExitAfter  bool
 	idleMessage       string
+	lockStore         *sessionlock.Store
+	sessionID         string
 	afterScanComplete func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error
 }
 
@@ -79,6 +83,8 @@ type libraryBatchThumbnailBuildManager struct {
 	shutdownAfterDone func() error
 	defaultExitAfter  bool
 	idleMessage       string
+	lockStore         *sessionlock.Store
+	sessionID         string
 }
 
 func newLibraryBuildState(shutdown func() error) *libraryBuildState {
@@ -91,17 +97,21 @@ func newLibraryBuildState(shutdown func() error) *libraryBuildState {
 	}
 }
 
-func newLibraryBatchBuildManager(shutdown func() error) *libraryBatchBuildManager {
+func newLibraryBatchBuildManager(shutdown func() error, lockStore *sessionlock.Store, sessionID string) *libraryBatchBuildManager {
 	return &libraryBatchBuildManager{
 		shutdownAfterDone: shutdown,
 		idleMessage:       "当前没有批量扫描任务",
+		lockStore:         lockStore,
+		sessionID:         strings.TrimSpace(sessionID),
 	}
 }
 
-func newLibraryBatchThumbnailBuildManager(shutdown func() error) *libraryBatchThumbnailBuildManager {
+func newLibraryBatchThumbnailBuildManager(shutdown func() error, lockStore *sessionlock.Store, sessionID string) *libraryBatchThumbnailBuildManager {
 	return &libraryBatchThumbnailBuildManager{
 		shutdownAfterDone: shutdown,
 		idleMessage:       "当前没有批量缩略图任务",
+		lockStore:         lockStore,
+		sessionID:         strings.TrimSpace(sessionID),
 	}
 }
 
@@ -530,15 +540,73 @@ const (
 	batchTaskKindThumbnails batchTaskKind = "thumbnails"
 )
 
-func loadPersistedBatchStatus(profile *config.Profile, kind batchTaskKind, defaultExitAfter bool, idleMessage string) api.LibraryBatchBuildStatus {
-	if profile == nil {
+func batchLibrariesForWorkflow(cfg *config.Config) []config.Library {
+	if cfg == nil {
+		return nil
+	}
+	return append([]config.Library(nil), cfg.Libraries...)
+}
+
+func batchLibraryOwnerUserID(cfg *config.Config, library config.Library, fallback int64) int64 {
+	if cfg == nil {
+		return fallback
+	}
+	candidates := []string{
+		strings.TrimSpace(library.OwnerUsername),
+		strings.TrimSpace(cfg.ActiveProfile),
+	}
+	for _, username := range candidates {
+		if username == "" {
+			continue
+		}
+		if _, index := config.FindUser(cfg, username); index >= 0 {
+			return int64(index + 1)
+		}
+	}
+	for index := range cfg.Users {
+		if config.UserIsAdmin(&cfg.Users[index]) {
+			return int64(index + 1)
+		}
+	}
+	for index := range cfg.Users {
+		if strings.TrimSpace(cfg.Users[index].Username) != "" {
+			return int64(index + 1)
+		}
+	}
+	return fallback
+}
+
+func libraryLockedMessage(library config.Library, info *sessionlock.Info) string {
+	if info == nil {
+		return fmt.Sprintf("resource library %s is currently locked", strings.TrimSpace(library.Name))
+	}
+	name := strings.TrimSpace(library.Name)
+	if name == "" {
+		name = strings.TrimSpace(info.LibraryName)
+	}
+	if name == "" {
+		name = strings.TrimSpace(library.ID)
+	}
+	owner := strings.TrimSpace(info.OwnerUsername)
+	if owner == "" {
+		owner = "another admin"
+	}
+	scope := strings.TrimSpace(info.Scope)
+	if scope == "" {
+		return fmt.Sprintf("resource library %s is currently in use by %s", name, owner)
+	}
+	return fmt.Sprintf("resource library %s is currently in use by %s (%s)", name, owner, scope)
+}
+
+func loadPersistedBatchStatus(cfg *config.Config, libraries []config.Library, kind batchTaskKind, defaultExitAfter bool, idleMessage string) api.LibraryBatchBuildStatus {
+	if cfg == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage, ExitAfterComplete: defaultExitAfter}
 	}
-	state := profile.BatchScan
+	state := cfg.BatchScan
 	if kind == batchTaskKindThumbnails {
-		state = profile.BatchThumbnails
+		state = cfg.BatchThumbnails
 	}
-	status := batchTaskStateToAPI(state, profile.Libraries)
+	status := batchTaskStateToAPI(state, libraries)
 	if strings.TrimSpace(status.Message) == "" {
 		status.Message = idleMessage
 	}
@@ -549,10 +617,10 @@ func loadPersistedBatchStatus(profile *config.Profile, kind batchTaskKind, defau
 		status.ExitAfterComplete = true
 	}
 	if !status.SelectionConfigured && len(status.SelectedLibraryIDs) == 0 {
-		status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(profile.Libraries)
+		status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	}
 	if !status.SelectionConfigured && len(status.SelectedPaths) == 0 {
-		status.SelectedPaths = defaultSelectedPaths(profile.Libraries)
+		status.SelectedPaths = defaultSelectedPaths(libraries)
 	}
 	status = normalizeDormantBatchStatus(kind, status)
 	return status
@@ -802,46 +870,34 @@ func selectedLibrariesFromBatchStatus(libraries []config.Library, status api.Lib
 	return normalizedSelectedLibraries(libraries, status.SelectedLibraryIDs, status.SelectedPaths)
 }
 
-func saveBatchTaskState(cfg *config.Config, username string, kind batchTaskKind, status api.LibraryBatchBuildStatus) error {
-	if cfg == nil || strings.TrimSpace(username) == "" {
+func saveBatchTaskState(cfg *config.Config, kind batchTaskKind, status api.LibraryBatchBuildStatus) error {
+	if cfg == nil {
 		return nil
-	}
-	profile, err := config.EnsureProfile(cfg, username)
-	if err != nil {
-		return err
 	}
 	state := batchTaskAPIToState(status)
 	if kind == batchTaskKindScan {
-		profile.BatchScan = state
+		cfg.BatchScan = state
 	} else {
-		profile.BatchThumbnails = state
+		cfg.BatchThumbnails = state
 	}
-	return config.SaveProfile(cfg, username, profile)
+	return cfg.Save()
 }
 
-func saveBatchTaskSelection(cfg *config.Config, username string, kind batchTaskKind, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
-	profile, err := config.EnsureProfile(cfg, username)
-	if err != nil {
-		return api.LibraryBatchBuildStatus{}, err
-	}
+func saveBatchTaskSelection(cfg *config.Config, kind batchTaskKind, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
+	libraries := batchLibrariesForWorkflow(cfg)
 	selectedLibraryIDs = selectedIDsFromRaw(selectedLibraryIDs)
-	selected := normalizedSelectedLibrariesAllowEmpty(profile.Libraries, selectedLibraryIDs, selectedPathsFromRaw(selectedPaths))
+	selected := normalizedSelectedLibrariesAllowEmpty(libraries, selectedLibraryIDs, selectedPathsFromRaw(selectedPaths))
 	selectedPaths = selectedPathsFromLibraries(selected)
 	selectedLibraryIDs = selectedLibraryIDsFromLibraries(selected)
-	current := loadPersistedBatchStatus(profile, kind, false, "")
+	current := loadPersistedBatchStatus(cfg, libraries, kind, false, "")
 	current.SelectedLibraryIDs = append([]string(nil), selectedLibraryIDs...)
 	current.SelectedPaths = append([]string(nil), selectedPaths...)
 	current.SelectionConfigured = true
 	current.TotalLibraries = len(selectedPaths)
-	current.Libraries = filterBatchStatusLibraries(current.Libraries, selectedLibraryIDs, selectedPaths, profile.Libraries, true)
+	current.Libraries = filterBatchStatusLibraries(current.Libraries, selectedLibraryIDs, selectedPaths, libraries, true)
 	current.CompletedLibraries = countBatchStatusWithState(current.Libraries, "completed")
 	current.FailedLibraries = countBatchStatusWithState(current.Libraries, "failed")
-	if kind == batchTaskKindScan {
-		profile.BatchScan = batchTaskAPIToState(current)
-	} else {
-		profile.BatchThumbnails = batchTaskAPIToState(current)
-	}
-	if err := config.SaveProfile(cfg, username, profile); err != nil {
+	if err := saveBatchTaskState(cfg, kind, current); err != nil {
 		return api.LibraryBatchBuildStatus{}, err
 	}
 	return current, nil
@@ -929,15 +985,8 @@ func countBatchStatusWithState(rows []api.LibraryBatchBuildLibraryStatus, target
 
 func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus, libraries []config.Library, thumbnailMode bool, rerunCompleted bool) []api.LibraryBatchBuildLibraryStatus {
 	rows := filterBatchStatusLibraries(previous, selectedLibraryIDsFromLibraries(libraries), selectedPathsFromLibraries(libraries), libraries, false)
-	allCompleted := len(rows) > 0
-	for _, row := range rows {
-		if row.Status != "completed" {
-			allCompleted = false
-			break
-		}
-	}
 	for index := range rows {
-		if allCompleted && rerunCompleted {
+		if rerunCompleted {
 			rows[index].Status = "pending"
 			rows[index].Message = "等待重新开始"
 			rows[index].Imported = 0
@@ -968,24 +1017,25 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 	return rows
 }
 
-func (m *libraryBatchBuildManager) Status(profile *config.Profile, username string) api.LibraryBatchBuildStatus {
+func (m *libraryBatchBuildManager) Status(cfg *config.Config, profile *config.Profile, username string) api.LibraryBatchBuildStatus {
 	m.mu.Lock()
 	task := m.task
 	defaultExitAfter := m.defaultExitAfter
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task != nil && task.username == username {
+	if task != nil {
 		return task.snapshot()
 	}
-	return loadPersistedBatchStatus(profile, batchTaskKindScan, defaultExitAfter, idleMessage)
+	return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
 func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch scan parameters")
 	}
-	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
-	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
+	availableLibraries := batchLibrariesForWorkflow(cfg)
+	selectedStatus := loadPersistedBatchStatus(cfg, availableLibraries, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
+	libraries := selectedLibrariesFromBatchStatus(availableLibraries, selectedStatus)
 	if len(libraries) == 0 {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("no libraries are available for batch scan")
 	}
@@ -1009,7 +1059,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.autoCleanThumbnailFiles = cleanThumbnailFiles
 	task.autoBuildPlaybackCaches = buildPlaybackCaches
 	task.persistFn = func(status api.LibraryBatchBuildStatus) {
-		_ = saveBatchTaskState(cfg, username, batchTaskKindScan, status)
+		_ = saveBatchTaskState(cfg, batchTaskKindScan, status)
 	}
 	task.status.Message = "正在准备批量扫描资源库…"
 	task.status.LowResourceMode = effectiveLowResource
@@ -1018,11 +1068,11 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
 	task.status.SelectionConfigured = true
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, true)
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, false)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
 	if buildThumbnailsAfterScan {
-		_, _ = saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, task.status.SelectedLibraryIDs, task.status.SelectedPaths)
+		_, _ = saveBatchTaskSelection(cfg, batchTaskKindThumbnails, task.status.SelectedLibraryIDs, task.status.SelectedPaths)
 	}
 	m.task = task
 	cfgSnapshot := *cfg
@@ -1040,12 +1090,8 @@ func (m *libraryBatchBuildManager) Cancel(cfg *config.Config, username string) (
 	task := m.task
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil || task.username != username {
-		profile, err := config.EnsureProfile(cfg, username)
-		if err != nil {
-			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
-		}
-		return loadPersistedBatchStatus(profile, batchTaskKindScan, m.defaultExitAfter, idleMessage), nil
+	if task == nil {
+		return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindScan, m.defaultExitAfter, idleMessage), nil
 	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		if status.Status == "running" {
@@ -1066,14 +1112,10 @@ func (m *libraryBatchBuildManager) SetExitAfterComplete(cfg *config.Config, user
 	task := m.task
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil || task.username != username {
-		profile, err := config.EnsureProfile(cfg, username)
-		if err != nil {
-			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
-		}
-		status := loadPersistedBatchStatus(profile, batchTaskKindScan, enabled, idleMessage)
+	if task == nil {
+		status := loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindScan, enabled, idleMessage)
 		status.ExitAfterComplete = enabled
-		if err := saveBatchTaskState(cfg, username, batchTaskKindScan, status); err != nil {
+		if err := saveBatchTaskState(cfg, batchTaskKindScan, status); err != nil {
 			return api.LibraryBatchBuildStatus{}, err
 		}
 		return status, nil
@@ -1090,27 +1132,28 @@ func (m *libraryBatchBuildManager) SetExitAfterComplete(cfg *config.Config, user
 }
 
 func (m *libraryBatchBuildManager) SetSelection(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
-	return saveBatchTaskSelection(cfg, username, batchTaskKindScan, selectedLibraryIDs, selectedPaths)
+	return saveBatchTaskSelection(cfg, batchTaskKindScan, selectedLibraryIDs, selectedPaths)
 }
 
-func (m *libraryBatchThumbnailBuildManager) Status(profile *config.Profile, username string) api.LibraryBatchBuildStatus {
+func (m *libraryBatchThumbnailBuildManager) Status(cfg *config.Config, profile *config.Profile, username string) api.LibraryBatchBuildStatus {
 	m.mu.Lock()
 	task := m.task
 	defaultExitAfter := m.defaultExitAfter
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task != nil && task.username == username {
+	if task != nil {
 		return task.snapshot()
 	}
-	return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, defaultExitAfter, idleMessage)
+	return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindThumbnails, defaultExitAfter, idleMessage)
 }
 
 func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch thumbnail parameters")
 	}
-	selectedStatus := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
-	libraries := selectedLibrariesFromBatchStatus(profile.Libraries, selectedStatus)
+	availableLibraries := batchLibrariesForWorkflow(cfg)
+	selectedStatus := loadPersistedBatchStatus(cfg, availableLibraries, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
+	libraries := selectedLibrariesFromBatchStatus(availableLibraries, selectedStatus)
 	if len(libraries) == 0 {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("no libraries are available for batch thumbnail build")
 	}
@@ -1129,7 +1172,7 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	task.username = username
 	task.idleMessage = m.idleMessage
 	task.persistFn = func(status api.LibraryBatchBuildStatus) {
-		_ = saveBatchTaskState(cfg, username, batchTaskKindThumbnails, status)
+		_ = saveBatchTaskState(cfg, batchTaskKindThumbnails, status)
 	}
 	task.status.Message = "正在准备批量构建缩略图…"
 	task.status.LowResourceMode = effectiveLowResource
@@ -1141,15 +1184,7 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	task.status.MoveLegacyThumbnails = moveLegacyThumbnails
 	task.status.CleanThumbnailFiles = cleanThumbnailFiles
 	task.status.BuildPlaybackCaches = buildPlaybackCaches
-	rerunCompleted := true
-	if (moveLegacyThumbnails || cleanThumbnailFiles || buildPlaybackCaches) &&
-		selectedStatus.Status == "completed" &&
-		selectedStatus.MoveLegacyThumbnails == moveLegacyThumbnails &&
-		selectedStatus.CleanThumbnailFiles == cleanThumbnailFiles &&
-		selectedStatus.BuildPlaybackCaches == buildPlaybackCaches {
-		rerunCompleted = false
-	}
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, rerunCompleted)
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, true)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
 	m.task = task
@@ -1168,12 +1203,8 @@ func (m *libraryBatchThumbnailBuildManager) Cancel(cfg *config.Config, username 
 	task := m.task
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil || task.username != username {
-		profile, err := config.EnsureProfile(cfg, username)
-		if err != nil {
-			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
-		}
-		return loadPersistedBatchStatus(profile, batchTaskKindThumbnails, m.defaultExitAfter, idleMessage), nil
+	if task == nil {
+		return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindThumbnails, m.defaultExitAfter, idleMessage), nil
 	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		if status.Status == "running" {
@@ -1194,14 +1225,10 @@ func (m *libraryBatchThumbnailBuildManager) SetExitAfterComplete(cfg *config.Con
 	task := m.task
 	idleMessage := m.idleMessage
 	m.mu.Unlock()
-	if task == nil || task.username != username {
-		profile, err := config.EnsureProfile(cfg, username)
-		if err != nil {
-			return api.LibraryBatchBuildStatus{Status: "idle", Message: idleMessage}, err
-		}
-		status := loadPersistedBatchStatus(profile, batchTaskKindThumbnails, enabled, idleMessage)
+	if task == nil {
+		status := loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindThumbnails, enabled, idleMessage)
 		status.ExitAfterComplete = enabled
-		if err := saveBatchTaskState(cfg, username, batchTaskKindThumbnails, status); err != nil {
+		if err := saveBatchTaskState(cfg, batchTaskKindThumbnails, status); err != nil {
 			return api.LibraryBatchBuildStatus{}, err
 		}
 		return status, nil
@@ -1218,7 +1245,7 @@ func (m *libraryBatchThumbnailBuildManager) SetExitAfterComplete(cfg *config.Con
 }
 
 func (m *libraryBatchThumbnailBuildManager) SetSelection(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (api.LibraryBatchBuildStatus, error) {
-	return saveBatchTaskSelection(cfg, username, batchTaskKindThumbnails, selectedLibraryIDs, selectedPaths)
+	return saveBatchTaskSelection(cfg, batchTaskKindThumbnails, selectedLibraryIDs, selectedPaths)
 }
 
 func (m *libraryBatchBuildManager) clear(task *libraryBatchBuildTask) {
@@ -1257,6 +1284,12 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 	}
 
 	snapshot := task.snapshot()
+	if snapshot.CleanThumbnailFiles {
+		if err := runLegacyCleanup(cfg, m.lockStore); err != nil {
+			m.failTask(task, err)
+			return
+		}
+	}
 	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
 	for index, library := range libraries {
 		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
@@ -1266,18 +1299,36 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.cancelTask(task, index)
 			return
 		}
+		if m.lockStore != nil {
+			if _, err := m.lockStore.Acquire(library, task.username, config.UserRoleAdmin, m.sessionID, "batch_scan"); err != nil {
+				var conflict *sessionlock.ConflictError
+				if errors.As(err, &conflict) {
+					m.failLibrary(task, index, fmt.Errorf("%s", libraryLockedMessage(library, &conflict.Info)))
+					continue
+				}
+				m.failLibrary(task, index, fmt.Errorf("failed to lock resource library: %w", err))
+				continue
+			}
+		}
 		m.beginLibrary(task, index, library)
 		if err := os.MkdirAll(library.Path, 0755); err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
 			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
 			continue
 		}
 		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
 		if err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
 			m.failLibrary(task, index, err)
 			continue
 		}
 
-		summary, err := svc.ImportExistingPhotosContext(ctx, userID, func(done, total int) {
+		libraryUserID := batchLibraryOwnerUserID(cfg, library, userID)
+		summary, err := svc.ImportExistingPhotosContext(ctx, libraryUserID, func(done, total int) {
 			task.mutate(func(status *api.LibraryBatchBuildStatus) {
 				status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
 				status.CurrentLibraryID = library.ID
@@ -1299,6 +1350,9 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		})
 		if err != nil {
 			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
 			if ctx.Err() != nil {
 				m.cancelTask(task, index)
 				return
@@ -1307,6 +1361,9 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			continue
 		}
 		_ = repo.Close()
+		if m.lockStore != nil {
+			_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+		}
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.CompletedLibraries++
 			status.Libraries[index].Status = "completed"
@@ -1436,6 +1493,12 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 	}
 
 	snapshot := task.snapshot()
+	if snapshot.CleanThumbnailFiles {
+		if err := runLegacyCleanup(cfg, m.lockStore); err != nil {
+			m.failTask(task, err)
+			return
+		}
+	}
 	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
 	for index, library := range libraries {
 		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
@@ -1445,13 +1508,30 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			m.cancelTask(task, index)
 			return
 		}
+		if m.lockStore != nil {
+			if _, err := m.lockStore.Acquire(library, task.username, config.UserRoleAdmin, m.sessionID, "batch_thumbnails"); err != nil {
+				var conflict *sessionlock.ConflictError
+				if errors.As(err, &conflict) {
+					m.failLibrary(task, index, fmt.Errorf("%s", libraryLockedMessage(library, &conflict.Info)))
+					continue
+				}
+				m.failLibrary(task, index, fmt.Errorf("failed to lock resource library: %w", err))
+				continue
+			}
+		}
 		m.beginLibrary(task, index, library)
 		if err := os.MkdirAll(library.Path, 0755); err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
 			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
 			continue
 		}
 		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
 		if err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
 			m.failLibrary(task, index, err)
 			continue
 		}
@@ -1486,6 +1566,9 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			})
 			if err != nil {
 				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+				}
 				if ctx.Err() != nil {
 					m.cancelTask(task, index)
 					return
@@ -1501,20 +1584,30 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			task.persist(false)
 		}
 
-		if _, err := svc.StartThumbnailBuild(userID); err != nil {
+		libraryUserID := batchLibraryOwnerUserID(cfg, library, userID)
+		if _, err := svc.StartThumbnailBuild(libraryUserID); err != nil {
 			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
 			m.failLibrary(task, index, fmt.Errorf("启动缩略图任务失败: %w", err))
 			continue
 		}
 
-		thumbStatus, cancelled := waitThumbnailBuildTask(ctx, svc, task, index, library, userID, "正在为资源库 %s 构建缩略图")
+		thumbStatus, cancelled := waitThumbnailBuildTask(ctx, svc, task, index, library, libraryUserID, "正在为资源库 %s 构建缩略图")
 		if cancelled {
 			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
 			m.cancelTask(task, index)
 			return
 		}
 		if thumbStatus.Status != "completed" {
 			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
 			failureMessage := strings.TrimSpace(thumbStatus.Error)
 			if failureMessage == "" {
 				failureMessage = strings.TrimSpace(thumbStatus.Message)
@@ -1524,7 +1617,7 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		}
 		playbackStatus := service.PlaybackCacheBuildStatus{}
 		if snapshot.BuildPlaybackCaches {
-			playbackStatus = svc.BuildPlaybackCachesSyncContext(ctx, userID, func(progress service.PlaybackCacheBuildStatus) bool {
+			playbackStatus = svc.BuildPlaybackCachesSyncContext(ctx, libraryUserID, func(progress service.PlaybackCacheBuildStatus) bool {
 				task.mutate(func(status *api.LibraryBatchBuildStatus) {
 					status.Message = progress.Message
 					status.CurrentLibraryID = library.ID
@@ -1549,11 +1642,17 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			})
 			if ctx.Err() != nil || playbackStatus.Status == "cancelled" {
 				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+				}
 				m.cancelTask(task, index)
 				return
 			}
 			if playbackStatus.Status == "failed" {
 				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+				}
 				failureMessage := strings.TrimSpace(playbackStatus.Error)
 				if failureMessage == "" {
 					failureMessage = strings.TrimSpace(playbackStatus.Message)
@@ -1563,6 +1662,9 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			}
 		}
 		_ = repo.Close()
+		if m.lockStore != nil {
+			_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+		}
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.CompletedLibraries++
 			status.Libraries[index].Generated = thumbStatus.Generated
@@ -1687,6 +1789,151 @@ func prepareLibraryBatchPaths(cfg *config.Config) (string, string, string, error
 		return "", "", "", fmt.Errorf("创建缩略图目录失败: %w", err)
 	}
 	return managedDataDir, trashDir, thumbDir, nil
+}
+
+func runLegacyCleanup(cfg *config.Config, lockStore *sessionlock.Store) error {
+	if cfg == nil {
+		return nil
+	}
+	if _, err := config.CleanupLegacyArtifacts(cfg); err != nil {
+		return fmt.Errorf("failed to rewrite migrated legacy config/profile data: %w", err)
+	}
+	if lockStore != nil {
+		if _, err := lockStore.CleanupObsolete(cfg); err != nil {
+			return fmt.Errorf("failed to cleanup stale library lock rows: %w", err)
+		}
+	}
+	return nil
+}
+
+func describeLibraryAvailability(lockStore *sessionlock.Store, cfg *config.Config, username string, libraries []config.Library) map[string]api.LibraryAvailabilityState {
+	result := map[string]api.LibraryAvailabilityState{}
+	if lockStore == nil || strings.TrimSpace(username) == "" || len(libraries) == 0 {
+		return result
+	}
+	role := config.UserRoleAdmin
+	if user, _ := config.FindUser(cfg, username); user != nil {
+		role = config.NormalizeUserRole(user.Role)
+	}
+	for _, library := range libraries {
+		id := strings.TrimSpace(library.ID)
+		if id == "" {
+			continue
+		}
+		conflict, err := lockStore.LockedByOther(id, username, role, "", "browse")
+		if err != nil {
+			continue
+		}
+		if conflict != nil {
+			owner := strings.TrimSpace(conflict.OwnerUsername)
+			if owner == "" {
+				owner = "其他管理员"
+			}
+			status := "admin_locked"
+			reason := fmt.Sprintf("当前由管理员 %s 占用", owner)
+			result[id] = api.LibraryAvailabilityState{
+				Available:     false,
+				Status:        status,
+				Reason:        reason,
+				OwnerUsername: conflict.OwnerUsername,
+				Scope:         conflict.Scope,
+			}
+			continue
+		}
+		if role != config.UserRoleVisitor {
+			continue
+		}
+		active, err := lockStore.ActiveForLibrary(id)
+		if err != nil || len(active) == 0 {
+			continue
+		}
+		visitorCount := 0
+		for _, info := range active {
+			if strings.TrimSpace(info.Scope) != "browse" {
+				continue
+			}
+			if strings.TrimSpace(info.OwnerRole) != config.UserRoleVisitor {
+				visitorCount = 0
+				break
+			}
+			visitorCount++
+		}
+		if visitorCount > 0 {
+			result[id] = api.LibraryAvailabilityState{
+				Available: true,
+				Status:    "visitor_shared",
+				Reason:    fmt.Sprintf("当前有 %d 位访客正在浏览", visitorCount),
+			}
+		}
+	}
+	return result
+}
+
+func filterLibrariesLockedByOtherAdmins(lockStore *sessionlock.Store, username, sessionID string, libraries []config.Library) []config.Library {
+	if lockStore == nil || strings.TrimSpace(username) == "" || len(libraries) == 0 {
+		return append([]config.Library(nil), libraries...)
+	}
+	filtered := make([]config.Library, 0, len(libraries))
+	for _, library := range libraries {
+		conflict, err := lockStore.LockedByOther(strings.TrimSpace(library.ID), username, config.UserRoleAdmin, strings.TrimSpace(sessionID), "browse")
+		if err != nil || conflict != nil {
+			continue
+		}
+		filtered = append(filtered, library)
+	}
+	return filtered
+}
+
+func validateLibrarySelectionAvailability(cfg *config.Config, lockStore *sessionlock.Store, username string, libraryID string) error {
+	if cfg == nil || lockStore == nil || strings.TrimSpace(libraryID) == "" {
+		return nil
+	}
+	role := config.UserRoleAdmin
+	if user, _ := config.FindUser(cfg, username); user != nil {
+		role = config.NormalizeUserRole(user.Role)
+	}
+	conflict, err := lockStore.LockedByOther(libraryID, username, role, "", "browse")
+	if err != nil {
+		return err
+	}
+	if conflict == nil {
+		return nil
+	}
+	message := libraryLockedMessage(config.Library{ID: libraryID, Name: conflict.LibraryName}, conflict)
+	return &api.RequestError{
+		Status:  http.StatusConflict,
+		Reason:  "library_occupied",
+		Message: strings.TrimSpace(message),
+	}
+}
+
+func resolveBootstrapLibrary(cfg *config.Config) (config.Library, bool) {
+	if cfg == nil || len(cfg.Libraries) == 0 {
+		return config.Library{}, false
+	}
+	if active := strings.TrimSpace(cfg.ActiveProfile); active != "" {
+		if profile, err := config.EnsureProfile(cfg, active); err == nil {
+			if library, ok := cfg.ResolveUserLibrarySelection(active, profile.ActiveLibraryID, profile.StoragePath); ok {
+				status := strings.TrimSpace(library.Status)
+				if status == "" {
+					status = config.DetectLibraryStatus(library.Path)
+				}
+				if status != config.LibraryStatusMissing {
+					return library, true
+				}
+			}
+		}
+	}
+	for _, library := range cfg.Libraries {
+		status := strings.TrimSpace(library.Status)
+		if status == "" {
+			status = config.DetectLibraryStatus(library.Path)
+		}
+		if status != config.LibraryStatusMissing {
+			return library, true
+		}
+	}
+	return config.Library{}, false
 }
 
 func openBatchLibraryService(cfg *config.Config, library config.Library, managedDataDir, trashDir, thumbDir string) (*sqlite.DB, *service.PhotoService, error) {
@@ -1912,10 +2159,28 @@ func main() {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 	}
+	rootConsoleMode := false
+	rootConsolePortOverride := 0
 
 	// 处理子命令
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "root":
+			rootConsoleMode = true
+			if len(os.Args) > 2 {
+				port, err := strconv.Atoi(strings.TrimSpace(os.Args[2]))
+				if err != nil || port <= 0 || port > 65535 {
+					fmt.Fprintln(os.Stderr, "Usage: EchoGallery root [port]")
+					os.Exit(1)
+				}
+				rootConsolePortOverride = port
+			}
+		case "users":
+			if err := config.RunListUsersCommand(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "adduser":
 			if err := config.RunAddUserWizard(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1942,6 +2207,26 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "setuserrole":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Usage: EchoGallery setuserrole <username>")
+				os.Exit(1)
+			}
+			if err := config.RunSetUserRoleWizard(os.Args[2]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "setuserlibs":
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "Usage: EchoGallery setuserlibs <username>")
+				os.Exit(1)
+			}
+			if err := config.RunSetUserLibrariesWizard(os.Args[2]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 			os.Exit(1)
@@ -1961,6 +2246,34 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	if _, err := config.CleanupLegacyArtifacts(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to migrate legacy config/profile data: %v\n", err)
+		os.Exit(1)
+	}
+	if rootConsoleMode {
+		if rootConsolePortOverride > 0 {
+			cfg.Port = rootConsolePortOverride
+		}
+		startRootConsoleServer(cfg)
+		return
+	}
+
+	lockDBPath, err := cfg.LibraryLockDBPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve library lock database path: %v\n", err)
+		os.Exit(1)
+	}
+	lockStore, err := sessionlock.New(lockDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to open library lock database: %v\n", err)
+		os.Exit(1)
+	}
+	defer lockStore.Close()
+	if _, err := lockStore.CleanupObsolete(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to cleanup stale library lock rows: %v\n", err)
+		os.Exit(1)
+	}
+	processSessionID := uuid.NewString()
 
 	fmt.Printf("Config loaded. Server will run on port %d\n", cfg.Port)
 	fmt.Printf("Storage path: %s\n", cfg.StoragePath)
@@ -1974,11 +2287,6 @@ func main() {
 		return
 	}
 
-	dbPath, err := cfg.DatabasePath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to resolve database path: %v\n", err)
-		os.Exit(1)
-	}
 	managedDataDir, err := cfg.ManagedDataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve app data directory: %v\n", err)
@@ -1994,7 +2302,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: failed to resolve thumbnail directory: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cfg.AppDataDir, "db"), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create database directory: %v\n", err)
 		os.Exit(1)
 	}
@@ -2010,62 +2318,34 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: failed to create thumbnail directory: %v\n", err)
 		os.Exit(1)
 	}
-	repo, err := sqlite.New(dbPath)
-	if err != nil {
-		startSetupServer(api.SetupState{
-			Mode:               api.SetupModeLibraryRecovery,
-			Message:            "当前资源库无法打开数据库，请选择其他资源库后重启。",
-			Libraries:          cfg.Libraries,
-			CurrentStoragePath: cfg.StoragePath,
-			Port:               cfg.Port,
-		})
-		return
-	}
-	defer repo.Close()
-
-	if info, err := os.Stat(cfg.StoragePath); err != nil || !info.IsDir() {
-		message := fmt.Sprintf("当前资源库不可用: %s", cfg.StoragePath)
-		if err != nil {
-			if os.IsPermission(err) || strings.Contains(strings.ToLower(err.Error()), "permission denied") {
-				message = fmt.Sprintf("当前资源库无法访问，可能是权限不足: %v。请更换或新建资源库。", err)
-			} else {
-				message = fmt.Sprintf("当前资源库不可用: %v", err)
-			}
-		}
-		startSetupServer(api.SetupState{
-			Mode:               api.SetupModeLibraryRecovery,
-			Message:            message,
-			Libraries:          cfg.Libraries,
-			CurrentStoragePath: cfg.StoragePath,
-			Port:               cfg.Port,
-		})
-		return
-	}
-	if err := repo.CheckStoragePathConsistency(cfg.StoragePath, managedDataDir); err != nil {
-		startSetupServer(api.SetupState{
-			Mode:               api.SetupModeLibraryRecovery,
-			Message:            fmt.Sprintf("当前资源库存在问题: %v", err),
-			Libraries:          cfg.Libraries,
-			CurrentStoragePath: cfg.StoragePath,
-			Port:               cfg.Port,
-		})
-		return
-	}
-
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
-	photoService := service.NewPhotoService(repo, cfg.StoragePath, managedDataDir, trashDir)
-	photoService.SetThumbnailRoot(thumbDir)
-	photoService.SetThumbnailLibraryID(cfg.ActiveLibraryID)
-	photoService.SetThumbnailSize(cfg.ThumbnailSize)
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	rootCtx, cancelRoot := context.WithCancel(signalCtx)
 	defer cancelRoot()
 	shutdownCurrentProcess := makeShutdownCurrentProcess(cancelRoot)
 
+	var repo *sqlite.DB
+	var photoService *service.PhotoService
+	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok {
+		dbPath, err := cfg.DatabasePathForStorage(bootstrapLibrary.Path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to resolve bootstrap database path for %s: %v\n", bootstrapLibrary.Name, err)
+		} else if openedRepo, err := sqlite.New(dbPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to open bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
+		} else {
+			repo = openedRepo
+			photoService = service.NewPhotoService(repo, bootstrapLibrary.Path, managedDataDir, trashDir)
+			photoService.SetThumbnailRoot(thumbDir)
+			photoService.SetThumbnailLibraryID(bootstrapLibrary.ID)
+			photoService.SetThumbnailSize(cfg.ThumbnailSize)
+			defer repo.Close()
+		}
+	}
+
 	buildState := newLibraryBuildState(shutdownCurrentProcess)
-	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess)
-	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess)
+	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
+	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
 	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
 		profile, err := config.EnsureProfile(cfg, username)
 		if err != nil {
@@ -2084,7 +2364,21 @@ func main() {
 		cfg.Port = actualPort
 	}
 
-	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, photoService, restartCurrentProcess, shutdownCurrentProcess, api.LibraryBuildHooks{
+	restartCurrentProcessFn := makeRestartCurrentProcess(func() error {
+		if lockStore != nil && strings.TrimSpace(processSessionID) != "" {
+			if err := lockStore.ReleaseSession(processSessionID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	runtimeProvider, err := api.NewLibraryRuntimeProvider(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to initialize per-library runtime provider: %v\n", err)
+		os.Exit(1)
+	}
+
+	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, photoService, restartCurrentProcessFn, shutdownCurrentProcess, api.LibraryBuildHooks{
 		Status:               buildState.Status,
 		SetExitAfterComplete: buildState.SetExitAfterComplete,
 		Cancel:               buildState.Cancel,
@@ -2100,6 +2394,16 @@ func main() {
 		Cancel:               batchThumbnailBuildManager.Cancel,
 		SetExitAfterComplete: batchThumbnailBuildManager.SetExitAfterComplete,
 		SetSelection:         batchThumbnailBuildManager.SetSelection,
+	}, api.LibraryAvailabilityHooks{
+		DescribeLibraryAvailability: func(cfg *config.Config, username string, libraries []config.Library) map[string]api.LibraryAvailabilityState {
+			return describeLibraryAvailability(lockStore, cfg, username, libraries)
+		},
+		ValidateLibrarySelection: func(cfg *config.Config, username string, libraryID string) error {
+			return validateLibrarySelectionAvailability(cfg, lockStore, username, libraryID)
+		},
+	}, api.RouterOptions{
+		LockStore:       lockStore,
+		RuntimeProvider: runtimeProvider,
 	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
@@ -2107,7 +2411,7 @@ func main() {
 	} else {
 		fmt.Printf("HTTP server started: http://127.0.0.1%s\n", addr)
 	}
-	if len(cfg.Users) > 0 {
+	if len(cfg.Users) > 0 && photoService != nil {
 		go runLibraryBuild(rootCtx, photoService, buildState)
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
@@ -2136,13 +2440,92 @@ func startSetupServer(state api.SetupState) {
 	}
 	state.Port = actualPort
 	addr := fmt.Sprintf(":%d", actualPort)
-	app := api.NewSetupRouterWithStatic(webFS, state, restartCurrentProcess)
+	app := api.NewSetupRouterWithStatic(webFS, state, makeRestartCurrentProcess(nil))
 	fmt.Printf("EchoGallery setup server started: http://127.0.0.1%s\n", addr)
 	if host := preferredLANIP(); host != "" {
 		fmt.Printf("LAN access URL: http://%s%s\n", host, addr)
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: setup server failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func startRootConsoleServer(cfg *config.Config) {
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	rootCtx, cancelRoot := context.WithCancel(signalCtx)
+	defer cancelRoot()
+
+	lockDBPath, err := cfg.LibraryLockDBPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to resolve library lock database path: %v\n", err)
+		os.Exit(1)
+	}
+	lockStore, err := sessionlock.New(lockDBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to open library lock database: %v\n", err)
+		os.Exit(1)
+	}
+	defer lockStore.Close()
+	if _, err := lockStore.CleanupObsolete(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to cleanup stale library lock rows: %v\n", err)
+		os.Exit(1)
+	}
+	processSessionID := uuid.NewString()
+	defer func() {
+		if strings.TrimSpace(processSessionID) != "" {
+			_ = lockStore.ReleaseSession(processSessionID)
+		}
+	}()
+	shutdownCurrentProcess := makeShutdownCurrentProcess(cancelRoot)
+	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
+	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
+	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
+		profile, err := config.EnsureProfile(cfg, username)
+		if err != nil {
+			return err
+		}
+		_, err = batchThumbnailBuildManager.Start(cfg, profile, username, userID, aggressive, moveLegacyThumbnails, cleanThumbnailFiles, buildPlaybackCaches)
+		return err
+	}
+
+	listener, actualPort, err := listenTCPWithFallback(cfg.Port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to start root console server: %v\n", err)
+		os.Exit(1)
+	}
+	if actualPort != cfg.Port {
+		fmt.Printf("Root console port %d is already in use. Switched to %d\n", cfg.Port, actualPort)
+		cfg.Port = actualPort
+	}
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, nil, nil, shutdownCurrentProcess, api.LibraryBuildHooks{}, api.LibraryBatchBuildHooks{
+		Status:               batchBuildManager.Status,
+		Start:                batchBuildManager.Start,
+		Cancel:               batchBuildManager.Cancel,
+		SetExitAfterComplete: batchBuildManager.SetExitAfterComplete,
+		SetSelection:         batchBuildManager.SetSelection,
+	}, api.LibraryBatchThumbnailBuildHooks{
+		Status:               batchThumbnailBuildManager.Status,
+		Start:                batchThumbnailBuildManager.Start,
+		Cancel:               batchThumbnailBuildManager.Cancel,
+		SetExitAfterComplete: batchThumbnailBuildManager.SetExitAfterComplete,
+		SetSelection:         batchThumbnailBuildManager.SetSelection,
+	}, api.LibraryAvailabilityHooks{
+		DescribeLibraryAvailability: func(cfg *config.Config, username string, libraries []config.Library) map[string]api.LibraryAvailabilityState {
+			return describeLibraryAvailability(lockStore, cfg, username, libraries)
+		},
+		ValidateLibrarySelection: func(cfg *config.Config, username string, libraryID string) error {
+			return validateLibrarySelectionAvailability(cfg, lockStore, username, libraryID)
+		},
+	}, api.RouterOptions{ForcedUsername: "__root_console__"})
+	fmt.Printf("EchoGallery root console started: http://127.0.0.1%s\n", addr)
+	if host := preferredLANIP(); host != "" {
+		fmt.Printf("LAN access URL: http://%s%s\n", host, addr)
+	}
+	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: root console server failed: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -2265,36 +2648,47 @@ func listenTCPWithFallback(preferredPort int) (net.Listener, int, error) {
 }
 
 func restartCurrentProcess() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	wd, _ := os.Getwd()
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		if wd != "" {
-			_ = os.Chdir(wd)
+	return makeRestartCurrentProcess(nil)()
+}
+
+func makeRestartCurrentProcess(beforeRestart func() error) func() error {
+	return func() error {
+		if beforeRestart != nil {
+			if err := beforeRestart(); err != nil {
+				return err
+			}
 		}
-		env := append(os.Environ(), restartDelayEnv+"=1200")
-		args := append([]string{exe}, os.Args[1:]...)
-		if runtime.GOOS == "windows" {
-			cmd := exec.Command(exe, os.Args[1:]...)
-			cmd.Dir = wd
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Env = env
-			if err := cmd.Start(); err != nil {
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		wd, _ := os.Getwd()
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			if wd != "" {
+				_ = os.Chdir(wd)
+			}
+			env := append(os.Environ(), restartDelayEnv+"=1200")
+			args := append([]string{exe}, os.Args[1:]...)
+			if runtime.GOOS == "windows" {
+				cmd := exec.Command(exe, os.Args[1:]...)
+				cmd.Dir = wd
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Env = env
+				if err := cmd.Start(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: failed to restart EchoGallery: %v\n", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}
+			if err := syscall.Exec(exe, args, env); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to restart EchoGallery: %v\n", err)
 				os.Exit(1)
 			}
-			os.Exit(0)
-		}
-		if err := syscall.Exec(exe, args, env); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to restart EchoGallery: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-	return nil
+		}()
+		return nil
+	}
 }
 
 func makeShutdownCurrentProcess(cancel context.CancelFunc) func() error {

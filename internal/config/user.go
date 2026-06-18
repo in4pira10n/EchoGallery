@@ -22,20 +22,61 @@ func hashPassword(password string) (string, error) {
 	return string(hash), nil
 }
 
-func newUser(username, password string) (User, error) {
+func newUser(username, password, role string) (User, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return User{}, fmt.Errorf("username cannot be empty")
+	}
+	if strings.EqualFold(username, "root") && NormalizeUserRole(role) != UserRoleRoot {
+		return User{}, fmt.Errorf("username %q is reserved", username)
 	}
 	hash, err := hashPassword(password)
 	if err != nil {
 		return User{}, err
 	}
-	return User{Username: username, PasswordHash: hash}, nil
+	return User{Username: username, PasswordHash: hash, Role: NormalizeUserRole(role)}, nil
+}
+
+func FindUser(cfg *Config, username string) (*User, int) {
+	if cfg == nil {
+		return nil, -1
+	}
+	needle := strings.TrimSpace(username)
+	for index := range cfg.Users {
+		if strings.EqualFold(strings.TrimSpace(cfg.Users[index].Username), needle) {
+			cfg.Users[index].Role = NormalizeUserRole(cfg.Users[index].Role)
+			return &cfg.Users[index], index
+		}
+	}
+	return nil, -1
+}
+
+func HasAdminUser(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, user := range cfg.Users {
+		if NormalizeUserRole(user.Role) == UserRoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+func UserIsAdmin(user *User) bool {
+	return user != nil && NormalizeUserRole(user.Role) == UserRoleAdmin
+}
+
+func UserIsRoot(user *User) bool {
+	return user != nil && NormalizeUserRole(user.Role) == UserRoleRoot
 }
 
 // AddUser adds a new user to the config file.
 func AddUser(username, password string) error {
+	return AddUserWithRole(username, password, UserRoleAdmin)
+}
+
+func AddUserWithRole(username, password, role string) error {
 	if strings.TrimSpace(username) == "" {
 		return fmt.Errorf("username cannot be empty")
 	}
@@ -49,12 +90,12 @@ func AddUser(username, password string) error {
 	}
 
 	for _, u := range cfg.Users {
-		if u.Username == username {
+		if strings.EqualFold(strings.TrimSpace(u.Username), username) {
 			return fmt.Errorf("username %q already exists", username)
 		}
 	}
 
-	user, err := newUser(username, password)
+	user, err := newUser(username, password, role)
 	if err != nil {
 		return err
 	}
@@ -69,7 +110,7 @@ func AddUser(username, password string) error {
 }
 
 // RegisterUser creates a new user in an existing config and initializes a separate profile.
-func RegisterUser(cfg *Config, username, password string) (*User, error) {
+func RegisterUser(cfg *Config, username, password, role string) (*User, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
@@ -82,7 +123,7 @@ func RegisterUser(cfg *Config, username, password string) (*User, error) {
 			return nil, fmt.Errorf("username %q already exists", username)
 		}
 	}
-	user, err := newUser(username, password)
+	user, err := newUser(username, password, role)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +137,9 @@ func RegisterUser(cfg *Config, username, password string) (*User, error) {
 		cfg.Users = cfg.Users[:len(cfg.Users)-1]
 		_ = cfg.Save()
 		return nil, fmt.Errorf("failed to initialize user profile: %w", err)
+	}
+	if savedUser, _ := FindUser(cfg, user.Username); savedUser != nil {
+		user = *savedUser
 	}
 	return &user, nil
 }
@@ -255,15 +299,14 @@ func moveUserProfileDir(cfg *Config, oldUsername, newUsername string) (func(), e
 
 // VerifyPassword verifies a user's password and returns the matching user.
 func VerifyPassword(cfg *Config, username, password string) (*User, error) {
-	for _, u := range cfg.Users {
-		if u.Username == username {
-			if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
-				return nil, fmt.Errorf("incorrect password")
-			}
-			return &u, nil
-		}
+	user, _ := FindUser(cfg, username)
+	if user == nil {
+		return nil, fmt.Errorf("user does not exist")
 	}
-	return nil, fmt.Errorf("user does not exist")
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		return nil, fmt.Errorf("incorrect password")
+	}
+	return user, nil
 }
 
 // RunAddUserWizard runs the command-line adduser wizard.
@@ -289,11 +332,16 @@ func RunAddUserWizard() error {
 	}
 	password = strings.TrimSpace(password)
 
-	if err := AddUser(username, password); err != nil {
+	role, err := promptString(reader, "Role (admin/visitor)", UserRoleVisitor)
+	if err != nil {
 		return err
 	}
 
-	fmt.Printf("User %q added successfully\n", username)
+	if err := AddUserWithRole(username, password, role); err != nil {
+		return err
+	}
+
+	fmt.Printf("User %q added successfully (%s)\n", username, NormalizeUserRole(role))
 	return nil
 }
 

@@ -97,6 +97,9 @@ func (s *PhotoService) RegisterUploadedVideo(input RegisterUploadedVideoInput) (
 	if input.MimeType == "" {
 		input.MimeType = "video/mp4"
 	}
+	if input.TakenAt.IsZero() && input.Meta != nil && !input.Meta.TakenAt.IsZero() {
+		input.TakenAt = input.Meta.TakenAt
+	}
 	if input.TakenAt.IsZero() {
 		input.TakenAt = time.Now()
 	}
@@ -137,8 +140,9 @@ func videoMetaEXIF(meta *media.VideoMeta) *storage.PhotoEXIF {
 	exif := &storage.PhotoEXIF{
 		VideoCodec:     strings.TrimSpace(meta.CodecName),
 		VideoFrameRate: meta.FrameRate,
+		TakenAt:        meta.TakenAt,
 	}
-	if exif.VideoCodec == "" && exif.VideoFrameRate <= 0 {
+	if exif.VideoCodec == "" && exif.VideoFrameRate <= 0 && exif.TakenAt.IsZero() {
 		return nil
 	}
 	return exif

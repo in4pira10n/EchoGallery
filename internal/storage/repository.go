@@ -1,5 +1,7 @@
 package storage
 
+import "time"
+
 // Repository 定义所有数据库操作接口
 // 具体实现可以是 SQLite、PostgreSQL 等，业务层只依赖此接口
 type Repository interface {
@@ -26,8 +28,20 @@ type Repository interface {
 	// ListSourceMediaIndex 批量加载导入源索引，用于大资源库启动扫描时避免逐文件查询。
 	ListSourceMediaIndex(userID int64) (map[string]SourceMediaInfo, error)
 
+	// GetLibraryScanSnapshot 读取上次成功扫描的资源库目录树快照。
+	GetLibraryScanSnapshot() (*LibraryScanSnapshot, error)
+
+	// SaveLibraryScanSnapshot 保存本次成功扫描的资源库目录树快照。
+	SaveLibraryScanSnapshot(snapshot LibraryScanSnapshot) error
+
 	// GetVideoPlaybackPreference 获取单个视频的播放偏好。
 	GetVideoPlaybackPreference(photoID int64, userID int64) (*VideoPlaybackPreference, error)
+
+	// GetLibraryVideoVolume 获取当前资源库共享的视频音量。
+	GetLibraryVideoVolume() (float64, bool, error)
+
+	// SaveLibraryVideoVolume 保存当前资源库共享的视频音量。
+	SaveLibraryVideoVolume(volume float64) error
 
 	// UpsertVideoPlaybackPreference 保存单个视频的播放偏好。
 	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []VideoPlaybackBookmark) (*VideoPlaybackPreference, error)
@@ -67,6 +81,9 @@ type Repository interface {
 
 	// UpdatePhotoSourceMedia 更新导入源媒体的路径与基础源信息，用于目录迁移后复用原记录与缩略图。
 	UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string, originalName string, size int64, sourceModUnix int64) error
+
+	// UpdatePhotoCapturedMetadata 更新拍摄时间与基础媒体元数据，用于重新扫描后修正旧记录。
+	UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *PhotoEXIF, width int, height int, durationMS int64) error
 
 	// --- 相册 ---
 

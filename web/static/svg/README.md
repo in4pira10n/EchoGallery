@@ -29,6 +29,7 @@ This folder contains inline-loaded SVG icons used by the web UI. Icons are fetch
 - `topbar-upload.svg`: Topbar icon-only upload action.
 - `topbar-download-favorites.svg`: Topbar action for downloading all favorites.
 - `topbar-shuffle.svg`: Topbar action for reshuffling random albums.
+- `topbar-return-random-position.svg`: Topbar action for returning to the last viewed random-album position.
 - `topbar-save-restart.svg`: Topbar save-and-restart action.
 - `topbar-save.svg`: Topbar save action.
 - `topbar-new-album.svg`: Topbar create-album action.

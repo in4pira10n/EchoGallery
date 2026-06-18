@@ -15,31 +15,34 @@ var ErrProbeUnavailable = errors.New("ffprobe 不可用")
 var ErrInvalidVideo = errors.New("无效的视频文件")
 
 type VideoMeta struct {
-	Width      int     `json:"width"`
-	Height     int     `json:"height"`
-	DurationMS int64   `json:"duration_ms"`
-	FormatName string  `json:"format_name"`
-	CodecName  string  `json:"codec_name"`
-	FrameRate  float64 `json:"frame_rate,omitempty"`
+	Width      int       `json:"width"`
+	Height     int       `json:"height"`
+	DurationMS int64     `json:"duration_ms"`
+	FormatName string    `json:"format_name"`
+	CodecName  string    `json:"codec_name"`
+	FrameRate  float64   `json:"frame_rate,omitempty"`
+	TakenAt    time.Time `json:"taken_at,omitempty"`
 }
 
 type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 type ffprobeOutput struct {
 	Streams []struct {
-		CodecType    string `json:"codec_type"`
-		CodecName    string `json:"codec_name"`
-		Width        int    `json:"width"`
-		Height       int    `json:"height"`
-		AvgFrameRate string `json:"avg_frame_rate"`
-		RFrameRate   string `json:"r_frame_rate"`
+		CodecType    string            `json:"codec_type"`
+		CodecName    string            `json:"codec_name"`
+		Width        int               `json:"width"`
+		Height       int               `json:"height"`
+		AvgFrameRate string            `json:"avg_frame_rate"`
+		RFrameRate   string            `json:"r_frame_rate"`
+		Tags         map[string]string `json:"tags"`
 		SideDataList []struct {
 			Rotation int `json:"rotation"`
 		} `json:"side_data_list"`
 	} `json:"streams"`
 	Format struct {
-		FormatName string `json:"format_name"`
-		Duration   string `json:"duration"`
+		FormatName string            `json:"format_name"`
+		Duration   string            `json:"duration"`
+		Tags       map[string]string `json:"tags"`
 	} `json:"format"`
 }
 
@@ -71,6 +74,7 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 	}
 
 	meta := &VideoMeta{FormatName: data.Format.FormatName}
+	wallClockCreationTime := isWallClockVideoCreationTime(data.Format.Tags)
 	for _, stream := range data.Streams {
 		if stream.CodecType != "video" {
 			continue
@@ -86,6 +90,15 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 			meta.FrameRate = parseFFprobeFrameRate(stream.RFrameRate)
 		}
 		break
+	}
+
+	meta.TakenAt = parseVideoTakenAtTags(data.Format.Tags, wallClockCreationTime)
+	if meta.TakenAt.IsZero() {
+		for _, stream := range data.Streams {
+			if meta.TakenAt = parseVideoTakenAtTags(stream.Tags, wallClockCreationTime); !meta.TakenAt.IsZero() {
+				break
+			}
+		}
 	}
 
 	if strings.TrimSpace(data.Format.Duration) != "" {
@@ -151,4 +164,135 @@ func videoStreamRotatedSideways(sideData []struct {
 
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+func parseVideoTakenAtTags(tags map[string]string, wallClockCreationTime bool) time.Time {
+	if len(tags) == 0 {
+		return time.Time{}
+	}
+	if ts := parseVideoTakenAt(strings.TrimSpace(tags["com.apple.quicktime.creationdate"])); !ts.IsZero() {
+		return ts
+	}
+	parseTakenAt := parseVideoTakenAt
+	if wallClockCreationTime {
+		parseTakenAt = parseVideoWallClockTakenAt
+	}
+	for _, value := range []string{
+		strings.TrimSpace(tags["creation_time"]),
+		strings.TrimSpace(tags["date"]),
+	} {
+		if ts := parseTakenAt(value); !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func isWallClockVideoCreationTime(tags map[string]string) bool {
+	if len(tags) == 0 {
+		return false
+	}
+	majorBrand := strings.ToUpper(strings.TrimSpace(tags["major_brand"]))
+	if majorBrand == "MSNV" {
+		return true
+	}
+	compatibleBrands := strings.ToUpper(strings.TrimSpace(tags["compatible_brands"]))
+	return strings.Contains(compatibleBrands, "MSNV")
+}
+
+func parseVideoTakenAt(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05-0700",
+		"2006-01-02 15:04:05-0700",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	}
+	for _, layout := range layouts {
+		var (
+			ts  time.Time
+			err error
+		)
+		if strings.Contains(layout, "-0700") || strings.HasSuffix(layout, "Z07:00") {
+			ts, err = time.Parse(layout, value)
+		} else {
+			ts, err = time.ParseInLocation(layout, value, time.Local)
+		}
+		if err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func parseVideoWallClockTakenAt(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	if stripped, ok := stripVideoTimezoneSuffix(value); ok {
+		value = stripped
+	}
+	layouts := []string{
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		ts, err := time.ParseInLocation(layout, value, time.Local)
+		if err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func stripVideoTimezoneSuffix(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	for _, suffix := range []string{"Z"} {
+		if strings.HasSuffix(value, suffix) {
+			return strings.TrimSuffix(value, suffix), true
+		}
+	}
+	for _, pattern := range []string{"+0000", "-0000"} {
+		if strings.HasSuffix(value, pattern) {
+			return value[:len(value)-5], true
+		}
+	}
+	if len(value) >= 6 {
+		tz := value[len(value)-6:]
+		if (tz[0] == '+' || tz[0] == '-') && tz[3] == ':' {
+			if isAllDigits(tz[1:3]) && isAllDigits(tz[4:6]) {
+				return value[:len(value)-6], true
+			}
+		}
+	}
+	if len(value) >= 5 {
+		tz := value[len(value)-5:]
+		if (tz[0] == '+' || tz[0] == '-') && isAllDigits(tz[1:5]) {
+			return value[:len(value)-5], true
+		}
+	}
+	return "", false
+}
+
+func isAllDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

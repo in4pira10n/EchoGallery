@@ -221,6 +221,24 @@ func (s *DB) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string
 	return nil
 }
 
+// UpdatePhotoCapturedMetadata 更新拍摄时间与基础媒体元数据。
+func (s *DB) UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *storage.PhotoEXIF, width int, height int, durationMS int64) error {
+	result, err := s.db.Exec(`
+		UPDATE photos
+		SET taken_at = ?, exif_json = ?, width = ?, height = ?, duration_ms = ?
+		WHERE id = ? AND uploaded_by = ?`,
+		takenAt, encodePhotoEXIFJSON(&storage.Photo{EXIF: exif}), width, height, durationMS, id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新媒体元数据失败: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("图片不存在")
+	}
+	return nil
+}
+
 // SavePhoto 保存图片记录
 func (s *DB) SavePhoto(photo *storage.Photo) error {
 	if photo.MediaKind == "" {

@@ -105,6 +105,7 @@ func TestImportExistingPhotos_UsesSourceIndexOnSecondScan(t *testing.T) {
 		t.Fatalf("首次导入失败: %v", err)
 	}
 	repo.sourceRelPathLookupCount = 0
+	repo.sourceMediaIndexLoadCount = 0
 
 	second, err := svc.ImportExistingPhotos(1, nil)
 	if err != nil {
@@ -116,6 +117,9 @@ func TestImportExistingPhotos_UsesSourceIndexOnSecondScan(t *testing.T) {
 	}
 	if repo.sourceRelPathLookupCount != 0 {
 		t.Fatalf("二次扫描不应逐文件查询源路径，得到 %d 次", repo.sourceRelPathLookupCount)
+	}
+	if repo.sourceMediaIndexLoadCount != 0 {
+		t.Fatalf("资源库根目录未变化时应快速跳过，不应加载源媒体索引，得到 %d 次", repo.sourceMediaIndexLoadCount)
 	}
 }
 
@@ -206,6 +210,94 @@ func TestImportExistingPhotos_PrunesMissingFolderAlbums(t *testing.T) {
 	}
 }
 
+func TestImportExistingPhotos_PrunesNestedDeletionWhenRootMTimeUnchanged(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	folder := filepath.Join(svc.sourcePath, "旅行", "第一天")
+	if err := os.MkdirAll(folder, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(folder, "IMG_1003.jpg")
+	if err := os.WriteFile(sourcePath, createJPEGBytes(200, 120), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	rootInfo, err := os.Stat(svc.sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootMod := rootInfo.ModTime()
+
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(svc.sourcePath, rootMod, rootMod); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("删除子目录文件后二次导入失败: %v", err)
+	}
+	if summary.Pruned != 1 {
+		t.Fatalf("根目录 mtime 未变时也应清理 1 条失效媒体，得到 %d", summary.Pruned)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询时间线失败: %v", err)
+	}
+	if len(page.Photos) != 0 {
+		t.Fatalf("删除源文件后不应继续展示媒体，得到 %d 条", len(page.Photos))
+	}
+}
+
+func TestImportExistingPhotos_ImportsNewFileWhenDirectoryMTimeUnchanged(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	folder := filepath.Join(svc.sourcePath, "新增文件夹")
+	if err := os.MkdirAll(folder, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次扫描空文件夹失败: %v", err)
+	}
+	rootInfo, err := os.Stat(svc.sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	folderInfo, err := os.Stat(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootMod := rootInfo.ModTime()
+	folderMod := folderInfo.ModTime()
+
+	sourcePath := filepath.Join(folder, "IMG_1004.jpg")
+	if err := os.WriteFile(sourcePath, createJPEGBytes(200, 120), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(folder, folderMod, folderMod); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(svc.sourcePath, rootMod, rootMod); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("目录 mtime 未变时导入新增文件失败: %v", err)
+	}
+	if summary.Imported != 1 {
+		t.Fatalf("目录 mtime 未变时也应导入新增媒体，得到 %d", summary.Imported)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].SourceRelPath != filepath.ToSlash(filepath.Join("新增文件夹", "IMG_1004.jpg")) {
+		t.Fatalf("新增文件夹媒体未正确进入资源库，得到 %+v", page.Photos)
+	}
+}
+
 func TestImportExistingPhotos_ReusesExistingRecordWhenFolderMoves(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	oldDir := filepath.Join(svc.sourcePath, "旧目录")
@@ -284,6 +376,67 @@ func TestImportExistingPhotos_ReusesExistingRecordWhenFolderMoves(t *testing.T) 
 	}
 	if len(albums) != 1 || autoFolderAlbumPath(albums[0]) != "新目录" {
 		t.Fatalf("期望自动文件夹相册同步迁移到新目录，得到 %+v", albums)
+	}
+}
+
+func TestImportExistingPhotos_DetectsMoveBetweenExistingFoldersWhenRootMTimeUnchanged(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	oldDir := filepath.Join(svc.sourcePath, "旧目录")
+	newDir := filepath.Join(svc.sourcePath, "新目录")
+	if err := os.MkdirAll(oldDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(oldDir, "IMG_2025.jpg")
+	if err := os.WriteFile(oldPath, createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次导入失败: %v", err)
+	}
+	rootInfo, err := os.Stat(svc.sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootMod := rootInfo.ModTime()
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("期望首次只有 1 条记录，得到 %d", len(page.Photos))
+	}
+	originalID := page.Photos[0].ID
+
+	newPath := filepath.Join(newDir, "IMG_2025.jpg")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(svc.sourcePath, rootMod, rootMod); err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("移动文件后二次导入失败: %v", err)
+	}
+	if second.Imported != 0 {
+		t.Fatalf("移动文件不应重新导入，得到 %d", second.Imported)
+	}
+	page, err = svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("获取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("移动后仍应只有 1 条记录，得到 %d", len(page.Photos))
+	}
+	moved := page.Photos[0]
+	if moved.ID != originalID {
+		t.Fatalf("移动文件应复用旧记录，得到 id=%d want=%d", moved.ID, originalID)
+	}
+	if moved.SourceRelPath != filepath.ToSlash(filepath.Join("新目录", "IMG_2025.jpg")) {
+		t.Fatalf("期望源路径更新到新目录，得到 %s", moved.SourceRelPath)
 	}
 }
 

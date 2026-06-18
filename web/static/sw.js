@@ -1,24 +1,21 @@
-const EG_CACHE_VERSION = 'eg-pwa-v23';
-const EG_ASSET_VERSION = 'eg-20260609-17';
+const EG_ASSET_VERSION = '{{ASSET_VERSION}}';
+const EG_CACHE_VERSION = `eg-pwa-${EG_ASSET_VERSION}`;
 const EG_STATIC_CACHE = `${EG_CACHE_VERSION}-static`;
 let cacheStrategy = 'static-only';
 
 const STATIC_ASSETS = [
   '/',
-  '/gallery-chooser',
   '/login',
   '/register',
-  '/manifest.webmanifest',
+  `/manifest.webmanifest?v=${EG_ASSET_VERSION}`,
+  `/pages/common.css?v=${EG_ASSET_VERSION}`,
+  `/pages/login.css?v=${EG_ASSET_VERSION}`,
+  `/pages/setup.css?v=${EG_ASSET_VERSION}`,
   `/pages/app.css?v=${EG_ASSET_VERSION}`,
-  `/pages/gallery-chooser.css?v=${EG_ASSET_VERSION}`,
-  '/pages/common.css',
-  '/pages/login.css',
-  '/pages/setup.css',
   `/static/app.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa.js?v=${EG_ASSET_VERSION}`,
-  `/static/gallery-chooser.js?v=${EG_ASSET_VERSION}`,
-  '/static/pwa-icon.png',
-  '/static/strings/zh-CN.json'
+  `/static/pwa-icon.png?v=${EG_ASSET_VERSION}`,
+  `/static/strings/zh-CN.json?v=${EG_ASSET_VERSION}`
 ];
 
 self.addEventListener('install', event => {
@@ -65,7 +62,7 @@ function networkFirst(request) {
       }
       return response;
     })
-    .catch(() => caches.match(request).then(cached => cached || caches.match('/gallery-chooser') || caches.match('/')));
+    .catch(() => caches.match(request).then(cached => cached || caches.match('/')));
 }
 
 function cacheFirst(request) {
@@ -86,7 +83,7 @@ self.addEventListener('fetch', event => {
   if (shouldBypass(request) || cacheStrategy === 'disabled') return;
   const url = new URL(request.url);
   if (request.mode === 'navigate') {
-    event.respondWith(cacheStrategy === 'app-shell' ? networkFirst(request) : fetch(request).catch(() => caches.match('/gallery-chooser') || caches.match('/')));
+    event.respondWith(cacheStrategy === 'app-shell' ? networkFirst(request) : fetch(request).catch(() => caches.match('/')));
     return;
   }
   if (url.pathname.startsWith('/pages/') || url.pathname.startsWith('/static/') || url.pathname === '/manifest.webmanifest') {

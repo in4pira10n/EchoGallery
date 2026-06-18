@@ -71,7 +71,7 @@ func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() e
 	r.POST("/api/setup/select-library", ctrl.handleSelectLibrary())
 	r.POST("/api/auth/login", ctrl.handleSetupLogin())
 	r.POST("/api/auth/register", ctrl.handleSetupRegister())
-	r.POST("/api/auth/logout", handleLogout(&config.Config{Port: state.Port}))
+	r.POST("/api/auth/logout", handleLogout(&config.Config{Port: state.Port}, RouterOptions{}))
 
 	r.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
@@ -131,7 +131,7 @@ func (s *setupController) handleSetupLogin() gin.HandlerFunc {
 			return
 		}
 		setAuthCookie(c.Writer, cfg, token)
-		if strings.TrimSpace(profile.StoragePath) == "" && len(profile.Libraries) == 0 {
+		if !profileHasVisibleLibraries(cfg, user.Username, profile) {
 			c.JSON(http.StatusOK, gin.H{
 				"message":  "已切换到该用户，请继续完成初始化。",
 				"redirect": "/",
@@ -147,7 +147,7 @@ func (s *setupController) handleSetupLogin() gin.HandlerFunc {
 			c.JSON(http.StatusOK, gin.H{
 				"message":  "登录成功，正在切换到该用户的资源库。",
 				"redirect": "/",
-				"delay_ms": 1400,
+				"delay_ms": 2400,
 			})
 			return
 		}
@@ -320,9 +320,8 @@ func persistRecoveredLibrarySelection(cfg *config.Config) error {
 		return fmt.Errorf("加载 Profile 失败: %w", err)
 	}
 	profile.StoragePath = cfg.StoragePath
-	profile.Libraries = append([]config.Library(nil), cfg.Libraries...)
 	profile.ActiveLibraryID = ""
-	for _, library := range profile.Libraries {
+	for _, library := range cfg.VisibleLibrariesForUser(username) {
 		if config.NormalizeStoragePath(library.Path) == config.NormalizeStoragePath(profile.StoragePath) {
 			profile.ActiveLibraryID = library.ID
 			break

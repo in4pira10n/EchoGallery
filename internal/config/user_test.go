@@ -86,12 +86,15 @@ func TestRegisterUser_CreatesUserAndProfile(t *testing.T) {
 	origConfigPath := overrideConfigPath(path)
 	defer origConfigPath()
 
-	user, err := RegisterUser(cfg, "bob", "password123")
+	user, err := RegisterUser(cfg, "bob", "password123", UserRoleVisitor)
 	if err != nil {
 		t.Fatalf("注册用户失败: %v", err)
 	}
 	if user.Username != "bob" {
 		t.Fatalf("期望注册 bob，得到 %s", user.Username)
+	}
+	if user.Role != UserRoleVisitor {
+		t.Fatalf("期望注册 visitor，得到 %s", user.Role)
 	}
 	if len(cfg.Users) != 1 || cfg.Users[0].Username != "bob" {
 		t.Fatalf("期望配置中写入新用户，得到 %+v", cfg.Users)
@@ -102,6 +105,12 @@ func TestRegisterUser_CreatesUserAndProfile(t *testing.T) {
 	}
 	if len(loaded.Users) != 1 || loaded.Users[0].Username != "bob" {
 		t.Fatalf("期望新用户已落盘，得到 %+v", loaded.Users)
+	}
+	if got := loaded.Users[0].AllowedLibraryIDs; len(got) != 1 || got[0] != cfg.Libraries[0].ID {
+		t.Fatalf("期望 visitor 默认只获得主要资源库，得到 %+v", got)
+	}
+	if loaded.Users[0].DefaultLibraryID != cfg.Libraries[0].ID {
+		t.Fatalf("期望 visitor 默认资源库为主要资源库，得到 %q", loaded.Users[0].DefaultLibraryID)
 	}
 	profile, err := LoadProfile(cfg, "bob")
 	if err != nil {
@@ -127,8 +136,15 @@ func TestRegisterUser_DuplicateUsernameCaseInsensitive(t *testing.T) {
 	origConfigPath := overrideConfigPath(path)
 	defer origConfigPath()
 
-	if _, err := RegisterUser(cfg, "alice", "password123"); err == nil {
+	if _, err := RegisterUser(cfg, "alice", "password123", UserRoleAdmin); err == nil {
 		t.Fatal("重复用户名应返回错误")
+	}
+}
+
+func TestRegisterUser_RejectsReservedRootUsername(t *testing.T) {
+	cfg := validConfig()
+	if _, err := RegisterUser(cfg, "root", "password123", UserRoleVisitor); err == nil {
+		t.Fatal("root 用户名应被保留")
 	}
 }
 
@@ -185,7 +201,7 @@ func TestUpdateUserCredentials_RenamesUserAndMovesProfile(t *testing.T) {
 	cfg := validConfig()
 	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
 	cfg.ActiveProfile = "alice"
-	user, err := newUser("alice", "oldpass123")
+	user, err := newUser("alice", "oldpass123", UserRoleAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +257,7 @@ func TestUpdateUserCredentials_PasswordOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, configFileName)
 	cfg := validConfig()
-	user, err := newUser("alice", "oldpass123")
+	user, err := newUser("alice", "oldpass123", UserRoleAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,5 +338,118 @@ func TestVerifyPassword_UserNotFound(t *testing.T) {
 	_, err := VerifyPassword(cfg, "nonexistent", "password")
 	if err == nil {
 		t.Error("不存在的用户应该返回错误")
+	}
+}
+
+func TestUpdateManagedUser_VisitorAuthorizationUpdatesProfileSelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.Libraries = []Library{
+		{ID: "lib_a", Name: "A", Path: "/tmp/library-a"},
+		{ID: "lib_b", Name: "B", Path: "/tmp/library-b"},
+	}
+	cfg.Users = []User{
+		{Username: "guest", PasswordHash: "hash", Role: UserRoleVisitor},
+	}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	finalUsername, err := UpdateManagedUser(cfg, "guest", ManagedUserUpdate{
+		Role:              UserRoleVisitor,
+		AllowedLibraryIDs: []string{"lib_b"},
+		DefaultLibraryID:  "lib_b",
+	})
+	if err != nil {
+		t.Fatalf("更新 visitor 授权失败: %v", err)
+	}
+	if finalUsername != "guest" {
+		t.Fatalf("期望用户名保持 guest，得到 %s", finalUsername)
+	}
+	if got := cfg.Users[0].AllowedLibraryIDs; len(got) != 1 || got[0] != "lib_b" {
+		t.Fatalf("期望 visitor 仅授权 lib_b，得到 %+v", got)
+	}
+	if cfg.Users[0].DefaultLibraryID != "lib_b" {
+		t.Fatalf("期望默认资源库为 lib_b，得到 %s", cfg.Users[0].DefaultLibraryID)
+	}
+	profile, err := LoadProfile(cfg, "guest")
+	if err != nil {
+		t.Fatalf("读取 guest profile 失败: %v", err)
+	}
+	if profile.ActiveLibraryID != "lib_b" || profile.StoragePath != "/tmp/library-b" {
+		t.Fatalf("期望 profile 自动切到 lib_b，得到 active=%q storage=%q", profile.ActiveLibraryID, profile.StoragePath)
+	}
+}
+
+func TestUpdateManagedUser_AdminAlwaysGetsAllLibraries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.Libraries = []Library{
+		{ID: "lib_a", Name: "A", Path: "/tmp/library-a"},
+		{ID: "lib_b", Name: "B", Path: "/tmp/library-b"},
+	}
+	cfg.Users = []User{
+		{Username: "admin", PasswordHash: "hash", Role: UserRoleAdmin},
+	}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	if _, err := UpdateManagedUser(cfg, "admin", ManagedUserUpdate{
+		Role:              UserRoleAdmin,
+		AllowedLibraryIDs: []string{"lib_b"},
+		DefaultLibraryID:  "lib_b",
+	}); err != nil {
+		t.Fatalf("更新 admin 失败: %v", err)
+	}
+	if len(cfg.Users[0].AllowedLibraryIDs) != 2 {
+		t.Fatalf("管理员应始终获得全部资源库，得到 %+v", cfg.Users[0].AllowedLibraryIDs)
+	}
+	if cfg.Users[0].DefaultLibraryID != "lib_b" {
+		t.Fatalf("管理员默认资源库应允许定向切换，得到 %s", cfg.Users[0].DefaultLibraryID)
+	}
+}
+
+func TestUpdateManagedUser_VisitorDefaultsToPrimaryLibraryWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.AppDataDir = filepath.Join(dir, appDataDirName)
+	cfg.Libraries = []Library{
+		{ID: "lib_a", Name: "A", Path: "/tmp/library-a"},
+		{ID: "lib_b", Name: "B", Path: "/tmp/library-b"},
+	}
+	cfg.Users = []User{
+		{Username: "guest", PasswordHash: "hash", Role: UserRoleVisitor},
+	}
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatal(err)
+	}
+
+	origConfigPath := overrideConfigPath(path)
+	defer origConfigPath()
+
+	if _, err := UpdateManagedUser(cfg, "guest", ManagedUserUpdate{
+		Role:              UserRoleVisitor,
+		AllowedLibraryIDs: nil,
+		DefaultLibraryID:  "",
+	}); err != nil {
+		t.Fatalf("更新 visitor 默认授权失败: %v", err)
+	}
+	if got := cfg.Users[0].AllowedLibraryIDs; len(got) != 1 || got[0] != "lib_a" {
+		t.Fatalf("期望 visitor 默认回退到主要资源库，得到 %+v", got)
+	}
+	if cfg.Users[0].DefaultLibraryID != "lib_a" {
+		t.Fatalf("期望默认资源库为主要资源库，得到 %q", cfg.Users[0].DefaultLibraryID)
 	}
 }

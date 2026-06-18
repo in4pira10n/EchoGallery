@@ -69,6 +69,32 @@ func TestLoadFromPath_Success(t *testing.T) {
 	}
 }
 
+func TestLoadFromPath_LegacyUsersDefaultToAdminRole(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	if err := os.WriteFile(path, []byte(`{
+  "port": 8080,
+  "storage_path": "/tmp/photos",
+  "jwt_secret": "testsecret",
+  "users": [
+    {"username": "alice", "password_hash": "hash"}
+  ]
+}`), 0644); err != nil {
+		t.Fatalf("写入旧版配置失败: %v", err)
+	}
+
+	cfg, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("期望加载成功，得到错误: %v", err)
+	}
+	if len(cfg.Users) != 1 {
+		t.Fatalf("期望加载 1 个用户，得到 %d", len(cfg.Users))
+	}
+	if cfg.Users[0].Role != UserRoleAdmin {
+		t.Fatalf("期望旧版用户默认迁移为 admin，得到 %s", cfg.Users[0].Role)
+	}
+}
+
 func TestLoadFromPath_FileNotFound(t *testing.T) {
 	_, err := loadFromPath("/nonexistent/path/config.json")
 	if err == nil {
@@ -186,10 +212,53 @@ func TestSaveToPath_OmitsProfileFieldsFromConfigJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("解析配置失败: %v", err)
 	}
-	for _, key := range []string{"storage_path", "libraries", "thumbnail_dir", "thumbnail_size", "trash_dir", "preferences", "use_system_player"} {
+	for _, key := range []string{"storage_path", "thumbnail_dir", "thumbnail_size", "trash_dir", "preferences", "use_system_player"} {
 		if _, ok := decoded[key]; ok {
 			t.Fatalf("config.json 不应再保存 Profile 字段 %q", key)
 		}
+	}
+	if _, ok := decoded["libraries"]; !ok {
+		t.Fatalf("config.json 应保留全局 libraries 注册表")
+	}
+}
+
+func TestSaveToPath_PersistsGlobalBatchWorkflowState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFileName)
+	cfg := validConfig()
+	cfg.Libraries = []Library{
+		{ID: "lib_a", Name: "家庭相册", Path: "/tmp/photos-a"},
+		{ID: "lib_b", Name: "旅行相册", Path: "/tmp/photos-b"},
+	}
+	cfg.BatchScan = BatchTaskState{
+		Status:              "running",
+		Message:             "Scanning",
+		SelectedLibraryIDs:  []string{"lib_a", "lib_b"},
+		SelectedPaths:       []string{"/tmp/photos-a", "/tmp/photos-b"},
+		SelectionConfigured: true,
+		ExitAfterComplete:   true,
+	}
+	cfg.BatchThumbnails = BatchTaskState{
+		Status:              "completed",
+		Message:             "Done",
+		SelectedLibraryIDs:  []string{"lib_b"},
+		SelectedPaths:       []string{"/tmp/photos-b"},
+		SelectionConfigured: true,
+	}
+
+	if err := cfg.saveToPath(path); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	loaded, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("读取刚保存的文件失败: %v", err)
+	}
+	if loaded.BatchScan.Status != "running" || len(loaded.BatchScan.SelectedLibraryIDs) != 2 {
+		t.Fatalf("期望全局 batch_scan 被持久化，得到 %#v", loaded.BatchScan)
+	}
+	if loaded.BatchThumbnails.Status != "completed" || len(loaded.BatchThumbnails.SelectedLibraryIDs) != 1 {
+		t.Fatalf("期望全局 batch_thumbnails 被持久化，得到 %#v", loaded.BatchThumbnails)
 	}
 }
 

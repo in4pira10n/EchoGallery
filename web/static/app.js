@@ -10,36 +10,284 @@ const el = (tag, cls, html = '') => {
   if (html) e.innerHTML = html;
   return e;
 };
+const pageSessionStorageKey = 'echogallery_page_session_id_v1';
+const pageSessionTransferKey = 'echogallery_page_session_transfer_v1';
+const pageSessionQueryKey = 'eg_page_session';
+let pageSessionHeartbeatTimer = null;
+let pageSessionRedirectPending = false;
+let pageSessionReleaseRequested = false;
+
+function generatePageSessionID() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return `eg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function ensurePageSessionID() {
+  try {
+    let sessionID = sessionStorage.getItem(pageSessionStorageKey) || '';
+    if (!sessionID) {
+      sessionID = generatePageSessionID();
+      sessionStorage.setItem(pageSessionStorageKey, sessionID);
+    }
+    return sessionID;
+  } catch (_) {
+    return generatePageSessionID();
+  }
+}
+
+function resetPageSessionID() {
+  const sessionID = generatePageSessionID();
+  try {
+    sessionStorage.setItem(pageSessionStorageKey, sessionID);
+  } catch (_) {}
+  return sessionID;
+}
+
+function consumeLoginTransferPageSessionID() {
+  try {
+    const current = sessionStorage.getItem(pageSessionStorageKey) || '';
+    const transfer = sessionStorage.getItem(pageSessionTransferKey) || '';
+    if (current && transfer && current === transfer) {
+      sessionStorage.removeItem(pageSessionTransferKey);
+      return current;
+    }
+    if (transfer) sessionStorage.removeItem(pageSessionTransferKey);
+  } catch (_) {}
+  return '';
+}
+
+function navigationType() {
+  try {
+    const entry = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+    if (entry && entry.type) return String(entry.type);
+  } catch (_) {}
+  try {
+    if (performance && performance.navigation) {
+      switch (performance.navigation.type) {
+        case performance.navigation.TYPE_RELOAD:
+          return 'reload';
+        case performance.navigation.TYPE_BACK_FORWARD:
+          return 'back_forward';
+        default:
+          return 'navigate';
+      }
+    }
+  } catch (_) {}
+  return 'navigate';
+}
+
+function buildPageSessionHeaders(headers) {
+  const next = new Headers(headers || {});
+  const sessionID = ensurePageSessionID();
+  if (sessionID) next.set('X-EG-Page-Session', sessionID);
+  return next;
+}
+
+function withPageSessionRequest(options = {}) {
+  return {
+    credentials: 'same-origin',
+    ...options,
+    headers: buildPageSessionHeaders(options.headers),
+  };
+}
+
+function withPageSessionURL(url) {
+  const sessionID = ensurePageSessionID();
+  if (!sessionID || !url) return url;
+  try {
+    const resolved = new URL(url, location.origin);
+    resolved.searchParams.set(pageSessionQueryKey, sessionID);
+    if (resolved.origin === location.origin) {
+      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    }
+    return resolved.toString();
+  } catch (_) {
+    const joiner = String(url).includes('?') ? '&' : '?';
+    return `${url}${joiner}${pageSessionQueryKey}=${encodeURIComponent(sessionID)}`;
+  }
+}
+
+function appendURLParam(url, key, value) {
+  try {
+    const resolved = new URL(url, location.origin);
+    resolved.searchParams.set(key, value);
+    if (resolved.origin === location.origin) {
+      return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+    }
+    return resolved.toString();
+  } catch (_) {
+    const joiner = String(url).includes('?') ? '&' : '?';
+    return `${url}${joiner}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+  }
+}
+
+async function fetchWithPageSession(url, options = {}) {
+  return fetch(url, withPageSessionRequest(options));
+}
+
+function authRedirectReason(reason, status) {
+  switch (String(reason || '').trim()) {
+    case 'duplicate_page_session':
+    case 'user_already_online':
+      return 'duplicate';
+    case 'no_accessible_library':
+      return 'no-library';
+    case 'session_missing':
+    case 'session_expired':
+      return 'expired';
+    default:
+      return status === 401 ? 'expired' : '';
+  }
+}
+
+function redirectToLoginForAuthFailure(reason, status) {
+  if (pageSessionRedirectPending) return;
+  pageSessionRedirectPending = true;
+  stopPageSessionHeartbeat();
+  const mapped = authRedirectReason(reason, status);
+  const next = mapped ? `/login?reason=${encodeURIComponent(mapped)}` : '/login';
+  location.href = next;
+}
+
+async function buildAPIError(response) {
+  const text = await response.text();
+  let payload = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (_) {
+      payload = { error: text };
+    }
+  }
+  const error = {
+    ...(payload && typeof payload === 'object' ? payload : {}),
+    status: response.status,
+    error: (payload && payload.error) || response.statusText || '请求失败',
+    forbidden: response.status === 403,
+  };
+  const reason = String(error.reason || '').trim();
+  if (response.status === 401 || (response.status === 403 && reason === 'no_accessible_library')) {
+    error.redirecting = true;
+    redirectToLoginForAuthFailure(reason, response.status);
+    return error;
+  }
+  if (error.forbidden) {
+    error.forbidden = true;
+  }
+  return error;
+}
+
 const api = {
   async get(url, options = {}) {
-    const r = await fetch(url, options);
-    if (!r.ok) throw await r.json();
-    return r.json();
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const r = await fetchWithPageSession(url, fetchOptions);
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
   },
-  async post(url, data) {
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    if (!r.ok) throw await r.json();
-    return r.json();
+  async post(url, data, options = {}) {
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const r = await fetchWithPageSession(url, {
+      method: 'POST',
+      headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      ...fetchOptions,
+    });
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
   },
-  async put(url, data) {
-    const r = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    if (!r.ok) throw await r.json();
-    return r.json();
+  async put(url, data, options = {}) {
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const r = await fetchWithPageSession(url, {
+      method: 'PUT',
+      headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      ...fetchOptions,
+    });
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
   },
-  async del(url, data) {
-    const options = data == null
+  async del(url, data, options = {}) {
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const requestOptions = data == null
       ? { method: 'DELETE' }
-      : { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) };
-    const r = await fetch(url, options);
-    if (!r.ok) throw await r.json();
-    return r.json();
+      : { method: 'DELETE', headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(data) };
+    const r = await fetchWithPageSession(url, { ...requestOptions, ...fetchOptions });
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
   },
-  async upload(url, formData) {
-    const r = await fetch(url, { method: 'POST', body: formData });
-    if (!r.ok) throw await r.json();
-    return r.json();
+  async upload(url, formData, options = {}) {
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const r = await fetchWithPageSession(url, { method: 'POST', body: formData, ...fetchOptions });
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
   },
 };
+
+async function parseAPIResponse(response, { suppressForbiddenToast = false } = {}) {
+  const payload = await (async () => {
+    const text = await response.text();
+    if (!text) return {};
+    try {
+      return JSON.parse(text);
+    } catch (_) {
+      return { error: text };
+    }
+  })();
+  if (response.ok) return payload;
+  const error = await buildAPIError(new Response(JSON.stringify(payload), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: { 'Content-Type': 'application/json' },
+  }));
+  if (error.redirecting) throw error;
+  if (error.forbidden && !suppressForbiddenToast) {
+    showToast('访客用户无权执行此操作');
+    error.forbiddenToastShown = true;
+  }
+  throw error;
+}
+
+function stopPageSessionHeartbeat() {
+  if (pageSessionHeartbeatTimer) {
+    clearInterval(pageSessionHeartbeatTimer);
+    pageSessionHeartbeatTimer = null;
+  }
+}
+
+async function pingPageSession() {
+  if (pageSessionRedirectPending) return;
+  try {
+    await api.post('/api/auth/session/ping', {}, { suppressForbiddenToast: true });
+  } catch (error) {
+    if (!error || !error.redirecting) {
+      console.warn('page session heartbeat failed', error);
+    }
+  }
+}
+
+function startPageSessionHeartbeat() {
+  if (pageSessionHeartbeatTimer) return;
+  ensurePageSessionID();
+  pageSessionHeartbeatTimer = window.setInterval(() => {
+    if (pageSessionRedirectPending) return;
+    void pingPageSession();
+  }, 25000);
+}
+
+async function releaseCurrentPageSession({ keepalive = false } = {}) {
+  if (pageSessionReleaseRequested) return;
+  pageSessionReleaseRequested = true;
+  try {
+    const releaseURL = withPageSessionURL('/api/auth/session/release');
+    if (keepalive && navigator.sendBeacon) {
+      try {
+        if (navigator.sendBeacon(releaseURL, '')) return;
+      } catch (_) {
+      }
+    }
+    await fetch(releaseURL, withPageSessionRequest({ method: 'POST', keepalive }));
+  } catch (_) {
+  } finally {
+    pageSessionReleaseRequested = false;
+  }
+}
 
 function isIOSDevice() {
   const ua = navigator.userAgent || '';
@@ -48,7 +296,50 @@ function isIOSDevice() {
 }
 
 function initDeviceClasses() {
-  document.documentElement.classList.toggle('is-ios-device', isIOSDevice());
+  const root = document.documentElement;
+  const isIOS = isIOSDevice();
+  root.classList.toggle('is-ios-device', isIOS);
+  root.classList.remove('ios-safe-area-phone', 'ios-home-button-phone');
+  if (!isIOS) return;
+  const isPhoneSized = Math.max(window.screen.width || 0, window.screen.height || 0) < 1400;
+  if (!isPhoneSized) return;
+  const safeArea = measuredSafeAreaInsets();
+  const topInset = Math.max(0, Number(safeArea.top) || 0);
+  const bottomInset = Math.max(0, Number(safeArea.bottom) || 0);
+  const maxTopInset = Math.max(0, Number(safeArea.maxTop) || 0);
+  const maxBottomInset = Math.max(0, Number(safeArea.maxBottom) || 0);
+  const screenLong = Math.max(window.screen.width || 0, window.screen.height || 0);
+  const roundedHeight = Math.round(screenLong);
+  const modernIPhoneHeights = new Set([812, 844, 852, 874, 896, 926, 932, 956]);
+  const homeButtonIPhoneHeights = new Set([480, 568, 667, 736]);
+  const hasKnownModernHeight = modernIPhoneHeights.has(roundedHeight);
+  const hasKnownHomeButtonHeight = homeButtonIPhoneHeights.has(roundedHeight);
+  const hasMeasuredBottomSafeArea = bottomInset > 0 || maxBottomInset > 0;
+  const hasModernSafeArea = hasKnownModernHeight || (!hasKnownHomeButtonHeight && hasMeasuredBottomSafeArea);
+  root.dataset.egIosScreenHeight = String(roundedHeight || 0);
+  root.dataset.egSafeArea = [
+    `top:${Math.round(topInset)}`,
+    `bottom:${Math.round(bottomInset)}`,
+    `maxTop:${Math.round(maxTopInset)}`,
+    `maxBottom:${Math.round(maxBottomInset)}`,
+    `modern:${hasModernSafeArea ? 1 : 0}`,
+  ].join(';');
+  root.classList.add(hasModernSafeArea ? 'ios-safe-area-phone' : 'ios-home-button-phone');
+}
+
+let deviceClassRefreshTimer = null;
+function refreshDeviceClassesSoon() {
+  clearTimeout(deviceClassRefreshTimer);
+  deviceClassRefreshTimer = window.setTimeout(() => {
+    deviceClassRefreshTimer = null;
+    initDeviceClasses();
+  }, 120);
+}
+
+function scheduleInitialDeviceClassRefreshes() {
+  [0, 120, 420, 1000].forEach(delay => {
+    window.setTimeout(initDeviceClasses, delay);
+  });
 }
 
 const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
@@ -262,6 +553,23 @@ function formatDateTime(iso) {
     minute: '2-digit',
   });
 }
+function formatMediaDateTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+function addPanguSpacing(text) {
+  return String(text || '')
+    .replace(/([\u4e00-\u9fff])([A-Za-z0-9@#&%+=/.-])/g, '$1 $2')
+    .replace(/([A-Za-z0-9@#&%+=/.-])([\u4e00-\u9fff])/g, '$1 $2');
+}
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
@@ -304,13 +612,18 @@ function libraryLogoAssetURL(library = {}) {
   const asset = String(library.logo_asset || library.logoAsset || '').trim();
   const index = Number.isFinite(Number(library.index)) ? Number(library.index) : Number(library.logo_index);
   if (!asset || !Number.isInteger(index) || index < 0) return '';
-  return `/api/settings/libraries/${index}/logo?v=${encodeURIComponent(asset)}`;
+  return withPageSessionURL(`/api/settings/libraries/${index}/logo?v=${encodeURIComponent(asset)}`);
+}
+function sessionScopedURL(url = '') {
+  const value = String(url || '').trim();
+  if (!value || value.startsWith('blob:') || value.startsWith('data:')) return value;
+  return withPageSessionURL(value);
 }
 function resolveLibraryLogoURL(library = {}) {
   const explicit = library.logo_image_url || library.logoImageUrl || libraryLogoAssetURL(library);
-  if (explicit) return explicit;
+  if (explicit) return sessionScopedURL(explicit);
   const key = libraryVisualSeed(library);
-  return state.libraryRandomLogos && state.libraryRandomLogos[key] || '';
+  return sessionScopedURL(state.libraryRandomLogos && state.libraryRandomLogos[key] || '');
 }
 function normalizeHexColor(value) {
   const input = String(value || '').trim();
@@ -371,24 +684,44 @@ function normalizeLibraries(libraries, fallbackPath = '') {
   const result = [];
   const seen = new Set();
   (libraries || []).forEach((library, index) => {
+    const explicitIndex = Number.isInteger(Number(library && (library.index ?? library.logo_index)))
+      ? Number(library.index ?? library.logo_index)
+      : index;
     const id = String(library && library.id || '').trim();
     const path = (library && library.path || '').trim();
     if (!path) return;
     const key = id || path.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
+    const statFields = [
+      'created_at', 'createdAt',
+      'last_scanned_at', 'lastScannedAt', 'last_scan_at', 'lastScanAt',
+      'unsupported_media_count', 'unsupportedMediaCount',
+      'total_size_text', 'totalSizeText', 'storage_text', 'storageText',
+      'photo_count', 'photoCount', 'image_count', 'imageCount',
+      'video_count', 'videoCount',
+    ];
+    const stats = {};
+    statFields.forEach(statKey => {
+      if (library && Object.prototype.hasOwnProperty.call(library, statKey)) stats[statKey] = library[statKey];
+    });
     result.push({
-      index,
+      index: explicitIndex,
       id,
       name: (library && library.name || '').trim() || `资源库 ${index + 1}`,
       path,
       logo_asset: library && (library.logo_asset || library.logoAsset) || '',
       logo_image_url: library && (library.logo_image_url || library.logoImageUrl) || '',
       accent_color: normalizeHexColor(library && (library.accent_color || library.accentColor) || ''),
+      status: String(library && library.status || '').trim(),
+      available: !(library && library.available === false),
+      unavailable_reason: String(library && (library.unavailable_reason || library.unavailableReason) || '').trim(),
+      locked_by_username: String(library && (library.locked_by_username || library.lockedByUsername) || '').trim(),
+      ...stats,
     });
   });
   if (!result.length && (fallbackPath || '').trim()) {
-    result.push({ index: 0, id: '', name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '' });
+    result.push({ index: 0, id: '', name: '默认资源库', path: fallbackPath.trim(), logo_asset: '', logo_image_url: '', accent_color: '', status: '', available: true, unavailable_reason: '', locked_by_username: '' });
   }
   return result;
 }
@@ -409,6 +742,163 @@ function showToast(message, duration = 2200) {
     toast.classList.remove('show');
     setTimeout(() => toast.remove(), 220);
   }, duration);
+}
+
+function currentUserRole() {
+  return String(state?.serverSettings?.role || 'admin').trim().toLowerCase() || 'admin';
+}
+function isRootDebugMedia(photo) {
+  return !!(photo && photo.debug_media);
+}
+function currentUsername() {
+  return String(state?.serverSettings?.current_username || '').trim();
+}
+function isRootUser() {
+  return currentUserRole() === 'root';
+}
+function isVisitorUser() {
+  return currentUserRole() === 'visitor';
+}
+function canManageLibraries() {
+  return currentUserRole() === 'admin';
+}
+function canRunServerTasks() {
+  return currentUserRole() === 'admin';
+}
+function canAccessBatchWorkflow() {
+  return currentUserRole() === 'admin' || currentUserRole() === 'root';
+}
+function canWriteMedia() {
+  return currentUserRole() === 'admin';
+}
+function canManageShareLinks() {
+  return currentUserRole() === 'admin';
+}
+function canEditBookmarks() {
+  return currentUserRole() === 'admin';
+}
+function rootCanViewSettings() {
+  return false;
+}
+
+const rootDebugMediaItems = [
+  {
+    id: 'root-debug-img-7688',
+    uuid: 'root-debug-img-7688',
+    original_name: 'IMG_7688.JPG',
+    media_kind: 'image',
+    mime_type: 'image/jpeg',
+    debug_media: true,
+    file_url: '/api/root/debug-media/img-7688',
+    thumbnail_url: '/api/root/debug-media/img-7688',
+    taken_at: '',
+    width: 0,
+    height: 0,
+    size: 0,
+  },
+  {
+    id: 'root-debug-img-7703',
+    uuid: 'root-debug-img-7703',
+    original_name: 'IMG_7703.JPG',
+    media_kind: 'image',
+    mime_type: 'image/jpeg',
+    debug_media: true,
+    file_url: '/api/root/debug-media/img-7703',
+    thumbnail_url: '/api/root/debug-media/img-7703',
+    taken_at: '',
+    width: 0,
+    height: 0,
+    size: 0,
+  },
+  {
+    id: 'root-debug-mvi-8411',
+    uuid: 'root-debug-mvi-8411',
+    original_name: 'MVI_8411.MOV',
+    media_kind: 'video',
+    mime_type: 'video/quicktime',
+    debug_media: true,
+    file_url: '/api/root/debug-media/mvi-8411',
+    playback_url: '/api/root/debug-media/mvi-8411',
+    thumbnail_url: videoPosterPlaceholder,
+    poster_url: videoPosterPlaceholder,
+    taken_at: '',
+    width: 0,
+    height: 0,
+    size: 0,
+  },
+];
+function availableRootViews() {
+  if (isRootUser()) return ['timeline', 'settings'];
+  const views = ['timeline', 'favorites', 'random-album', 'albums', 'memories'];
+  if (!isVisitorUser()) views.push('trash');
+  views.push('settings');
+  return views;
+}
+function isAllowedRootView(view) {
+  return availableRootViews().includes(view);
+}
+function forbidVisitorAction() {
+  showToast('访客用户无权执行此操作');
+  return false;
+}
+function isForbiddenError(error) {
+  return !!(error && (error.forbidden || Number(error.status) === 403));
+}
+function removeBlockingDialog(modal) {
+  if (!modal) return;
+  modal.classList.remove('open');
+  setTimeout(() => modal.remove(), 140);
+}
+function showBlockingDialog({
+  title = '提示',
+  message = '',
+  confirmText = '确定',
+  cancelText = '取消',
+  danger = false,
+  showCancel = true,
+} = {}) {
+  return new Promise(resolve => {
+    const modal = el('div', 'modal-overlay blocking-dialog-overlay open');
+    modal.innerHTML = `
+      <div class="modal blocking-dialog-modal" role="dialog" aria-modal="true" aria-label="${escapeHTML(title)}">
+        <div class="modal-title">${escapeHTML(title)}</div>
+        <p class="modal-copy">${escapeHTML(message)}</p>
+        <div class="modal-footer">
+          ${showCancel ? `<button class="btn" type="button" data-dialog-cancel>${escapeHTML(cancelText)}</button>` : ''}
+          <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" type="button" data-dialog-confirm>${escapeHTML(confirmText)}</button>
+        </div>
+      </div>`;
+    const finish = accepted => {
+      removeBlockingDialog(modal);
+      resolve(accepted);
+    };
+    modal.addEventListener('click', e => {
+      if (e.target === modal) finish(false);
+    });
+    modal.querySelector('[data-dialog-cancel]')?.addEventListener('click', () => finish(false));
+    modal.querySelector('[data-dialog-confirm]')?.addEventListener('click', () => finish(true));
+    document.body.appendChild(modal);
+    requestAnimationFrame(() => modal.querySelector('[data-dialog-confirm]')?.focus());
+  });
+}
+async function appConfirm(message, options = {}) {
+  return showBlockingDialog({
+    title: options.title || '请确认',
+    message,
+    confirmText: options.confirmText || '确认',
+    cancelText: options.cancelText || '取消',
+    danger: !!options.danger,
+    showCancel: options.showCancel !== false,
+  });
+}
+async function appAlert(message, options = {}) {
+  await showBlockingDialog({
+    title: options.title || '提示',
+    message,
+    confirmText: options.confirmText || '知道了',
+    showCancel: false,
+    danger: !!options.danger,
+  });
 }
 function groupByDate(photos) {
   const groups = {};
@@ -435,6 +925,43 @@ function addLongPress(el, callback, delay = 500) {
   el.addEventListener('touchmove',  () => { moved = true; clearTimeout(timer); });
   el.addEventListener('touchend',   () => clearTimeout(timer));
   el.addEventListener('touchcancel',() => clearTimeout(timer));
+}
+function addUniversalLongPress(el, callback, delay = 520) {
+  let timer = null;
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
+  const clear = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    pointerId = null;
+  };
+  el.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    clear();
+    pointerId = e.pointerId;
+    startX = e.clientX;
+    startY = e.clientY;
+    timer = setTimeout(() => {
+      timer = null;
+      pointerId = null;
+      callback(e);
+    }, delay);
+  });
+  el.addEventListener('pointermove', e => {
+    if (pointerId == null || e.pointerId !== pointerId || !timer) return;
+    if (Math.hypot(e.clientX - startX, e.clientY - startY) > 10) clear();
+  });
+  el.addEventListener('pointerup', e => {
+    if (pointerId == null || e.pointerId !== pointerId) return;
+    clear();
+  });
+  el.addEventListener('pointercancel', e => {
+    if (pointerId == null || e.pointerId !== pointerId) return;
+    clear();
+  });
 }
 
 // ── SVG 图标 ──────────────────────────────────────────
@@ -470,6 +997,7 @@ const icons = {
   topbarUpload: '',
   topbarDownloadFavorites: '',
   topbarShuffle: '',
+  topbarReturnRandomPosition: '',
   topbarSave: '',
   topbarNewAlbum: '',
   topbarPrevAlbum: '',
@@ -489,6 +1017,16 @@ const icons = {
   topbarClearMemories: '',
   libraryCardEdit: '',
   libraryCardDelete: '',
+  libraryEditorCancel: '',
+  libraryEditorSave: '',
+  libraryEditorSwitch: '',
+  libraryEditorDelete: '',
+  libraryInfoCreated: '',
+  libraryInfoScanned: '',
+  libraryInfoUnsupported: '',
+  libraryInfoStorage: '',
+  libraryInfoPhotos: '',
+  libraryInfoVideos: '',
   topbarTimelineOrder: '',
   albumCardFolder: '',
   albumCardUser: '',
@@ -536,6 +1074,7 @@ const icons = {
   mediaImage: '',
   mediaVideo: '',
   bookmark: '',
+  bookmarkBlank: '',
   albumSortTimelineDesc: '',
   albumSortTimelineAsc: '',
   albumSortName: '',
@@ -588,6 +1127,7 @@ const svgIconFiles = {
   topbarUpload: 'topbar-upload.svg',
   topbarDownloadFavorites: 'topbar-download-favorites.svg',
   topbarShuffle: 'topbar-shuffle.svg',
+  topbarReturnRandomPosition: 'topbar-return-random-position.svg',
   topbarSave: 'topbar-save.svg',
   topbarNewAlbum: 'topbar-new-album.svg',
   topbarPrevAlbum: 'topbar-prev-album.svg',
@@ -608,6 +1148,16 @@ const svgIconFiles = {
   topbarClearMemories: 'topbar-clear-memories-action.svg',
   libraryCardEdit: 'library-card-edit.svg',
   libraryCardDelete: 'library-card-delete.svg',
+  libraryEditorCancel: 'library-editor-cancel.svg',
+  libraryEditorSave: 'library-editor-save.svg',
+  libraryEditorSwitch: 'library-editor-switch.svg',
+  libraryEditorDelete: 'library-editor-delete.svg',
+  libraryInfoCreated: 'library-info-created.svg',
+  libraryInfoScanned: 'library-info-scanned.svg',
+  libraryInfoUnsupported: 'library-info-unsupported.svg',
+  libraryInfoStorage: 'library-info-storage.svg',
+  libraryInfoPhotos: 'library-info-photos.svg',
+  libraryInfoVideos: 'library-info-videos.svg',
   topbarTimelineOrder: 'topbar-timeline-order.svg',
   albumCardFolder: 'album-card-folder.svg',
   albumCardUser: 'album-card-user.svg',
@@ -657,6 +1207,7 @@ const svgIconFiles = {
   mediaImage: 'media-image.svg',
   mediaVideo: 'media-video.svg',
   bookmark: 'video-bookmark.svg',
+  bookmarkBlank: 'video-bookmark-blank.svg',
   albumSortTimelineDesc: 'album-sort-timeline-desc.svg',
   albumSortTimelineAsc: 'album-sort-timeline-asc.svg',
   albumSortName: 'album-sort-name.svg',
@@ -694,6 +1245,27 @@ function syncNavActiveView(view) {
     a.classList.toggle('active', active);
     a.innerHTML = `${navIconMarkup(a.dataset.view, active)}<span class="nav-label">${escapeHTML(a.dataset.label || '')}</span>`;
   });
+  syncRoleAwareNavigation();
+}
+
+function syncRoleAwareNavigation() {
+  $('#nav-logo-btn')?.classList.toggle('hidden', isRootUser());
+  $$('#main-nav .nav-item[data-view]').forEach(item => {
+    const view = String(item.dataset.view || '').trim();
+    const hidden = !isAllowedRootView(view);
+    item.hidden = hidden;
+    item.classList.toggle('is-role-hidden', hidden);
+    item.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+    item.tabIndex = hidden ? -1 : 0;
+  });
+  if (isRootUser()) {
+    $$('#main-nav .nav-item[data-view]').forEach(item => {
+      const view = String(item.dataset.view || '').trim();
+      if (view !== 'timeline' && view !== 'settings') {
+        item.remove();
+      }
+    });
+  }
 }
 async function loadInlineSVGIcons() {
   await Promise.all(Object.entries(svgIconFiles).map(async ([key, file]) => {
@@ -749,35 +1321,52 @@ function sanitizeSVGNode(node) {
 }
 
 // ── 主题 ──────────────────────────────────────────────
-const themeManualStorageKey = 'echogallery_theme_manual';
 const systemThemeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 function systemTheme() {
   return systemThemeQuery && systemThemeQuery.matches ? 'dark' : 'light';
 }
-function hasManualThemePreference() {
-  return localStorage.getItem(themeManualStorageKey) === '1';
+let themeSessionOverride = '';
+let lastKnownSystemTheme = systemTheme();
+function currentThemePreference() {
+  return themeSessionOverride || lastKnownSystemTheme || systemTheme();
+}
+function syncThemeWithSystem({ clearOverride = false } = {}) {
+  lastKnownSystemTheme = systemTheme();
+  if (clearOverride) themeSessionOverride = '';
+  if (!themeSessionOverride) setThemeValue(lastKnownSystemTheme);
+}
+function refreshThemeFromSystem() {
+  const nextSystemTheme = systemTheme();
+  if (nextSystemTheme !== lastKnownSystemTheme) {
+    themeSessionOverride = '';
+    lastKnownSystemTheme = nextSystemTheme;
+    setThemeValue(nextSystemTheme);
+  }
 }
 function setThemeValue(theme, { manual = false, persist = false } = {}) {
   const next = theme === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = next;
   state.theme = next;
-  if (manual) localStorage.setItem(themeManualStorageKey, '1');
   updateThemeBtn();
   applyLibraryBranding();
   if (persist) persistSettings().catch(() => {});
 }
 function initTheme() {
-  document.documentElement.dataset.theme = systemTheme();
+  themeSessionOverride = '';
+  syncThemeWithSystem({ clearOverride: true });
   if (systemThemeQuery) {
-    const sync = () => {
-      if (!hasManualThemePreference()) setThemeValue(systemTheme());
-    };
-    if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener('change', sync);
-    else if (systemThemeQuery.addListener) systemThemeQuery.addListener(sync);
+    if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener('change', refreshThemeFromSystem);
+    else if (systemThemeQuery.addListener) systemThemeQuery.addListener(refreshThemeFromSystem);
   }
+  window.addEventListener('focus', refreshThemeFromSystem);
+  window.addEventListener('pageshow', refreshThemeFromSystem);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshThemeFromSystem();
+  });
 }
 function toggleTheme() {
   const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  themeSessionOverride = t;
   setThemeValue(t, { manual: true, persist: true });
 }
 function updateThemeBtn() {
@@ -828,10 +1417,7 @@ function normalizePathForCompare(value) {
 function normalizeLibrariesForCompare(libraries = []) {
   return normalizeLibraries(libraries).map(library => ({
     id: String(library.id || '').trim(),
-    name: String(library.name || '').trim(),
     path: normalizePathForCompare(library.path),
-    logo_asset: String(library.logo_asset || library.logoAsset || '').trim(),
-    accent_color: normalizeHexColor(library.accent_color || library.accentColor || ''),
   }));
 }
 function cloneSettingsSnapshot(settings = state.serverSettings || {}) {
@@ -932,6 +1518,9 @@ function resetMediaFilteredViewState() {
   state.albumCursor = '';
   state.albumHasMore = true;
   state.albumDetailLoadedKey = '';
+  state.albums = [];
+  state.albumsLoaded = false;
+  clearAlbumChildrenIndex();
   state.trashPhotos = [];
   state.trashCursor = '';
   state.trashHasMore = true;
@@ -1172,10 +1761,11 @@ function updateVideoBookmarkButton(photo = state.lightboxPhotos[state.lightboxIn
   const isVideo = isVideoMedia(photo);
   $('#lightbox-header')?.classList.toggle('lightbox-video-active', isVideo);
   if (!btn) return;
-  btn.classList.toggle('hidden', !isVideo);
+  btn.classList.toggle('hidden', !isVideo || !canEditBookmarks() || isRootDebugMedia(photo));
   if (!isVideo) return;
   const count = getVideoBookmarkList(photo).length;
   btn.classList.toggle('active', count > 0);
+  btn.innerHTML = count > 0 ? (icons.bookmark || '') : (icons.bookmarkBlank || icons.bookmark || '');
   btn.title = count > 0 ? `视频书签 ${count}/10，点击管理` : '视频书签，点击管理';
   btn.setAttribute('aria-label', btn.title);
 }
@@ -1328,6 +1918,9 @@ function effectiveVideoVolume(video = $('#lb-video')) {
 function ensureVideoGainNode(video = $('#lb-video')) {
   if (!video || !isTouchLikeDevice()) return null;
   if (state.lightboxVideoGainNode && state.lightboxVideoAudioElement === video) {
+    if (state.lightboxVideoAudioContext && state.lightboxVideoAudioContext.state === 'suspended') {
+      state.lightboxVideoAudioContext.resume().catch(() => {});
+    }
     return state.lightboxVideoGainNode;
   }
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1345,6 +1938,24 @@ function ensureVideoGainNode(video = $('#lb-video')) {
     return state.lightboxVideoGainNode;
   } catch (_) {
     return null;
+  }
+}
+async function restoreVideoAudioOutput(video = $('#lb-video')) {
+  if (!video || video.classList.contains('hidden')) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (AudioContextClass && isTouchLikeDevice()) {
+    try {
+      ensureVideoGainNode(video);
+      if (state.lightboxVideoAudioContext && state.lightboxVideoAudioContext.state === 'suspended') {
+        await state.lightboxVideoAudioContext.resume();
+      }
+    } catch (_) {}
+  }
+  applyVideoVolumeOutput(video, effectiveVideoVolume(video));
+  if (video.muted) {
+    video.setAttribute('muted', '');
+  } else {
+    video.removeAttribute('muted');
   }
 }
 function applyVideoVolumeOutput(video = $('#lb-video'), volume = state.globalVideoVolume) {
@@ -1413,6 +2024,7 @@ async function restoreVideoPlaybackPreference(video, photo) {
       video.currentTime = saved;
     }
   }
+  state.globalVideoVolume = normalizeVideoVolumeValue(pref.volume, state.globalVideoVolume);
   applyVideoVolumeOutput(video, state.globalVideoVolume);
   video.muted = pref.muted;
   updateVideoBookmarkButton(photo);
@@ -1425,6 +2037,7 @@ function queueVideoPlaybackPreferenceSave(photo, patch = {}, delay = 380) {
   const key = videoPlaybackPreferenceKey(photo);
   if (!key || !photo || !photo.id) return;
   const queue = state.videoPlaybackPreferenceSaveQueue[key] || {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'volume')) queue.volume = normalizeVideoVolumeValue(patch.volume, state.globalVideoVolume);
   if (Object.prototype.hasOwnProperty.call(patch, 'muted')) queue.muted = !!patch.muted;
   if (Object.prototype.hasOwnProperty.call(patch, 'resume_time')) queue.resume_time = Math.max(0, Math.floor(Number(patch.resume_time) || 0));
   if (Object.prototype.hasOwnProperty.call(patch, 'bookmarks')) queue.bookmarks = cloneVideoPlaybackBookmarks(patch.bookmarks);
@@ -1449,16 +2062,39 @@ function queueVideoPlaybackPreferenceSave(photo, patch = {}, delay = 380) {
 }
 function persistVideoPlaybackPreferenceSoon(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
   if (!video || !isVideoMedia(photo) || !photo.id || video.dataset.restoringPlaybackPreference === '1') return;
-  persistGlobalVideoVolume(effectiveVideoVolume(video));
+  const volume = persistGlobalVideoVolume(effectiveVideoVolume(video));
   const key = videoPlaybackPreferenceKey(photo);
   const muted = !!video.muted;
   const previous = state.videoPlaybackPreferences[key] || normalizeVideoPlaybackPreference(null);
-  if (previous.muted === muted) return;
-  const pref = normalizeVideoPlaybackPreference({ muted });
+  const previousVolume = normalizeVideoVolumeValue(previous.volume, state.globalVideoVolume);
+  if (previous.muted === muted && Math.abs(previousVolume - volume) < 0.001) return;
+  const pref = normalizeVideoPlaybackPreference({ volume, muted });
   pref.resumeTime = previous.resumeTime;
   pref.bookmarks = cloneVideoPlaybackBookmarks(previous.bookmarks);
   state.videoPlaybackPreferences[key] = pref;
-  queueVideoPlaybackPreferenceSave(photo, { muted: pref.muted });
+  queueVideoPlaybackPreferenceSave(photo, { volume: pref.volume, muted: pref.muted });
+}
+function flushPendingVideoPlaybackPreference(photo = state.lightboxPhotos[state.lightboxIndex], options = {}) {
+  if (!photo || !photo.id) return;
+  const key = videoPlaybackPreferenceKey(photo);
+  const pending = state.videoPlaybackPreferenceSaveQueue[key];
+  if (!pending) return;
+  clearTimeout(state.videoPlaybackPreferenceSaveTimers[key]);
+  delete state.videoPlaybackPreferenceSaveTimers[key];
+  delete state.videoPlaybackPreferenceSaveQueue[key];
+  const request = fetchWithPageSession(`/api/media/${photo.id}/playback`, {
+    method: 'PUT',
+    headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(pending),
+    keepalive: !!options.keepalive,
+  }).then(response => {
+    if (!response.ok || options.keepalive) return null;
+    return response.json();
+  });
+  void request.then(pref => {
+    if (!pref) return;
+    cacheVideoPlaybackPreference(photo, pref);
+  }).catch(() => {});
 }
 function showVideoProgressActivity(duration = 3000) {
   const progress = $('#lb-video-progress');
@@ -1511,7 +2147,7 @@ function nearestVideoProgressMarker(track, clientX, pointerType = '') {
   if (!track) return null;
   const rect = track.getBoundingClientRect();
   if (!rect.width) return null;
-  const markers = [...track.querySelectorAll('[data-video-bookmark-slot], [data-video-section]')];
+  const markers = [...track.querySelectorAll('[data-video-bookmark-slot]')];
   if (!markers.length) return null;
   const threshold = pointerType === 'touch' || pointerType === 'pen' ? 28 : 18;
   let best = null;
@@ -1584,16 +2220,21 @@ function beginVideoSurfaceSwipe(e) {
   const video = $('#lb-video');
   if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return false;
   const body = $('.lightbox-body');
+  const width = Math.max(1, (body && body.clientWidth) || window.innerWidth || 1);
+  const height = Math.max(1, (body && body.clientHeight) || window.innerHeight || 1);
+  const centerStart = e.clientX >= width * 0.32 && e.clientX <= width * 0.68 && e.clientY >= height * 0.18 && e.clientY <= height * 0.82;
   state.videoSurfaceSwipe = {
     pointerId: e.pointerId,
     startX: e.clientX,
     startY: e.clientY,
     startTime: Number(video.currentTime) || 0,
     startVolume: effectiveVideoVolume(video),
+    centerStart,
+    dismissProgress: 0,
     dragging: false,
     mode: '',
-    width: Math.max(1, (body && body.clientWidth) || window.innerWidth || 1),
-    height: Math.max(1, (body && body.clientHeight) || window.innerHeight || 1),
+    width,
+    height,
   };
   if (body && body.setPointerCapture) {
     try { body.setPointerCapture(e.pointerId); } catch (_) {}
@@ -1610,7 +2251,10 @@ function updateVideoSurfaceSwipe(e) {
   const absX = Math.abs(dx);
   const absY = Math.abs(dy);
   if (!swipe.dragging) {
-    if (absY > 18 && absY > absX * 1.15) {
+    if (swipe.centerStart && dy > 0 && absY > 18 && absY > absX * 1.2) {
+      swipe.dragging = true;
+      swipe.mode = 'dismiss';
+    } else if (absY > 22 && absY > absX * 1.2) {
       swipe.dragging = true;
       swipe.mode = 'volume';
       showVolumeOverlay(video);
@@ -1621,9 +2265,20 @@ function updateVideoSurfaceSwipe(e) {
       return false;
     }
   }
+  if (swipe.mode === 'dismiss') {
+    const downY = Math.max(0, dy);
+    const amplifiedDownY = downY * 1.22;
+    const dismissProgress = clampLightboxValue(amplifiedDownY / swipe.height, 0, 1);
+    swipe.dismissProgress = dismissProgress;
+    setLightboxDismissGesture(dismissProgress, amplifiedDownY);
+    setLightboxUnderzoomProgress(dismissProgress);
+    e.preventDefault();
+    e.stopPropagation();
+    return true;
+  }
   if (swipe.mode === 'volume') {
-  const delta = -dy / Math.max(130, swipe.height * 0.32);
-  setVideoVolumeValue(swipe.startVolume + delta, video);
+    const delta = -dy / Math.max(260, swipe.height * 0.72);
+    setVideoVolumeValue(swipe.startVolume + delta, video);
     e.preventDefault();
     e.stopPropagation();
     return true;
@@ -1650,7 +2305,17 @@ function endVideoSurfaceSwipe(e) {
   }
   if (!swipe.dragging) return false;
   state.videoProgressClickSuppressUntil = Date.now() + 520;
-  if (swipe.mode === 'volume') showVolumeOverlay();
+  if (swipe.mode === 'dismiss') {
+    const cancelled = e.type === 'pointercancel';
+    const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.34;
+    if (shouldExit) {
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
+      clearLightboxDismissGesture();
+      startLightboxUnderzoomExit();
+    } else {
+      clearLightboxDismissGesture({ animate: true });
+    }
+  } else if (swipe.mode === 'volume') showVolumeOverlay();
   else showVideoProgressActivity();
   e.preventDefault();
   e.stopPropagation();
@@ -1713,9 +2378,9 @@ function handleVideoBookmarkShortcut(e) {
     video.currentTime = bookmark.time;
     showToast(`已跳转到书签 ${slot}${bookmark.name ? `：${bookmark.name}` : ''}`);
     updateVideoBookmarkProgress(video, photo);
-  } else if (setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
+  } else if (canEditBookmarks() && setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
     showToast(`已添加书签 ${slot}`);
-  } else {
+  } else if (canEditBookmarks()) {
     showToast('附近 1 秒内已有书签，未新增');
   }
   return true;
@@ -1831,7 +2496,10 @@ function isPhotoWallPinchView() {
 }
 function pinchContextForTouches(touches) {
   if (!touches || touches.length < 2) return '';
-  if ($('#lightbox')?.classList.contains('open')) return 'lightbox';
+  if ($('#lightbox')?.classList.contains('open')) {
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    return photo && isVideoMedia(photo) ? 'blocked' : 'lightbox';
+  }
   if (state.searchOpen || state.blockingInteraction || document.querySelector('.modal-overlay.open')) return 'blocked';
   if (isPhotoWallPinchView()) return 'grid';
   return 'blocked';
@@ -2111,7 +2779,7 @@ function lightboxUnderzoomProgressForZoom(zoom) {
 }
 function lightboxUnderzoomVisualProgress(progress) {
   const next = clampLightboxValue(Number(progress) || 0, 0, 1);
-  return Math.pow(next, 1.35);
+  return Math.pow(next, 0.92);
 }
 function setLightboxUnderzoomProgress(progress, options = {}) {
   const lightbox = $('#lightbox');
@@ -2119,14 +2787,16 @@ function setLightboxUnderzoomProgress(progress, options = {}) {
   const next = clampLightboxValue(Number(progress) || 0, 0, 1);
   const visualProgress = lightboxUnderzoomVisualProgress(next);
   const exiting = !!options.exiting && next > 0.001;
-  const visibleRatio = Math.max(0, 1 - visualProgress);
+  const visibleRatio = options.keepOverlayTransparent
+    ? 0
+    : Math.max(0, 1 - Math.pow(next, exiting ? 0.58 : 0.68));
   state.lightboxUnderzoomProgress = next;
   lightbox.classList.toggle('lightbox-underzooming', next > 0.001);
   lightbox.classList.toggle('lightbox-underzoom-exiting', exiting);
   lightbox.style.setProperty('--lightbox-underzoom-progress', visualProgress.toFixed(4));
   lightbox.style.setProperty('--lightbox-underzoom-controls-opacity', visibleRatio.toFixed(4));
   lightbox.style.setProperty('--lightbox-underzoom-overlay-alpha', visibleRatio.toFixed(4));
-  lightbox.style.setProperty('--lightbox-underzoom-media-opacity', visibleRatio.toFixed(4));
+  lightbox.style.setProperty('--lightbox-underzoom-media-opacity', '1');
 }
 function setLightboxDismissGesture(progress, translateY = 0) {
   const lightbox = $('#lightbox');
@@ -2174,14 +2844,38 @@ function clearLightboxUnderzoomState() {
   lightbox.style.removeProperty('--lightbox-underzoom-media-opacity');
 }
 function startLightboxUnderzoomExit() {
-  const photo = state.lightboxPhotos[state.lightboxIndex];
-  if (!photo || isVideoMedia(photo)) {
-    exitLightboxToContext();
-    return;
-  }
   clearTimeout(state.lightboxUnderzoomExitTimer);
   state.lightboxUnderzoomExitTimer = null;
-  exitLightboxToContext();
+  const lightbox = $('#lightbox');
+  const currentTranslate = lightbox
+    ? Math.max(0, parseFloat(lightbox.style.getPropertyValue('--lightbox-dismiss-translate-y') || '0') || 0)
+    : 0;
+  const currentProgress = clampLightboxValue(
+    Math.max(
+      Number(state.lightboxDismissProgress) || 0,
+      Number(state.lightboxUnderzoomProgress) || 0,
+    ),
+    0,
+    1,
+  );
+  if (lightbox) {
+    const mediaRect = currentLightboxMediaRect();
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 1;
+    const mediaHeight = mediaRect && mediaRect.height > 0 ? mediaRect.height : viewportHeight;
+    const exitDistance = Math.max(viewportHeight * 0.72, mediaHeight * 0.62, 360);
+    lightbox.classList.remove('lightbox-dismiss-dragging');
+    lightbox.classList.add('lightbox-underzoom-exiting');
+    lightbox.style.setProperty('--lightbox-underzoom-overlay-alpha', '0');
+    lightbox.style.setProperty('--lightbox-underzoom-controls-opacity', '0');
+    lightbox.style.setProperty('--lightbox-dismiss-progress', String(Math.max(currentProgress, 0.72)));
+    lightbox.style.setProperty('--lightbox-dismiss-translate-y', `${Math.round(currentTranslate + exitDistance)}px`);
+  }
+  setLightboxDismissFade(1);
+  setLightboxUnderzoomProgress(1, { exiting: true, keepOverlayTransparent: true });
+  state.lightboxUnderzoomExitTimer = window.setTimeout(() => {
+    state.lightboxUnderzoomExitTimer = null;
+    exitLightboxToContext();
+  }, 180);
 }
 function focusLightboxKeyboardSurface() {
   const lightbox = $('#lightbox');
@@ -2193,14 +2887,14 @@ function refocusLightboxAfterVideoControl() {
 }
 function lightboxEffectiveZoomState() {
   if (state.lightboxBoostActive) {
-    return { zoom: 300, mode: 'scale' };
+    return { zoom: 500, mode: 'scale' };
   }
   return { zoom: state.lightboxZoom, mode: state.lightboxZoomMode };
 }
 function setLightboxZoom(value, options = {}) {
   state.lightboxPinchZoomActive = !!options.fromPinch;
   const minZoom = options.fromPinch ? 0 : 50;
-  state.lightboxZoom = Math.min(300, Math.max(minZoom, Number(value) || 0));
+  state.lightboxZoom = Math.min(500, Math.max(minZoom, Number(value) || 0));
   state.lightboxZoomMode = 'scale';
   if (!options.fromPinch) clearLightboxUnderzoomState();
   applyLightboxZoom();
@@ -2238,6 +2932,7 @@ function readCSSPixelValue(value) {
 }
 function measuredSafeAreaInsets() {
   let probe = $('#eg-safe-area-probe');
+  let maxProbe = $('#eg-safe-area-max-probe');
   if (!probe) {
     probe = document.createElement('div');
     probe.id = 'eg-safe-area-probe';
@@ -2254,10 +2949,29 @@ function measuredSafeAreaInsets() {
     ].join(';');
     document.body.appendChild(probe);
   }
+  if (!maxProbe) {
+    maxProbe = document.createElement('div');
+    maxProbe.id = 'eg-safe-area-max-probe';
+    maxProbe.style.cssText = [
+      'position:fixed',
+      'inset:0',
+      'visibility:hidden',
+      'pointer-events:none',
+      'padding-top:env(safe-area-max-inset-top, 0px)',
+      'padding-bottom:env(safe-area-max-inset-bottom, 0px)',
+      'width:0',
+      'height:0',
+      'overflow:hidden',
+    ].join(';');
+    document.body.appendChild(maxProbe);
+  }
   const style = window.getComputedStyle(probe);
+  const maxStyle = window.getComputedStyle(maxProbe);
   return {
     top: readCSSPixelValue(style.paddingTop),
     bottom: readCSSPixelValue(style.paddingBottom),
+    maxTop: readCSSPixelValue(maxStyle.paddingTop),
+    maxBottom: readCSSPixelValue(maxStyle.paddingBottom),
   };
 }
 function lightboxViewportMetrics(body) {
@@ -2338,11 +3052,20 @@ function setLightboxSwipePreviewImage(selector, photo, options = {}) {
     img.dataset.photoId = String(photo && (photo.id || photo.uuid) || '');
   }
 }
-function setLightboxSwipePreviewTransform(x, animate = false) {
+const lightboxSwipeAnimationMs = 380;
+
+function lightboxSwipeDividerTranslate(x, width, direction) {
+  if (direction > 0) return x + width / 2;
+  if (direction < 0) return x - width / 2;
+  return 0;
+}
+function setLightboxSwipePreviewTransform(x, animate = false, direction = 0) {
   const strip = $('#lb-swipe-strip');
   if (!strip) return;
   const width = Math.max(1, Number(strip.dataset.swipeWidth) || strip.clientWidth || window.innerWidth || 1);
   strip.classList.toggle('animating', !!animate);
+  strip.classList.toggle('show-divider', !!direction && Math.abs(x) > 6);
+  strip.style.setProperty('--lightbox-swipe-divider-x', `${Math.round(lightboxSwipeDividerTranslate(x, width, direction))}px`);
   [
     ['#lb-swipe-prev', -1],
     ['#lb-swipe-current', 0],
@@ -2361,7 +3084,7 @@ function setupLightboxSwipePreview(swipe) {
   setLightboxSwipePreviewImage('#lb-swipe-next', state.lightboxPhotos[state.lightboxIndex + 1]);
   strip.classList.add('active');
   strip.classList.remove('animating');
-  setLightboxSwipePreviewTransform(0, false);
+  setLightboxSwipePreviewTransform(0, false, 0);
 }
 function refreshLightboxSwipePreviewNeighbor(index) {
   const swipe = state.lightboxSwipe;
@@ -2370,29 +3093,30 @@ function refreshLightboxSwipePreviewNeighbor(index) {
   if (index === state.lightboxIndex - 1) setLightboxSwipePreviewImage('#lb-swipe-prev', state.lightboxPhotos[index]);
   if (index === state.lightboxIndex + 1) setLightboxSwipePreviewImage('#lb-swipe-next', state.lightboxPhotos[index]);
 }
-function resetLightboxSwipePreview({ animate = false } = {}) {
+function resetLightboxSwipePreview({ animate = false, direction = 0 } = {}) {
   const strip = $('#lb-swipe-strip');
   if (!strip) return;
   if (animate && strip.classList.contains('active')) {
-    setLightboxSwipePreviewTransform(0, true);
+    setLightboxSwipePreviewTransform(0, true, direction);
     window.setTimeout(() => {
-      strip.classList.remove('active', 'animating');
-      setLightboxSwipePreviewTransform(0, false);
-    }, 260);
+      strip.classList.remove('active', 'animating', 'show-divider');
+      setLightboxSwipePreviewTransform(0, false, 0);
+    }, lightboxSwipeAnimationMs + 40);
     return;
   }
-  strip.classList.remove('active', 'animating');
-  setLightboxSwipePreviewTransform(0, false);
+  strip.classList.remove('active', 'animating', 'show-divider');
+  strip.style.removeProperty('--lightbox-swipe-divider-x');
+  setLightboxSwipePreviewTransform(0, false, 0);
 }
-function resetLightboxSwipeVisual({ animate = false } = {}) {
+function resetLightboxSwipeVisual({ animate = false, direction = 0 } = {}) {
   const media = currentLightboxMediaElement();
-  resetLightboxSwipePreview({ animate });
+  resetLightboxSwipePreview({ animate, direction });
   if (media) {
     media.classList.toggle('lightbox-swipe-animating', !!animate);
     media.style.removeProperty('--lightbox-swipe-x');
     media.style.removeProperty('--lightbox-swipe-opacity');
     if (animate) {
-      window.setTimeout(() => media.classList.remove('lightbox-swipe-active', 'lightbox-swipe-animating'), 260);
+      window.setTimeout(() => media.classList.remove('lightbox-swipe-active', 'lightbox-swipe-animating'), lightboxSwipeAnimationMs + 40);
     } else {
       media.classList.remove('lightbox-swipe-active', 'lightbox-swipe-animating');
     }
@@ -2460,11 +3184,13 @@ function updateLightboxSwipe(e) {
   if (!media) return false;
   if (swipe.mode === 'dismiss') {
     const downY = Math.max(0, dy);
-    const dismissProgress = clampLightboxValue(downY / swipe.height, 0, 1);
+    const amplifiedDownY = downY * 1.34;
+    const dismissProgress = clampLightboxValue(amplifiedDownY / swipe.height, 0, 1);
     swipe.lastY = e.clientY;
     swipe.dismissProgress = dismissProgress;
-    setLightboxDismissGesture(dismissProgress, downY);
+    setLightboxDismissGesture(dismissProgress, amplifiedDownY);
     setLightboxUnderzoomProgress(dismissProgress);
+    setLightboxDismissFade(dismissProgress);
     e.preventDefault();
     e.stopPropagation();
     return true;
@@ -2474,9 +3200,12 @@ function updateLightboxSwipe(e) {
   const resistance = atStart || atEnd ? 0.38 : 1;
   const x = dx * resistance;
   const opacity = Math.max(0.72, 1 - Math.min(0.24, absX / swipe.width * 0.28));
+  const canRevealNeighbor = !atStart && !atEnd;
+  const direction = canRevealNeighbor ? (dx < 0 ? 1 : -1) : 0;
+  swipe.horizontalDirection = direction;
   warmLightboxIndex(dx < 0 ? state.lightboxIndex + 1 : state.lightboxIndex - 1);
   swipe.lastX = e.clientX;
-  setLightboxSwipePreviewTransform(x, false);
+  setLightboxSwipePreviewTransform(x, false, direction);
   media.classList.add('lightbox-swipe-active');
   media.classList.remove('lightbox-swipe-animating');
   media.style.setProperty('--lightbox-swipe-opacity', '0');
@@ -2494,12 +3223,11 @@ async function endLightboxSwipe(e) {
   }
   if (swipe.mode === 'dismiss') {
     const cancelled = e.type === 'pointercancel';
-    const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.25;
+    const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.34;
     if (shouldExit) {
       state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
       e.preventDefault();
       e.stopPropagation();
-      clearLightboxDismissGesture();
       startLightboxUnderzoomExit();
       return true;
     }
@@ -2519,7 +3247,7 @@ async function endLightboxSwipe(e) {
   const canSwitch = !cancelled && Math.abs(dx) >= threshold && (dir < 0 ? state.lightboxIndex > 0 : (state.lightboxIndex < state.lightboxPhotos.length - 1 || lightboxCanLoadMoreForward()));
   const media = currentLightboxMediaElement();
   if (!swipe.dragging || !canSwitch || !media) {
-    resetLightboxSwipeVisual({ animate: !!swipe.dragging });
+    resetLightboxSwipeVisual({ animate: !!swipe.dragging, direction: swipe.horizontalDirection || dir });
     if (swipe.dragging) {
       state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
       e.preventDefault();
@@ -2530,12 +3258,13 @@ async function endLightboxSwipe(e) {
   state.lightboxSwipeClickSuppressUntil = Date.now() + 520;
   e.preventDefault();
   e.stopPropagation();
-  setLightboxSwipePreviewTransform(dir > 0 ? -swipe.width : swipe.width, true);
+  const finalX = dir > 0 ? -swipe.width : swipe.width;
+  setLightboxSwipePreviewTransform(finalX, true, dir);
   media.classList.add('lightbox-swipe-animating');
   media.style.setProperty('--lightbox-swipe-opacity', '0');
-  await new Promise(resolve => setTimeout(resolve, 230));
-  resetLightboxSwipeVisual();
+  await new Promise(resolve => setTimeout(resolve, lightboxSwipeAnimationMs));
   await lbNav(dir);
+  resetLightboxSwipeVisual();
   return true;
 }
 function clampLightboxValue(value, min, max) {
@@ -2662,6 +3391,18 @@ function setExperimentalSetting(key, enabled) {
   }
 }
 function normalizeLibrary(data = {}) {
+  const statFields = [
+    'created_at', 'createdAt',
+    'last_scanned_at', 'lastScannedAt', 'last_scan_at', 'lastScanAt',
+    'unsupported_media_count', 'unsupportedMediaCount',
+    'total_size_text', 'totalSizeText', 'storage_text', 'storageText',
+    'photo_count', 'photoCount', 'image_count', 'imageCount',
+    'video_count', 'videoCount',
+  ];
+  const stats = {};
+  statFields.forEach(key => {
+    if (Object.prototype.hasOwnProperty.call(data, key)) stats[key] = data[key];
+  });
   return {
     index: Number.isInteger(Number(data.index)) ? Number(data.index) : (Number.isInteger(Number(data.logo_index)) ? Number(data.logo_index) : -1),
     id: String(data.id || '').trim(),
@@ -2670,11 +3411,66 @@ function normalizeLibrary(data = {}) {
     logo_asset: data.logo_asset || data.logoAsset || '',
     logo_image_url: data.logo_image_url || data.logoImageUrl || '',
     accent_color: normalizeHexColor(data.accent_color || data.accentColor || ''),
+    status: String(data.status || '').trim(),
+    available: data.available !== false,
+    unavailable_reason: String(data.unavailable_reason || data.unavailableReason || '').trim(),
+    locked_by_username: String(data.locked_by_username || data.lockedByUsername || '').trim(),
+    ...stats,
   };
+}
+function libraryIdentityKey(library = {}) {
+  const id = String(library.id || library.library_id || '').trim();
+  if (id) return `id:${id}`;
+  const path = String(library.path || library.storage_path || '').trim().toLowerCase();
+  return path ? `path:${path}` : '';
+}
+function findExistingLibraryState(library = {}) {
+  const key = libraryIdentityKey(library);
+  if (!key) return null;
+  return (state.serverSettings.libraries || []).find(item => libraryIdentityKey(item) === key) || null;
+}
+function mergeLibraryDraftWithState(draft = {}) {
+  const existing = findExistingLibraryState(draft);
+  if (!existing) return normalizeLibrary(draft);
+  const merged = {
+    ...existing,
+    ...draft,
+    logo_image_url: draft.logo_image_url || existing.logo_image_url || existing.logoImageUrl || '',
+    available: Object.prototype.hasOwnProperty.call(draft, 'available') ? draft.available : existing.available,
+    unavailable_reason: Object.prototype.hasOwnProperty.call(draft, 'unavailable_reason') ? draft.unavailable_reason : existing.unavailable_reason,
+    locked_by_username: Object.prototype.hasOwnProperty.call(draft, 'locked_by_username') ? draft.locked_by_username : existing.locked_by_username,
+  };
+  return normalizeLibrary(merged);
 }
 function normalizeLibraryList(libraries, fallbackPath = '') {
   const normalized = normalizeLibraries(libraries, fallbackPath);
   return normalized.map(item => normalizeLibrary(item));
+}
+function libraryAvailabilitySignature(libraries = []) {
+  return normalizeLibraries(libraries).map(library => [
+    String(library.id || '').trim() || String(library.path || '').trim(),
+    library.available === false ? '0' : '1',
+    String(library.status || '').trim(),
+    String(library.unavailable_reason || library.unavailableReason || '').trim(),
+    String(library.locked_by_username || library.lockedByUsername || '').trim(),
+    String(library.logo_asset || library.logoAsset || '').trim(),
+    String(library.logo_image_url || library.logoImageUrl || '').trim(),
+  ].join('|')).join('||');
+}
+function libraryAvailabilityMetaText(library = {}) {
+  const status = String(library.status || '').trim();
+  const reason = String(library.unavailable_reason || library.unavailableReason || '').trim();
+  if (!reason) return '';
+  if (status === 'visitor_shared' || status === 'admin_locked') {
+    return reason;
+  }
+  return '';
+}
+function libraryAvailabilityDetailText(library = {}) {
+  const reason = String(library.unavailable_reason || library.unavailableReason || '').trim();
+  if (!reason) return '';
+  const meta = libraryAvailabilityMetaText(library);
+  return meta === reason ? '' : reason;
 }
 function normalizeShareLink(link = {}) {
   return {
@@ -2786,13 +3582,14 @@ function applyRoundedImageFavicon(favicon, url, accent, fallbackText) {
   img.src = url;
 }
 function resolveActiveLibrary(libraries, currentID, currentPath) {
+  const availableLibraries = Array.isArray(libraries) ? libraries.filter(item => item && item.available !== false) : [];
   const normalizedID = String(currentID || '').trim();
   if (normalizedID) {
-    const byID = libraries.find(item => String(item.id || '').trim() === normalizedID);
+    const byID = availableLibraries.find(item => String(item.id || '').trim() === normalizedID);
     if (byID) return byID;
   }
   const normalizedPath = String(currentPath || '').trim();
-  return libraries.find(item => item.path === normalizedPath) || libraries[0] || null;
+  return availableLibraries.find(item => item.path === normalizedPath) || availableLibraries[0] || libraries[0] || null;
 }
 function currentLibraryBrand() {
   const draftLibraries = collectLibraryDrafts();
@@ -2890,15 +3687,6 @@ function applyLibraryBranding() {
     favicon.dataset.logoUrl = '';
     favicon.href = createTextFavicon(fallbackText);
   }
-  window.dispatchEvent(new CustomEvent('eg:pwa-gallery-meta', {
-    detail: {
-      url: `${location.origin}/`,
-      title: current && current.name ? `${current.name} - ${appName}` : appName,
-      displayName: current && current.name ? current.name : appName,
-      icon: logoURL || favicon.href || '/static/pwa-icon.png',
-      themeColor: accent,
-    },
-  }));
   const navLogo = document.querySelector('.nav-logo');
   if (navLogo) {
     navLogo.innerHTML = renderNavLogo();
@@ -2916,7 +3704,7 @@ async function fetchVideoThumbnailRefreshStatus() {
 async function cancelVideoThumbnailRefresh() {
   return api.del('/api/settings/video-thumbnails/refresh');
 }
-async function backfillPhotoEXIF() {
+async function repairEXIFMetadata() {
   return api.post('/api/settings/exif/backfill', {});
 }
 async function fetchThumbnailBuildStatus() {
@@ -2983,7 +3771,6 @@ function renderSearchOverlay() {
     <div class="search-status" id="search-status"></div>
     <div class="search-results" id="search-results"></div>
     <div class="search-actions">
-      <button class="btn search-download-btn" id="search-download-all-btn" type="button">${escapeHTML(copyText('app.search.downloadAll', '打包下载全部'))}</button>
       <button class="btn search-more-btn" id="search-more-btn" type="button">${escapeHTML(copyText('app.search.loadMore', '加载更多'))}</button>
     </div>
   </div>
@@ -3000,7 +3787,7 @@ function syncSearchInputs(value = '') {
   if (overlayInput && overlayInput.value !== text) overlayInput.value = text;
 }
 
-function openGlobalSearch(prefill) {
+function openGlobalSearch(prefill, options = {}) {
   const overlay = $('#search-overlay');
   const input = $('#global-search-input');
   if (!overlay || !input) return;
@@ -3009,18 +3796,14 @@ function openGlobalSearch(prefill) {
   overlay.setAttribute('aria-hidden', 'false');
   if (prefill === undefined) syncSearchInputs(input.value || state.searchQuery || '');
   else syncSearchInputs(prefill);
-  setTimeout(() => {
-    input.focus();
-    input.select();
-  }, 0);
   renderSearchResults();
+  if (options.focus) requestAnimationFrame(() => input.focus({ preventScroll: true }));
   if (input.value.trim() && input.value.trim() !== state.searchQuery) scheduleGlobalSearch();
 }
 
 function closeGlobalSearch() {
   state.searchOpen = false;
   if (state.searchAbortController) state.searchAbortController.abort();
-  if (state.searchDownloadAbortController) state.searchDownloadAbortController.abort();
   if (state.searchTimer) clearTimeout(state.searchTimer);
   state.searchAbortController = null;
   state.searchTimer = null;
@@ -3074,14 +3857,15 @@ async function runGlobalSearch(query, { reset = false } = {}) {
       if (state.searchFilter === 'video') params.set('kind', 'video');
       if (state.searchFilter === 'favorite') params.set('favorite', '1');
       if (!reset && state.searchCursor) params.set('cursor', state.searchCursor);
-      const response = await fetch(`/api/media/search?${params.toString()}`, { signal: controller.signal });
-      if (!response.ok) throw await response.json();
+      const response = await fetchWithPageSession(`/api/media/search?${params.toString()}`, { signal: controller.signal });
+      if (!response.ok) throw await buildAPIError(response);
       const page = await response.json();
       const photos = page.photos || [];
       state.searchResults = reset ? photos : state.searchResults.concat(photos);
       state.searchCursor = page.next_cursor || '';
       state.searchHasMore = !!page.has_more;
       mediaTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.searchResults.length;
+      requestVisibleThumbnailWarmup('search', photos);
     } else {
       state.searchResults = [];
       state.searchCursor = '';
@@ -3109,8 +3893,8 @@ async function runGlobalSearch(query, { reset = false } = {}) {
 
 async function searchAlbums(query, signal) {
   if (!state.searchAlbumCache) {
-    const response = await fetch('/api/media/albums', { signal });
-    if (!response.ok) throw await response.json();
+    const response = await fetchWithPageSession('/api/media/albums', { signal });
+    if (!response.ok) throw await buildAPIError(response);
     state.searchAlbumCache = await response.json();
   }
   const needle = query.trim().toLowerCase();
@@ -3131,21 +3915,18 @@ function renderSearchResults() {
   const resultsEl = $('#search-results');
   const statusEl = $('#search-status');
   const moreBtn = $('#search-more-btn');
-  const downloadBtn = $('#search-download-all-btn');
-  if (!resultsEl || !statusEl || !moreBtn || !downloadBtn) return;
+  if (!resultsEl || !statusEl || !moreBtn) return;
   const query = $('#global-search-input')?.value.trim() || state.searchQuery;
   if (!query) {
     statusEl.textContent = '';
     resultsEl.innerHTML = `<div class="search-empty">输入关键词开始搜索</div>`;
     moreBtn.classList.remove('visible');
-    downloadBtn.classList.remove('visible');
     return;
   }
   if (state.searchLoading && !state.searchResults.length) {
     statusEl.textContent = '搜索中…';
     resultsEl.innerHTML = `<div class="search-empty"><div class="spinner"></div></div>`;
     moreBtn.classList.remove('visible');
-    downloadBtn.classList.remove('visible');
     return;
   }
   statusEl.textContent = state.searchTotal ? `找到 ${state.searchTotal} 条结果` : (state.searchResults.length ? `找到 ${state.searchResults.length} 条结果` : '');
@@ -3158,7 +3939,7 @@ function renderSearchResults() {
       const card = el('button', 'search-result-card search-result-album');
       card.type = 'button';
       const cover = album.cover_uuid
-        ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(album.name || '')}">`
+        ? `<img loading="lazy" src="${mediaThumbURLFromUUID(album.cover_uuid)}" alt="${escapeHTML(album.name || '')}">`
         : `<span class="search-result-album-icon">${icons.album}</span>`;
       card.innerHTML = `
         <span class="search-result-thumb">
@@ -3207,15 +3988,11 @@ function renderSearchResults() {
   moreBtn.classList.toggle('visible', state.searchHasMore);
   moreBtn.disabled = state.searchLoading;
   moreBtn.textContent = state.searchLoading ? '加载中…' : '加载更多';
-  const hasDownloadableMedia = state.searchFilter !== 'album' && (state.searchTotal > state.searchAlbumResults.length || state.searchResults.length);
-  downloadBtn.classList.toggle('visible', !!query && hasDownloadableMedia);
-  downloadBtn.disabled = state.searchLoading && !state.searchDownloadLoading;
-  downloadBtn.textContent = state.searchDownloadLoading ? '取消下载' : '打包下载全部';
-  downloadBtn.classList.toggle('btn-danger', state.searchDownloadLoading);
 }
 
 function viewShortcutMap() {
-  return ['timeline', 'favorites', 'random-album', 'albums', 'memories', 'trash', 'settings'];
+  if (isRootUser()) return ['timeline', 'settings'];
+  return availableRootViews();
 }
 function shouldIgnoreGlobalShortcut(target) {
   if (!target) return false;
@@ -3383,7 +4160,13 @@ async function loadServerSettings() {
     state.serverSettings = await api.get('/api/settings');
     applyServerSettings(state.serverSettings);
   } catch (_) {
+    if (pageSessionRedirectPending) return state.serverSettings;
     state.serverSettings = {
+      current_username: '',
+      role: 'admin',
+      can_write: true,
+      can_admin: true,
+      can_root: false,
       port: 8080,
       active_library_id: '',
       storage_path: '',
@@ -3418,6 +4201,56 @@ async function loadServerSettings() {
   state.settingsDirty = false;
   return state.serverSettings;
 }
+function stopSettingsAvailabilityPolling() {
+  if (state.settingsAvailabilityPollTimer) {
+    clearTimeout(state.settingsAvailabilityPollTimer);
+    state.settingsAvailabilityPollTimer = null;
+  }
+}
+function scheduleSettingsAvailabilityPolling(delay = 5000) {
+  stopSettingsAvailabilityPolling();
+  if (state.view !== 'settings' || pageSessionRedirectPending) return;
+  state.settingsAvailabilityPollTimer = setTimeout(() => {
+    state.settingsAvailabilityPollTimer = null;
+    void refreshSettingsAvailability();
+  }, delay);
+}
+async function refreshSettingsAvailability() {
+  if (state.settingsAvailabilityPollPending || state.view !== 'settings' || pageSessionRedirectPending) return;
+  state.settingsAvailabilityPollPending = true;
+  try {
+    const data = await api.get('/api/settings', { suppressForbiddenToast: true });
+    const nextLibraries = normalizeLibraryList(data && data.libraries, data && data.storage_path || '');
+    const nextSignature = libraryAvailabilitySignature(nextLibraries);
+    if (!state.settingsDirty && nextSignature !== state.settingsAvailabilitySignature) {
+      const scrollTop = document.scrollingElement ? document.scrollingElement.scrollTop : window.scrollY;
+      state.serverSettings = data || state.serverSettings;
+      applyServerSettings(state.serverSettings);
+      state.savedServerSettings = cloneSettingsSnapshot(state.serverSettings);
+      if (state.view !== 'settings') {
+        return;
+      }
+      if (isRootUser()) {
+        await renderRootConsoleContent();
+      } else {
+        renderSettingsContent();
+        bindSettingsTopSaveButton();
+        refreshMissingLibraryLogosOnce();
+      }
+      if (document.scrollingElement) document.scrollingElement.scrollTop = scrollTop;
+      else window.scrollTo(0, scrollTop);
+    } else if (!state.settingsDirty) {
+      state.settingsAvailabilitySignature = nextSignature;
+    }
+  } catch (e) {
+    if (!pageSessionRedirectPending && !isForbiddenError(e)) {
+      console.warn('刷新资源库占用状态失败', e);
+    }
+  } finally {
+    state.settingsAvailabilityPollPending = false;
+    scheduleSettingsAvailabilityPolling();
+  }
+}
 async function saveServerSettings(payload) {
   const resp = await api.put('/api/settings', payload);
   state.serverSettings = resp.data || state.serverSettings;
@@ -3432,8 +4265,20 @@ async function restartApp() {
 async function shutdownApp() {
   return api.post('/api/settings/shutdown', {});
 }
+async function fetchRootUsers() {
+  return api.get('/api/root/users');
+}
+async function createRootUser(payload) {
+  return api.post('/api/root/users', payload || {});
+}
+async function updateRootUser(username, payload) {
+  return api.put(`/api/root/users/${encodeURIComponent(username)}`, payload || {});
+}
+async function removeRootUser(username) {
+  return api.del(`/api/root/users/${encodeURIComponent(username)}`);
+}
 async function fetchLibraryBuildStatus() {
-  return api.get('/api/library-build/status');
+  return api.get('/api/library-build/status', { suppressForbiddenToast: true });
 }
 async function setLibraryBuildExitAfterComplete(enabled) {
   return api.put('/api/library-build/exit-after-complete', { enabled });
@@ -3442,7 +4287,7 @@ async function cancelLibraryBuild() {
   return api.del('/api/library-build');
 }
 async function fetchLibraryBatchBuildStatus() {
-  return api.get('/api/settings/libraries/build-all');
+  return api.get('/api/settings/libraries/build-all', { suppressForbiddenToast: true });
 }
 async function startLibraryBatchBuild(options = {}) {
   return api.post('/api/settings/libraries/build-all', {
@@ -3466,7 +4311,7 @@ async function setLibraryBatchBuildSelection(selectedLibraryIDs, selectedPaths =
   });
 }
 async function fetchLibraryBatchThumbnailBuildStatus() {
-  return api.get('/api/settings/libraries/thumbnails/build-all');
+  return api.get('/api/settings/libraries/thumbnails/build-all', { suppressForbiddenToast: true });
 }
 async function startLibraryBatchThumbnailBuild(options = {}) {
   return api.post('/api/settings/libraries/thumbnails/build-all', {
@@ -3514,17 +4359,29 @@ async function setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs, select
   });
 }
 function applyServerSettings(data = {}) {
+  state.serverSettings.current_username = data.current_username || state.serverSettings.current_username || '';
+  state.serverSettings.role = String(data.role || 'admin').trim().toLowerCase() || 'admin';
+  state.serverSettings.can_write = data.can_write !== false;
+  state.serverSettings.can_admin = data.can_admin !== false;
+  state.serverSettings.can_root = data.can_root === true;
+  if (isRootUser() && !isAllowedRootView(state.view)) {
+    state.view = 'timeline';
+  }
+  if (isVisitorUser() && state.view === 'trash') {
+    state.view = 'timeline';
+  }
   state.serverSettings.port = Number(data.port) || 8080;
   state.serverSettings.active_library_id = data.active_library_id || '';
   state.serverSettings.storage_path = data.storage_path || '';
   state.serverSettings.libraries = normalizeLibraryList(data.libraries, data.storage_path || '');
+  state.settingsAvailabilitySignature = libraryAvailabilitySignature(state.serverSettings.libraries);
   state.serverSettings.thumbnail_dir = data.thumbnail_dir || '';
   state.serverSettings.thumbnail_size = 512;
   state.serverSettings.trash_dir = data.trash_dir || '';
   state.serverSettings.use_system_player = !!data.use_system_player;
   state.serverSettings.jwt_secret_masked = data.jwt_secret_masked || '未设置';
   state.serverSettings.users = Array.isArray(data.users) ? data.users : [];
-  setThemeValue(hasManualThemePreference() ? data.theme : systemTheme());
+  setThemeValue(currentThemePreference());
   state.gridSize = Math.min(260, Math.max(72, Number(data.grid_size) || 180));
   state.gridGap = Math.min(24, Math.max(0, Number(data.grid_gap) || 2));
   state.thumbRadius = Math.min(24, Math.max(0, Number(data.thumb_radius) || 2));
@@ -3546,6 +4403,8 @@ function applyServerSettings(data = {}) {
   applyLightboxZoom();
   updateSlideshowControls();
   syncSidebarUI();
+  syncNavActiveView(state.view);
+  syncRoleAwareNavigation();
   updateThemeBtn();
   applyLibraryBranding();
 }
@@ -3679,7 +4538,7 @@ function jumpVideoSection(direction) {
 function adjustVideoVolume(delta) {
   const video = $('#lb-video');
   if (!video || video.classList.contains('hidden')) return false;
-  setVideoVolumeValue(video.volume + delta / 100, video);
+  setVideoVolumeValue(effectiveVideoVolume(video) + delta / 100, video);
   return true;
 }
 function setVideoVolumeValue(value, video = $('#lb-video')) {
@@ -3923,6 +4782,8 @@ const state = {
   randomAlbumViewLoaded: false,
   randomAlbumTotal: 0,
   randomAlbumAbortController: null,
+  pendingRandomAlbumPhotoID: null,
+  randomAlbumLastViewedPhotoID: null,
   timelineOrder: normalizeTimelineOrder(localStorage.getItem(timelineOrderStorageKey)),
   timelineCursor: '',
   timelineHasMore: true,
@@ -3952,9 +4813,15 @@ const state = {
   lightboxIndex: 0,
   lightboxSeedPhotoID: null,
   lightboxSeedPreviewURL: '',
+  lightboxOriginThumbRect: null,
+  lightboxDismissProxyActive: false,
+  lightboxDismissProxyRect: null,
+  lightboxDismissProxySourceRect: null,
+  lightboxDismissProxyTargetRect: null,
   lightboxReturnView: '',
   lightboxReturnAlbumID: null,
   lightboxPageLoading: false,
+  lightboxSkipScrollRestore: false,
   // b-2: 当前用户的分享链接，key=`${type}:${targetId}`
   shareMap: {},
   shareLinks: [],
@@ -3995,9 +4862,14 @@ const state = {
   lightboxDismissResetTimer: null,
   lightboxViewportOrientation: '',
   lightboxViewportResizeTimer: null,
+  lightboxDebugControls: false,
   gridGap: 2,
   thumbRadius: 2,
   serverSettings: {
+    current_username: '',
+    role: 'admin',
+    can_write: true,
+    can_admin: true,
     port: 8080,
     active_library_id: '',
     storage_path: '',
@@ -4049,6 +4921,11 @@ const state = {
   memoriesLoaded: false,
   settingsDirty: false,
   settingsReady: false,
+  settingsAvailabilityPollTimer: null,
+  settingsAvailabilityPollPending: false,
+  settingsAvailabilitySignature: '',
+  rootConsoleUsers: [],
+  rootConsoleLoaded: false,
   settingsFocus: '',
   settingsScrollRestorePending: true,
   lightboxPlaybackToken: 0,
@@ -4056,11 +4933,14 @@ const state = {
   lightboxPreviousThemeColor: '',
   lightboxHadThemeColorMeta: true,
   lightboxUiIdleTimer: null,
+  lightboxInfoInteractionTimer: null,
   lightboxVolumeTimer: null,
   lightboxVideoAudioContext: null,
   lightboxVideoAudioSource: null,
   lightboxVideoGainNode: null,
   lightboxVideoAudioElement: null,
+  lightboxVisibilityResumePending: false,
+  lightboxVisibilityResumeTime: 0,
   lightboxVideoProgressTimer: null,
   videoProgressScrubPointerId: null,
   videoProgressClickSuppressUntil: 0,
@@ -4076,6 +4956,8 @@ const state = {
   gridScalePersistTimer: null,
   prefetchedMediaKeys: [],
   prefetchedMediaSet: new Set(),
+  warmedThumbnailKeys: [],
+  warmedThumbnailSet: new Set(),
   searchOpen: false,
   searchQuery: '',
   searchFilter: 'all',
@@ -4088,8 +4970,6 @@ const state = {
   searchTotal: 0,
   searchTimer: null,
   searchAbortController: null,
-  searchDownloadAbortController: null,
-  searchDownloadLoading: false,
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
   pwaSettings: loadPWASettings(),
   legacyVideoBookmarks: loadLegacyVideoBookmarks(),
@@ -4101,7 +4981,7 @@ const state = {
   videoPlaybackPreferenceSaveTimers: {},
   activePreloadJobs: new Set(),
   visibleThumbnailWarmSignatures: {},
-  libraryBuildStatus: { status: 'discovering', message: '正在检查资源库状态' },
+  libraryBuildStatus: { status: 'idle', message: '当前没有资源库构建任务' },
   libraryBuildPollTimer: null,
   libraryBatchBuildStatus: { status: 'idle', message: '当前没有批量扫描任务' },
   libraryBatchBuildPollTimer: null,
@@ -4112,6 +4992,7 @@ const state = {
   libraryBatchWorkflowCleanThumbnailFiles: localStorage.getItem(libraryBatchWorkflowCleanFilesStorageKey) === '1',
   libraryBatchWorkflowBuildPlaybackCaches: localStorage.getItem(libraryBatchWorkflowPlaybackCacheStorageKey) === '1',
   libraryBatchWorkflowPhase: localStorage.getItem(libraryBatchWorkflowPhaseStorageKey) || '',
+  libraryBatchWorkflowAdvancedOpen: false,
   libraryBatchWorkflowStartPending: false,
   libraryBatchThumbnailBuildStatus: { status: 'idle', message: '当前没有批量缩略图任务' },
   libraryBatchThumbnailBuildPollTimer: null,
@@ -4145,6 +5026,12 @@ const state = {
   libraryRandomLogoTried: {},
   libraryRandomLogoLoading: false,
   libraryLogosRefreshStarted: false,
+  pendingScrollRestoreID: '',
+  pendingScrollRestoreStartedAt: 0,
+  ignoreScrollSaveUntil: 0,
+  programmaticScrollTargetTop: 0,
+  lastManualScrollAt: 0,
+  albumChildrenIndex: null,
 };
 
 function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
@@ -4154,23 +5041,48 @@ function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
 function saveViewScroll(view = state.view, albumID = state.currentAlbumID) {
   state.viewScrollPositions[viewScrollKeyFor(view, albumID)] = window.scrollY || window.pageYOffset || 0;
 }
+function noteManualViewScroll() {
+  const top = window.scrollY || window.pageYOffset || 0;
+  if (Date.now() < state.ignoreScrollSaveUntil && Math.abs(top - state.programmaticScrollTargetTop) <= 2) {
+    saveViewScroll();
+    return;
+  }
+  state.lastManualScrollAt = Date.now();
+  saveViewScroll();
+}
 function restoreViewScroll(view = state.view, albumID = state.currentAlbumID) {
   const key = viewScrollKeyFor(view, albumID);
   const top = state.viewScrollPositions[key] || 0;
-  requestAnimationFrame(() => {
+  const restoreID = `${view}:${albumID || 0}:${Date.now()}:${Math.random()}`;
+  state.pendingScrollRestoreID = restoreID;
+  state.pendingScrollRestoreStartedAt = Date.now();
+  const stillCurrent = () => {
     if (view !== state.view) return;
     if (view === 'album-detail' && albumID !== state.currentAlbumID) return;
+    if (state.lastManualScrollAt > state.pendingScrollRestoreStartedAt + 24) return;
+    return state.pendingScrollRestoreID === restoreID;
+  };
+  const apply = () => {
+    if (!stillCurrent()) return;
+    state.ignoreScrollSaveUntil = Date.now() + 120;
+    state.programmaticScrollTargetTop = top;
     window.scrollTo(0, top);
-    requestAnimationFrame(() => {
-      if (view !== state.view) return;
-      if (view === 'album-detail' && albumID !== state.currentAlbumID) return;
-      window.scrollTo(0, top);
-    });
+  };
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(apply);
   });
+  [80, 180, 360, 700, 1100].forEach(delay => window.setTimeout(apply, delay));
 }
 
 // ── 分享状态加载 ─────────────────────────────────────
 async function loadShareMap() {
+  if (!state.settingsReady) await ensureSettingsDataLoaded();
+  if (!canManageShareLinks()) {
+    setShareLinks([]);
+    state.shareLinksLoaded = true;
+    return;
+  }
   try {
 		const links = await api.get('/api/media/shares');
     setShareLinks(links || []);
@@ -4197,6 +5109,17 @@ function rememberPrefetchedMedia(key) {
   while (state.prefetchedMediaKeys.length > 72) {
     const expired = state.prefetchedMediaKeys.shift();
     if (expired) state.prefetchedMediaSet.delete(expired);
+  }
+  return true;
+}
+
+function rememberWarmedThumbnail(key) {
+  if (!key || state.warmedThumbnailSet.has(key)) return false;
+  state.warmedThumbnailSet.add(key);
+  state.warmedThumbnailKeys.push(key);
+  while (state.warmedThumbnailKeys.length > 640) {
+    const expired = state.warmedThumbnailKeys.shift();
+    if (expired) state.warmedThumbnailSet.delete(expired);
   }
   return true;
 }
@@ -4645,18 +5568,20 @@ async function pollLibraryBatchBuildStatus() {
     if (state.libraryBatchBuildStatus.status !== 'cancelling') {
       state.libraryBatchBuildCancelPending = false;
     }
-    if (state.view === 'settings') {
-      syncLibraryBatchWorkflowPanel();
-      syncLibraryBatchBuildPanel();
-      syncLibraryBatchThumbnailBuildPanel();
-    }
     if (isLibraryBatchBuildActive(state.libraryBatchBuildStatus)) {
+      if (state.view === 'settings') {
+        syncLibraryBatchWorkflowPanel();
+        syncLibraryBatchBuildPanel();
+        syncLibraryBatchThumbnailBuildPanel();
+      }
       state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 600);
       return;
     }
+    let workflowTransitionedToThumbnails = false;
     if (state.libraryBatchWorkflowPhase === 'scan') {
       if (state.libraryBatchBuildStatus.status === 'completed') {
         setLibraryBatchWorkflowPhase('thumbnails');
+        workflowTransitionedToThumbnails = true;
         try {
           const thumbnailStatus = await fetchLibraryBatchThumbnailBuildStatus();
           state.libraryBatchThumbnailBuildStatus = thumbnailStatus || { status: 'idle', message: '当前没有批量缩略图任务' };
@@ -4674,8 +5599,13 @@ async function pollLibraryBatchBuildStatus() {
         clearLibraryBatchWorkflowPhase();
       }
     }
+    if (state.view === 'settings') {
+      syncLibraryBatchWorkflowPanel();
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
     if (previous.status === 'running' || previous.status === 'cancelling') {
-      if (state.libraryBatchBuildStatus.status === 'completed') {
+      if (state.libraryBatchBuildStatus.status === 'completed' && !workflowTransitionedToThumbnails) {
         showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed', '批量扫描已完成'), 3600);
       } else if (state.libraryBatchBuildStatus.status === 'cancelled') {
         showToast(copyText('app.libraryBatchScan.cancelled', '已取消批量扫描资源库'), 3200);
@@ -4685,6 +5615,12 @@ async function pollLibraryBatchBuildStatus() {
       if (state.view === 'settings') renderSettingsContent();
     }
   } catch (e) {
+    if (isForbiddenError(e)) {
+      state.libraryBatchBuildStatus = { status: 'idle', message: '当前没有批量扫描任务' };
+      state.libraryBatchBuildCancelPending = false;
+      if (state.view === 'settings') syncLibraryBatchWorkflowPanel();
+      return;
+    }
     console.error('获取批量扫描任务状态失败', e);
     state.libraryBatchBuildCancelPending = false;
   }
@@ -4722,6 +5658,12 @@ async function pollLibraryBatchThumbnailBuildStatus() {
       if (state.view === 'settings') renderSettingsContent();
     }
   } catch (e) {
+    if (isForbiddenError(e)) {
+      state.libraryBatchThumbnailBuildStatus = { status: 'idle', message: '当前没有批量缩略图任务' };
+      state.libraryBatchThumbnailBuildCancelPending = false;
+      if (state.view === 'settings') syncLibraryBatchWorkflowPanel();
+      return;
+    }
     console.error('获取批量缩略图任务状态失败', e);
     state.libraryBatchThumbnailBuildCancelPending = false;
   }
@@ -4804,7 +5746,9 @@ async function openLibraryBatchThumbnailBuildWorkflow(options = {}) {
       stopLibraryBatchThumbnailBuildPolling();
       state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
     } else if (state.libraryBatchThumbnailBuildStatus.status === 'completed') {
-      showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed', '批量缩略图构建已完成'));
+      if (!options.startedByWorkflow) {
+        showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed', '批量缩略图构建已完成'));
+      }
     }
   } catch (e) {
     if (options.startedByWorkflow) throw e;
@@ -4829,6 +5773,8 @@ function cancelVisibleThumbnailWarmups() {
   }
   visibleThumbnailWarmTimers.clear();
   state.visibleThumbnailWarmSignatures = {};
+  state.warmedThumbnailKeys = [];
+  state.warmedThumbnailSet.clear();
 }
 
 function interruptThumbnailBuildForForegroundTask() {
@@ -4972,11 +5918,11 @@ function renderApp() {
   <button class="nav-logo nav-logo-floating" id="nav-logo-btn" type="button" title="打开资源库设置">${renderNavLogo()}</button>
   <nav class="nav" id="main-nav">
     ${navItem('timeline', icons.timeline, '时间线')}
-    ${navItem('favorites', icons.favorite, '个人收藏')}
-    ${navItem('random-album', icons.shuffle, '乱序相册')}
-    ${navItem('albums', icons.album, '相册', state.view === 'albums' || state.view === 'album-detail')}
-    ${navItem('memories', icons.memories, '回忆')}
-    ${navItem('trash', icons.trash, '回收站')}
+    ${isRootUser() ? '' : navItem('favorites', icons.favorite, '个人收藏')}
+    ${isRootUser() ? '' : navItem('random-album', icons.shuffle, '乱序相册')}
+    ${isRootUser() ? '' : navItem('albums', icons.album, '相册', state.view === 'albums' || state.view === 'album-detail')}
+    ${isRootUser() ? '' : navItem('memories', icons.memories, '回忆')}
+    ${isVisitorUser() || isRootUser() ? '' : navItem('trash', icons.trash, '回收站')}
     ${navItem('settings', icons.settings, '设置')}
     <div class="nav-spacer"></div>
   </nav>
@@ -5011,12 +5957,15 @@ ${renderLibraryLogoGuideModal()}`;
   bindNav();
   bindGlobal();
   syncSidebarUI();
+  syncRoleAwareNavigation();
   syncRangeProgress();
-  ensureSettingsDataLoaded();
-  startLibraryBuildPolling();
-  void pollLibraryBatchBuildStatus();
-  void pollLibraryBatchThumbnailBuildStatus();
-  renderView();
+  $('#topbar-title').textContent = '加载中';
+  $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>正在加载…</div>`;
+  void ensureSettingsDataLoaded().then(() => {
+    if (state.view === 'settings') renderSettings();
+    else renderView();
+    startRoleAwareBackgroundPolling();
+  });
 }
 
 function bindNav() {
@@ -5122,13 +6071,20 @@ function openLastAlbumDetail() {
 }
 
 function switchView(view) {
+  if (!isAllowedRootView(view) && view !== 'album-detail') {
+    view = 'timeline';
+  }
   interruptThumbnailBuildForForegroundTask();
+  if (state.view === 'settings' && view !== 'settings' && canManageLibraries()) {
+    syncLibraryDraftsToRuntime();
+  }
   saveViewScroll();
   disconnectLoadMoreObserver();
   closeNavPicker();
   if (view === 'settings' && state.view !== 'settings') {
     state.settingsScrollRestorePending = true;
   }
+  if (view !== 'settings') stopSettingsAvailabilityPolling();
   state.view = view;
   state.selected.clear();
   state.selectionAnchorID = null;
@@ -5168,12 +6124,40 @@ async function refreshLibraryBuildStatus() {
       state.libraryBuildPollTimer = setTimeout(refreshLibraryBuildStatus, 1000);
     }
   } catch (e) {
+    if (isForbiddenError(e)) {
+      state.libraryBuildStatus = { status: 'idle', message: '当前没有资源库构建任务' };
+      renderView();
+      return;
+    }
     console.error(e);
   }
 }
 function startLibraryBuildPolling() {
   clearTimeout(state.libraryBuildPollTimer);
   refreshLibraryBuildStatus();
+}
+function resetVisitorServerTaskStatuses() {
+  state.libraryBuildStatus = { status: 'idle', message: '当前没有资源库构建任务' };
+  state.libraryBatchBuildStatus = { status: 'idle', message: '当前没有批量扫描任务' };
+  state.libraryBatchThumbnailBuildStatus = { status: 'idle', message: '当前没有批量缩略图任务' };
+  stopLibraryBatchBuildPolling();
+  stopLibraryBatchThumbnailBuildPolling();
+}
+function startRoleAwareBackgroundPolling() {
+  if (!canRunServerTasks() && !canAccessBatchWorkflow()) {
+    resetVisitorServerTaskStatuses();
+    if (state.view === 'settings') {
+      syncLibraryBatchWorkflowPanel();
+      syncLibraryBatchBuildPanel();
+      syncLibraryBatchThumbnailBuildPanel();
+    }
+    return;
+  }
+  if (canRunServerTasks()) startLibraryBuildPolling();
+  if (canAccessBatchWorkflow()) {
+    void pollLibraryBatchBuildStatus();
+    void pollLibraryBatchThumbnailBuildStatus();
+  }
 }
 function estimateLibraryBuildDiscoveryPercent(found) {
   const count = Math.max(0, Number(found) || 0);
@@ -5235,7 +6219,7 @@ function renderView() {
     return;
   }
   switch (state.view) {
-    case 'timeline':     renderTimeline();    break;
+    case 'timeline':     isRootUser() ? renderRootDebugTimeline() : renderTimeline(); break;
     case 'favorites':    renderFavorites();   break;
     case 'random-album': renderRandomAlbum(); break;
     case 'albums':       renderAlbums();      break;
@@ -5321,8 +6305,8 @@ async function fetchAllRandomAlbumPhotos() {
     appendMediaKindParam(params);
     if (cursor) params.set('cursor', cursor);
     controller = new AbortController();
-    const response = await fetch(`/api/media/random?${params.toString()}`, { signal: controller.signal });
-    if (!response.ok) throw await response.json();
+    const response = await fetchWithPageSession(`/api/media/random?${params.toString()}`, { signal: controller.signal });
+    if (!response.ok) throw await buildAPIError(response);
     const page = await response.json();
     const nextPhotos = page.photos || [];
     allPhotos.push(...nextPhotos);
@@ -5344,8 +6328,8 @@ async function fetchRandomAlbumPage(cursor, limit, signal) {
   const params = new URLSearchParams({ limit: String(limit), seed: String(state.randomAlbumSeed) });
   appendMediaKindParam(params);
   if (cursor) params.set('cursor', cursor);
-  const response = await fetch(`/api/media/random?${params.toString()}`, { signal });
-  if (!response.ok) throw await response.json();
+  const response = await fetchWithPageSession(`/api/media/random?${params.toString()}`, { signal });
+  if (!response.ok) throw await buildAPIError(response);
   return response.json();
 }
 
@@ -5460,10 +6444,10 @@ async function preloadThumbnailsInBatches(photos, onProgress, shouldCancel) {
 const visibleThumbnailWarmTimers = new Map();
 
 function requestVisibleThumbnailWarmup(viewKey, photos) {
-  const uuids = (photos || [])
-    .map(photo => photo && photo.uuid || '')
-    .filter(Boolean)
+  const candidates = (photos || [])
+    .filter(photo => photo && photo.uuid)
     .slice(0, 48);
+  const uuids = candidates.map(photo => photo.uuid);
   if (!uuids.length) return;
   const signature = uuids.join(',');
   if (state.visibleThumbnailWarmSignatures[viewKey] === signature) return;
@@ -5474,6 +6458,14 @@ function requestVisibleThumbnailWarmup(viewKey, photos) {
     visibleThumbnailWarmTimers.delete(viewKey);
     state.visibleThumbnailWarmSignatures[viewKey] = signature;
     void api.post('/api/media/thumbnails/warm', { uuids }).catch(() => {});
+    candidates.slice(0, 24).forEach(photo => {
+      const key = `thumb:${photo.uuid}`;
+      if (!rememberWarmedThumbnail(key)) return;
+      const img = new Image();
+      img.decoding = 'async';
+      img.loading = 'eager';
+      img.src = mediaThumbURL(photo);
+    });
   }, 120);
   visibleThumbnailWarmTimers.set(viewKey, timer);
 }
@@ -5583,6 +6575,7 @@ async function loadMoreRandomAlbum() {
     state.randomAlbumHasMore = page.has_more || false;
     state.randomAlbumLoaded = !state.randomAlbumHasMore;
     await appendRandomAlbumGrid(photos, { progressive: true });
+    if (state.pendingRandomAlbumPhotoID) await focusPendingRandomAlbumPhoto({ quiet: true });
     requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(photos));
   } catch (e) {
     if (!e || e.name !== 'AbortError') {
@@ -5601,26 +6594,29 @@ async function renderRandomAlbum() {
   state.randomAlbumAutoLoadPaused = false;
   $('#topbar-title').textContent = '乱序相册';
   $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
-    renderTopbarGlassButton({ id: 'reshuffle-btn', icon: icons.topbarShuffle, label: '打乱相册顺序', variant: 'accent' }),
+    renderTopbarGlassButton({
+      id: 'random-return-position-btn',
+      icon: icons.topbarReturnRandomPosition || icons.topbarBackAlbums || icons.back,
+      label: '回到刚才的位置',
+      variant: 'accent',
+      disabled: !state.randomAlbumLastViewedPhotoID,
+    }),
   ]);
   $('#topbar-meta').innerHTML = renderMediaKindFilterControl();
   $('#topbar-actions').innerHTML = renderTopbarLeadingGroup([
     renderTopbarGlassButton({ id: 'random-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部', variant: 'accent' }),
   ]);
   bindMediaKindFilterControl();
-  $('#random-load-all-btn').addEventListener('click', openRandomAlbumLoadAllModal);
-  $('#reshuffle-btn').addEventListener('click', async () => {
-    state.randomAlbumSeed = Date.now();
-    state.randomAlbumPhotos = [];
-    state.randomAlbumCursor = '';
-    state.randomAlbumHasMore = true;
-    state.randomAlbumLoaded = false;
-    state.randomAlbumViewLoaded = false;
-    state.randomAlbumTotal = 0;
-    $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
-    await renderRandomAlbumGrid();
-    await loadMoreRandomAlbum();
-    restoreViewScroll('random-album');
+  $('#random-load-all-btn')?.addEventListener('click', openRandomAlbumLoadAllModal);
+  $('#random-return-position-btn')?.addEventListener('click', async () => {
+    const targetID = Number(state.randomAlbumLastViewedPhotoID || 0);
+    if (!targetID) return;
+    state.pendingRandomAlbumPhotoID = targetID;
+    if (await focusPendingRandomAlbumPhoto({ quiet: true })) {
+      showToast('已回到刚才浏览的位置');
+      return;
+    }
+    showToast('正在定位刚才浏览的位置…');
   });
 
   if (state.randomAlbumViewLoaded) {
@@ -5628,7 +6624,7 @@ async function renderRandomAlbum() {
     await renderRandomAlbumGrid();
     requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(state.randomAlbumPhotos));
     observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
-    restoreViewScroll('random-album');
+    if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
     return;
   }
 
@@ -5643,7 +6639,7 @@ async function renderRandomAlbum() {
     await loadMoreRandomAlbum();
     state.randomAlbumViewLoaded = true;
     observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
-    restoreViewScroll('random-album');
+    if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
   } catch (e) {
     $('#random-album-wrap').innerHTML = `<p style="color:var(--danger)">加载失败: ${(e && e.error) || e}</p>`;
     restoreViewScroll('random-album');
@@ -5686,7 +6682,361 @@ function updateRandomAlbumLoadMoreUI() {
   loadMore.textContent = `已随机载入 ${state.randomAlbumPhotos.length} 条媒体`;
 }
 
+function applyRootUsersPayload(data = {}) {
+  state.rootConsoleUsers = Array.isArray(data.users) ? data.users : [];
+  state.rootConsoleLoaded = true;
+}
+
+async function ensureRootConsoleUsersLoaded(force = false) {
+  if (!force && state.rootConsoleLoaded) return state.rootConsoleUsers;
+  const data = await fetchRootUsers();
+  applyRootUsersPayload(data);
+  return state.rootConsoleUsers;
+}
+
+function rootUserRoleLabel(role) {
+  switch (String(role || '').trim()) {
+    case 'root': return 'root';
+    case 'admin': return '管理员';
+    default: return '访客';
+  }
+}
+
+function rootUserAccentColor(role) {
+  switch (String(role || '').trim()) {
+    case 'root': return '#245549';
+    case 'admin': return '#2d6a5f';
+    default: return '#8d6a42';
+  }
+}
+
+function rootUserInitial(username = '') {
+  const value = String(username || '').trim();
+  if (!value) return 'U';
+  return value.slice(0, 1).toUpperCase();
+}
+
+function renderRootUserRoleBadges(user = {}) {
+  const badges = [
+    `<span class="settings-library-state-badge root-user-role-badge root-user-role-badge-${escapeHTML(String(user.role || 'visitor').trim() || 'visitor')}">${escapeHTML(rootUserRoleLabel(user.role))}</span>`
+  ];
+  if (user.can_login === false) {
+    badges.push('<span class="settings-library-state-badge is-unavailable">不可登录</span>');
+  }
+  if (user.protected) {
+    badges.push('<span class="settings-library-state-badge root-user-role-badge root-user-role-badge-protected">系统入口</span>');
+  }
+  return badges.join('');
+}
+
+function rootUserLibrarySummary(user = {}) {
+  const libraries = normalizeLibraries(state.serverSettings.libraries, state.serverSettings.storage_path || '');
+  if (user.role === 'root') return '仅可进入 root 控制台，不参与媒体浏览';
+  if (user.role === 'admin') {
+    const defaultName = libraries.find(item => item.id === user.default_library_id)?.name || '未指定默认资源库';
+    return `可访问全部 ${libraries.length} 个资源库 · 默认 ${defaultName}`;
+  }
+  const allowed = Array.isArray(user.allowed_library_ids) ? user.allowed_library_ids : [];
+  if (!allowed.length) return String(user.login_blocked_reason || '尚未获得资源库授权，当前不可登录');
+  const defaultName = libraries.find(item => item.id === user.default_library_id)?.name || '未指定默认资源库';
+  return `已授权 ${allowed.length} 个资源库 · 默认 ${defaultName}`;
+}
+
+function renderRootConsoleUserRows() {
+  if (!state.rootConsoleUsers.length) {
+    return `<div class="settings-empty">当前还没有用户。</div>`;
+  }
+  return state.rootConsoleUsers.map(user => `
+    <div class="settings-library-row root-user-card${user.can_login === false ? ' is-unavailable' : ''}" data-root-user="${escapeHTML(user.username)}" style="--library-accent:${rootUserAccentColor(user.role)};cursor:default">
+      <div class="settings-library-main">
+        <div class="settings-library-logo-block">
+          <div class="settings-library-logo-preview root-user-logo-preview" aria-hidden="true">
+            <span class="root-user-avatar-mark">${icons.albumCardUser || icons.photo || rootUserInitial(user.username)}</span>
+          </div>
+        </div>
+        <div class="settings-library-fields">
+          <div class="settings-library-name-display">${escapeHTML(user.username)}</div>
+          <div class="settings-library-path-display">${escapeHTML(rootUserLibrarySummary(user))}</div>
+          <div class="settings-library-meta-row">
+            ${renderRootUserRoleBadges(user)}
+          </div>
+          ${user.can_login === false && user.login_blocked_reason ? `<div class="settings-library-unavailable-note">${escapeHTML(user.login_blocked_reason)}</div>` : ''}
+        </div>
+      </div>
+      <div class="settings-library-row-actions root-user-card-actions">
+        <button class="btn btn-sm" type="button" data-root-edit="${escapeHTML(user.username)}">编辑</button>
+        ${user.protected ? '' : `<button class="btn btn-danger btn-sm" type="button" data-root-delete="${escapeHTML(user.username)}">删除</button>`}
+      </div>
+    </div>`).join('');
+}
+
+function renderRootDebugMediaGrid() {
+  const grid = el('div', 'photo-grid');
+  rootDebugMediaItems.forEach(photo => {
+    const card = el('button', 'photo-thumb');
+    card.type = 'button';
+    card.dataset.id = photo.id;
+    card.dataset.kind = photo.media_kind || 'image';
+    card.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
+    card.innerHTML = `<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photo.original_name || '')}"${isVideoMedia(photo) ? ` onerror=\"this.onerror=null;this.src='${videoPosterPlaceholder}'\"` : ''}>${isVideoMedia(photo) ? `<span class="media-badge">${escapeHTML(videoFormatLabel(photo))}</span>` : ''}`;
+    const imageEl = card.querySelector('img');
+    imageEl?.addEventListener('load', () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => card.classList.remove('thumb-loading', 'thumb-load-failed')));
+    });
+    if (imageEl && !isVideoMedia(photo)) {
+      imageEl.addEventListener('error', () => retryThumbnailLoad(imageEl, photo));
+    }
+    card.addEventListener('click', () => {
+      openLightbox(rootDebugMediaItems, rootDebugMediaItems.findIndex(item => item.id === photo.id), {
+        returnView: 'settings',
+        debugControls: true,
+      });
+    });
+    grid.appendChild(card);
+  });
+  return grid;
+}
+
+async function renderRootDebugTimeline() {
+  state.timelineAutoLoadPaused = false;
+  $('#topbar-title').textContent = '时间线';
+  $('#topbar-leading').innerHTML = renderTimelineOrderControl();
+  $('#topbar-meta').innerHTML = `<span class="timeline-jump-status" id="timeline-jump-status" hidden></span>` + renderMediaKindFilterControl();
+  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'timeline-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部' })}</div>`;
+  bindMediaKindFilterControl();
+  $('#timeline-order-btn')?.addEventListener('click', () => {
+    state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
+    localStorage.setItem(timelineOrderStorageKey, state.timelineOrder);
+    void renderRootDebugTimeline();
+  });
+  $('#timeline-load-all-btn')?.addEventListener('click', () => {
+    showToast('调试媒体已全部加载');
+  });
+
+  $('#content').innerHTML = `
+<div id="timeline-wrap"></div>
+<div class="load-more" id="load-more" style="display:none"><div class="spinner"></div>加载中…</div>`;
+  const wrap = $('#timeline-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  wrap.appendChild(renderRootDebugMediaGrid());
+}
+
+function openRootUserEditor(user = null) {
+  const editing = !!user;
+  const isProtectedRoot = editing && user.role === 'root';
+  const libraries = normalizeLibraries(state.serverSettings.libraries, state.serverSettings.storage_path || '');
+  const selectedAllowed = new Set(Array.isArray(user && user.allowed_library_ids) ? user.allowed_library_ids : []);
+  if (!editing && !selectedAllowed.size && libraries[0] && libraries[0].id) {
+    selectedAllowed.add(libraries[0].id);
+  }
+  const initialRole = isProtectedRoot ? 'root' : String(user && user.role || 'visitor');
+  const modal = el('div', 'modal-overlay open');
+  modal.innerHTML = `
+    <div class="modal library-editor-card">
+      <div class="modal-title">${editing ? '编辑用户' : '新建用户'}</div>
+      <div class="settings-group">
+        <div class="settings-control">
+          <label for="root-user-username"><span>用户名</span></label>
+          <input class="input" id="root-user-username" type="text" value="${escapeHTML(editing ? user.username : '')}" ${isProtectedRoot ? 'disabled' : ''} placeholder="例如：alice">
+        </div>
+        <div class="settings-control">
+          <label for="root-user-password"><span>${editing ? '新密码' : '密码'}</span><span>${editing ? '留空则保持当前密码' : '至少 6 位'}</span></label>
+          <input class="input" id="root-user-password" type="password" value="" placeholder="${editing ? '留空保持不变' : '输入登录密码'}">
+        </div>
+        <div class="settings-control">
+          <label for="root-user-role"><span>角色</span></label>
+          <select class="input" id="root-user-role" ${isProtectedRoot ? 'disabled' : ''}>
+            ${isProtectedRoot ? '<option value="root" selected>root</option>' : `
+              <option value="visitor" ${initialRole === 'visitor' ? 'selected' : ''}>访客</option>
+              <option value="admin" ${initialRole === 'admin' ? 'selected' : ''}>管理员</option>`}
+          </select>
+        </div>
+        <div class="settings-control" id="root-user-libraries-wrap">
+          <label><span>资源库授权</span><span id="root-user-libraries-hint">${initialRole === 'admin' ? '管理员默认拥有全部资源库，可选择默认资源库。' : '访客默认只访问主要资源库，可继续追加授权。'}</span></label>
+          <div class="root-console-library-list" id="root-user-library-list">
+            ${libraries.map(library => `
+              <label class="root-console-library-item">
+                <input type="checkbox" value="${escapeHTML(library.id || '')}" ${initialRole === 'admin' ? 'checked disabled' : (selectedAllowed.has(library.id) ? 'checked' : '')}>
+                <span>${escapeHTML(library.name)}</span>
+              </label>`).join('')}
+          </div>
+        </div>
+        <div class="settings-control">
+          <label for="root-user-default-library"><span>默认资源库</span></label>
+          <select class="input" id="root-user-default-library"></select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="root-user-cancel" type="button">取消</button>
+        <button class="btn btn-primary" id="root-user-save" type="button">${editing ? '保存' : '创建'}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const usernameInput = $('#root-user-username', modal);
+  const passwordInput = $('#root-user-password', modal);
+  const roleSelect = $('#root-user-role', modal);
+  const defaultSelect = $('#root-user-default-library', modal);
+  const libraryWrap = $('#root-user-libraries-wrap', modal);
+  const libraryInputs = () => $$('input[type="checkbox"]', $('#root-user-library-list', modal));
+  const close = () => modal.remove();
+
+  const syncDefaultOptions = () => {
+    const role = roleSelect.value;
+    const availableLibraries = libraries.filter(library => role === 'admin' || libraryInputs().some(input => input.checked && input.value === library.id));
+    defaultSelect.innerHTML = availableLibraries.length
+      ? availableLibraries.map(library => `<option value="${escapeHTML(library.id)}" ${library.id === (user && user.default_library_id) ? 'selected' : ''}>${escapeHTML(library.name)}</option>`).join('')
+      : '<option value="">未指定</option>';
+    if (!availableLibraries.some(library => library.id === defaultSelect.value)) {
+      defaultSelect.value = availableLibraries[0]?.id || '';
+    }
+  };
+
+  const syncRoleState = () => {
+    const role = roleSelect.value;
+    const isAdmin = role === 'admin';
+    const isRoot = role === 'root';
+    if (libraryWrap) libraryWrap.hidden = isRoot;
+    libraryInputs().forEach(input => {
+      if (isAdmin) {
+        input.checked = true;
+        input.disabled = true;
+      } else {
+        input.disabled = false;
+      }
+    });
+    const hint = $('#root-user-libraries-hint', modal);
+    if (hint) {
+      hint.textContent = isRoot
+        ? 'root 仅用于用户管理与资源库授权。'
+        : (isAdmin ? '管理员默认拥有全部资源库，可选择默认资源库。' : '访客默认只访问主要资源库，可继续追加授权。');
+    }
+    syncDefaultOptions();
+  };
+
+  roleSelect?.addEventListener('change', syncRoleState);
+  libraryInputs().forEach(input => input.addEventListener('change', syncDefaultOptions));
+  $('#root-user-cancel', modal)?.addEventListener('click', close);
+  modal.addEventListener('click', e => {
+    if (e.target === modal) close();
+  });
+  $('#root-user-save', modal)?.addEventListener('click', async () => {
+    const payload = {
+      username: usernameInput.value.trim(),
+      password: passwordInput.value,
+      role: roleSelect.value,
+      allowed_library_ids: libraryInputs().filter(input => input.checked).map(input => input.value),
+      default_library_id: defaultSelect.value || '',
+    };
+    if (!editing && (!payload.username || !payload.password)) {
+      showToast('请填写用户名和密码');
+      return;
+    }
+    try {
+      const resp = editing
+        ? await updateRootUser(user.username, {
+          new_username: isProtectedRoot ? '' : payload.username,
+          new_password: payload.password,
+          role: payload.role,
+          allowed_library_ids: payload.allowed_library_ids,
+          default_library_id: payload.default_library_id,
+        })
+        : await createRootUser(payload);
+      applyRootUsersPayload(resp);
+      await renderRootConsoleContent();
+      showToast(editing ? '用户已更新' : '用户已创建');
+      close();
+    } catch (e) {
+      appAlert((e && e.error) || String(e), { title: editing ? '保存失败' : '创建失败' });
+    }
+  });
+  syncRoleState();
+}
+
+async function renderRootConsoleContent() {
+  if (!state.rootConsoleLoaded) {
+    $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>加载 root 控制台中…</div>`;
+    await ensureRootConsoleUsersLoaded();
+  }
+  $('#content').innerHTML = `
+<div class="settings-layout">
+  <section class="card settings-panel settings-panel-application">
+    <h3>Root 控制台</h3>
+    <p>这里集中处理用户创建、删除、改名、改密码，以及全局批量工作流。</p>
+    <div class="settings-group">
+      <div class="settings-actions settings-actions-fill">
+        <button class="btn btn-primary" id="root-create-user-btn" type="button">${icons.add || icons.plus || '+'} 新建用户</button>
+        <button class="btn" id="root-refresh-users-btn" type="button">刷新列表</button>
+      </div>
+    </div>
+  </section>
+  <section class="card settings-panel settings-panel-batch-workflow">
+    <div id="settings-library-batch-workflow">${renderLibraryBatchWorkflowPanel()}</div>
+  </section>
+  <section class="card settings-panel settings-panel-share">
+    <h3>用户与授权</h3>
+    <p>新建管理员默认可访问全部资源库；新建访客在获得资源库授权前无法登录。</p>
+    <div class="settings-group">
+      <div class="settings-library-list root-user-list" id="root-user-list">${renderRootConsoleUserRows()}</div>
+    </div>
+  </section>
+</div>`;
+
+  $('#root-create-user-btn')?.addEventListener('click', () => openRootUserEditor());
+  $('#root-refresh-users-btn')?.addEventListener('click', async () => {
+    await ensureRootConsoleUsersLoaded(true);
+    renderRootConsoleContent();
+    showToast('用户列表已刷新');
+  });
+  if (canAccessBatchWorkflow()) syncLibraryBatchWorkflowPanel();
+  $$('[data-root-edit]').forEach(button => {
+    button.addEventListener('click', () => {
+      const user = state.rootConsoleUsers.find(item => item.username === button.dataset.rootEdit);
+      if (user) openRootUserEditor(user);
+    });
+  });
+  $$('[data-root-delete]').forEach(button => {
+    button.addEventListener('click', async () => {
+      const username = String(button.dataset.rootDelete || '').trim();
+      if (!username) return;
+      if (!(await appConfirm(`确定要删除用户「${username}」吗？`, { danger: true }))) return;
+      try {
+        const resp = await removeRootUser(username);
+        applyRootUsersPayload(resp);
+        renderRootConsoleContent();
+        showToast('用户已删除');
+      } catch (e) {
+        appAlert((e && e.error) || String(e), { title: '删除失败', danger: true });
+      }
+    });
+  });
+}
+
 async function renderSettings() {
+  scheduleSettingsAvailabilityPolling();
+  if (isRootUser()) {
+    $('#topbar-title').textContent = 'Root 控制台';
+    $('#topbar-leading').innerHTML = '';
+    $('#topbar-meta').innerHTML = '';
+    $('#topbar-actions').innerHTML = '';
+    if (!state.settingsReady) {
+      $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>加载 root 控制台中…</div>`;
+      await ensureSettingsDataLoaded();
+    }
+    if (state.view !== 'settings') return;
+    try {
+      await renderRootConsoleContent();
+      if (state.settingsScrollRestorePending) {
+        restoreViewScroll('settings');
+        state.settingsScrollRestorePending = false;
+      }
+    } catch (e) {
+      console.error('render root console failed', e);
+      $('#content').innerHTML = `<div class="card settings-panel"><h3>Root 控制台加载失败</h3><p style="color:var(--danger)">${(e && e.message) || e}</p></div>`;
+    }
+    return;
+  }
   $('#topbar-title').textContent = '设置';
   $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
     renderTopbarGlassButton({ id: 'settings-save-top-btn', icon: icons.topbarSave, label: '保存', variant: 'accent', disabled: !state.settingsDirty }),
@@ -5735,16 +7085,89 @@ function renderLibraryAccentSwatches(accentColor) {
   </div>`;
 }
 
+function formatLibraryShortDate(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '—';
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return `${date.getFullYear()}.${date.getMonth() + 1}.${date.getDate()}`;
+}
+
+function formatLibraryRelativeTime(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '—';
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  const diff = Date.now() - date.getTime();
+  if (diff < 0) return formatLibraryShortDate(raw);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return '刚刚';
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < day * 7) return `${Math.floor(diff / day)} 天前`;
+  return formatLibraryShortDate(raw);
+}
+
+function formatLibraryStorageValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '—';
+  return raw.replace(/(\d)\s+(B|KB|MB|GB|TB|PB)\b/i, '$1$2');
+}
+
+function libraryStatValue(library = {}, keys = [], fallback = '—') {
+  for (const key of keys) {
+    const value = library[key];
+    if (value === 0) return '0';
+    if (value != null && String(value).trim() !== '') return String(value);
+  }
+  return fallback;
+}
+
+function renderLibraryInfoItem(icon, label, value, { compactLabel = true } = {}) {
+  const safeValue = value === 0 ? '0' : String(value || '—');
+  return `<div class="settings-library-info-item">
+    <span class="settings-library-info-icon" aria-hidden="true">${icon || ''}</span>
+    <span class="settings-library-info-label${compactLabel ? ' pc-hidden' : ''}">${escapeHTML(label)}</span>
+    <span class="settings-library-info-value">${escapeHTML(safeValue)}</span>
+  </div>`;
+}
+
+function renderLibraryInfoGrid(library = {}, { availabilityMetaText = '', availabilityDetailText = '' } = {}) {
+  const created = formatLibraryShortDate(library.created_at || library.createdAt);
+  const scannedAt = libraryStatValue(library, ['last_scanned_at', 'lastScannedAt', 'last_scan_at', 'lastScanAt'], '');
+  const scanned = scannedAt ? formatLibraryRelativeTime(scannedAt) : (availabilityMetaText || '—');
+  const unsupported = libraryStatValue(library, ['unsupported_media_count', 'unsupportedMediaCount'], availabilityDetailText || '0');
+  const storage = formatLibraryStorageValue(libraryStatValue(library, ['total_size_text', 'totalSizeText', 'storage_text', 'storageText'], library.status || (library.available === false ? '不可用' : '可用')));
+  const photos = libraryStatValue(library, ['photo_count', 'photoCount', 'image_count', 'imageCount'], '0');
+  const videos = libraryStatValue(library, ['video_count', 'videoCount'], '0');
+  return `<div class="settings-library-info-grid">
+    ${renderLibraryInfoItem(icons.libraryInfoCreated, '创建日期', created)}
+    ${renderLibraryInfoItem(icons.libraryInfoScanned, '上次扫描日期', scanned)}
+    ${renderLibraryInfoItem(icons.libraryInfoUnsupported, '不支持的媒体数', unsupported)}
+    ${renderLibraryInfoItem(icons.libraryInfoStorage, '存储', storage)}
+    ${renderLibraryInfoItem(icons.libraryInfoPhotos, '照片', photos)}
+    ${renderLibraryInfoItem(icons.libraryInfoVideos, '视频', videos)}
+  </div>`;
+}
+
 function renderLibrarySettingsRow(library = {}, index = 0) {
+  const libraryIndex = Number.isInteger(Number(library.index)) ? Number(library.index) : index;
   const id = library.id || '';
   const name = library.name || `资源库 ${index + 1}`;
   const path = library.path || '';
   const logoAsset = library.logo_asset || '';
-  const logoURL = library.logo_image_url || '';
+  const logoURL = resolveLibraryLogoURL(library);
   const accentColor = resolveLibraryAccentColor(library);
+  const available = library.available !== false;
+  const unavailableReason = String(library.unavailable_reason || '').trim();
+  const availabilityMetaText = libraryAvailabilityMetaText(library);
+  const availabilityDetailText = libraryAvailabilityDetailText(library);
   const isActive = (id && id === (state.serverSettings.active_library_id || '')) || (!id && path && path === (state.serverSettings.storage_path || ''));
+  const isPrimaryLibrary = libraryIndex === 0;
   return `
-    <div class="settings-library-row${isActive ? ' active' : ''}" draggable="true" data-library-id="${escapeHTML(id)}" data-library-index="${index}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" style="--library-accent:${accentColor}">
+    <div class="settings-library-row${isActive ? ' active' : ''}${available ? '' : ' is-unavailable'}" draggable="${available ? 'true' : 'false'}" data-library-id="${escapeHTML(id)}" data-library-index="${libraryIndex}" data-logo-asset="${escapeHTML(logoAsset)}" data-logo-preview-url="${escapeHTML(logoURL)}" data-logo-action="" data-library-available="${available ? 'true' : 'false'}" data-library-unavailable-reason="${escapeHTML(unavailableReason)}" style="--library-accent:${accentColor}">
       <div class="settings-library-main">
         <div class="settings-library-logo-block">
           <div class="settings-library-logo-preview"></div>
@@ -5753,42 +7176,47 @@ function renderLibrarySettingsRow(library = {}, index = 0) {
           <input class="settings-library-name" type="hidden" value="${escapeHTML(name)}">
           <input class="settings-library-path" type="hidden" value="${escapeHTML(path)}">
           <input class="settings-library-accent" type="hidden" value="${accentColor}">
-          <div class="settings-library-name-display">${escapeHTML(name)}</div>
+          <div class="settings-library-title-row">
+            <div class="settings-library-name-display">
+              <span>${escapeHTML(name)}</span>
+              ${isPrimaryLibrary ? `<span class="settings-library-primary-mark" title="主要资源库" aria-label="主要资源库">${icons.superLike || ''}</span>` : ''}
+            </div>
+            ${available ? '' : '<span class="settings-library-state-badge is-unavailable">不可用</span>'}
+          </div>
           <div class="settings-library-path-display">${escapeHTML(path || '尚未设置路径')}</div>
           <div class="settings-library-meta-row">
             ${renderLibraryAccentSwatches(accentColor)}
           </div>
         </div>
       </div>
-      <div class="settings-library-row-actions">
-        <button class="settings-library-icon-action settings-library-edit" type="button" title="编辑资源库" aria-label="编辑资源库">${icons.libraryCardEdit}</button>
-        <button class="settings-library-icon-action settings-library-remove" type="button" title="删除资源库" aria-label="删除资源库">${icons.libraryCardDelete}</button>
-      </div>
+      ${renderLibraryInfoGrid(library, { availabilityMetaText, availabilityDetailText })}
     </div>`;
 }
 
 function collectLibraryInputs() {
-  const rows = $$('.settings-library-row');
-  return rows.map((row, index) => ({
-    id: row.dataset.libraryId || '',
-    name: $('.settings-library-name', row).value.trim() || `资源库 ${index + 1}`,
-    path: $('.settings-library-path', row).value.trim(),
-    logo_asset: row.dataset.logoAction === 'remove' ? '' : row.dataset.logoAsset || '',
-    accent_color: normalizeHexColor($('.settings-library-accent', row).value) || '',
+  return collectLibraryDrafts().map((library, index) => ({
+    id: library.id || '',
+    name: library.name || `资源库 ${index + 1}`,
+    path: library.path || '',
+    logo_asset: library.logo_asset || '',
+    accent_color: normalizeHexColor(library.accent_color) || '',
   })).filter(item => item.path);
 }
 
 function collectLibraryDrafts() {
   const rows = $$('.settings-library-row');
   if (!rows.length) return [];
-  return rows.map((row, index) => ({
-    id: row.dataset.libraryId || '',
-    name: $('.settings-library-name', row).value.trim() || `资源库 ${index + 1}`,
-    path: $('.settings-library-path', row).value.trim(),
-    logo_asset: row.dataset.logoAction === 'remove' ? '' : row.dataset.logoAsset || '',
-    logo_image_url: row.dataset.logoPreviewUrl || '',
-    accent_color: normalizeHexColor($('.settings-library-accent', row).value) || '',
-  })).filter(item => item.path);
+  return rows.map((row, index) => {
+    const draft = {
+      id: row.dataset.libraryId || '',
+      name: $('.settings-library-name', row).value.trim() || `资源库 ${index + 1}`,
+      path: $('.settings-library-path', row).value.trim(),
+      logo_asset: row.dataset.logoAction === 'remove' ? '' : row.dataset.logoAsset || '',
+      logo_image_url: row.dataset.logoPreviewUrl || '',
+      accent_color: normalizeHexColor($('.settings-library-accent', row).value) || '',
+    };
+    return mergeLibraryDraftWithState(draft);
+  }).filter(item => item.path);
 }
 
 function syncLibraryDraftsToRuntime() {
@@ -5806,7 +7234,7 @@ let draggedLibraryRow = null;
 let libraryDragChanged = false;
 function commitLibraryRowOrderChange() {
   reindexLibrarySettingsRows();
-  syncActiveLibrarySelect();
+  if (canManageLibrariesUI) syncActiveLibrarySelect();
   applyLibraryBranding();
   setSettingsDirty();
 }
@@ -5850,6 +7278,8 @@ function libraryDraftFromRow(row) {
     logo_asset: row.dataset.logoAsset || '',
     logo_image_url: row.dataset.logoPreviewUrl || '',
     accent_color: normalizeHexColor($('.settings-library-accent', row)?.value) || defaultLibraryAccentPalette[0],
+    available: row.dataset.libraryAvailable !== 'false',
+    unavailable_reason: row.dataset.libraryUnavailableReason || '',
   };
 }
 
@@ -5861,9 +7291,55 @@ function createLibraryRowElement(library = {}, index = 0) {
   return row;
 }
 
+async function switchLibraryRowImmediately(row) {
+  if (!row) return;
+  if (row.dataset.libraryAvailable === 'false') {
+    showToast(row.dataset.libraryUnavailableReason || '当前资源库不可用');
+    return;
+  }
+  const nextID = String(row.dataset.libraryId || '').trim();
+  const nextPath = $('.settings-library-path', row)?.value.trim() || '';
+  if (!nextPath) {
+    showToast('请先填写资源库路径');
+    return;
+  }
+  const currentID = String(state.serverSettings.active_library_id || '').trim();
+  const currentPath = String(state.serverSettings.storage_path || '').trim();
+  if ((nextID && nextID === currentID) || (!nextID && nextPath === currentPath) || nextPath === currentPath) {
+    showToast('当前已在这个资源库');
+    return;
+  }
+  const previousID = state.serverSettings.active_library_id || '';
+  const previousPath = state.serverSettings.storage_path || '';
+  state.serverSettings.active_library_id = nextID;
+  state.serverSettings.storage_path = nextPath;
+  syncActiveLibrarySelect();
+  applyLibraryBranding();
+  setSettingsDirty();
+  try {
+    await completeSettingsSave(null, { successMessage: '资源库切换中…' });
+  } catch (e) {
+    state.serverSettings.active_library_id = previousID;
+    state.serverSettings.storage_path = previousPath;
+    syncActiveLibrarySelect();
+    applyLibraryBranding();
+    setSettingsDirty(true);
+    alert('切换资源库失败: ' + ((e && e.error) || e.message || e));
+  }
+}
+
+function libraryEditorActionButton({ id, kind = 'default', icon = '', label = '', hidden = false, disabled = false } = {}) {
+  return `<button class="btn library-editor-action-btn library-editor-action-btn-${escapeHTML(kind)}" id="${escapeHTML(id)}" type="button"${hidden ? ' hidden' : ''}${disabled ? ' disabled' : ''}>
+    <span class="library-editor-action-icon">${icon || ''}</span>
+    <span class="library-editor-action-label">${escapeHTML(label)}</span>
+  </button>`;
+}
+
 function openLibraryEditorModal(row = null, bindRow = null) {
   const editing = !!row;
   const index = editing ? Number(row.dataset.libraryIndex) || 0 : $$('.settings-library-row').length;
+  const originalLibraryID = editing ? String(row.dataset.libraryId || '').trim() : '';
+  const originalLibraryPath = editing ? ($('.settings-library-path', row)?.value.trim() || '') : '';
   const draft = editing
     ? libraryDraftFromRow(row)
     : {
@@ -5897,9 +7373,11 @@ function openLibraryEditorModal(row = null, bindRow = null) {
           <input class="library-editor-accent-picker" id="library-editor-accent" type="color" value="${normalizeHexColor(draft.accent_color) || defaultLibraryAccentPalette[0]}">
         </div>
       </div>
-      <div class="modal-footer">
-        <button class="btn" id="library-editor-cancel" type="button">取消</button>
-        <button class="btn btn-primary" id="library-editor-save" type="button">${editing ? '保存修改' : '新建资源库'}</button>
+      <div class="modal-footer library-editor-actions">
+        ${libraryEditorActionButton({ id: 'library-editor-save', kind: 'save', icon: icons.libraryEditorSave, label: editing ? '保存' : '新建' })}
+        ${libraryEditorActionButton({ id: 'library-editor-switch', kind: 'switch', icon: icons.libraryEditorSwitch, label: '切换', hidden: !editing })}
+        ${libraryEditorActionButton({ id: 'library-editor-delete', kind: 'delete', icon: icons.libraryEditorDelete, label: '删除', hidden: !editing })}
+        ${libraryEditorActionButton({ id: 'library-editor-cancel', kind: 'cancel', icon: icons.libraryEditorCancel, label: '取消' })}
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -5947,6 +7425,60 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     modal.remove();
   };
 
+  const buildLibraryDraft = () => ({
+    id: draft.id || '',
+    name: nameInput.value.trim() || `资源库 ${index + 1}`,
+    path: pathInput.value.trim(),
+    logo_asset: logoAction === 'remove' ? '' : logoAsset,
+    logo_image_url: logoPreviewUrl,
+    accent_color: normalizeHexColor(accentTextInput.value || accentInput.value) || defaultLibraryAccentPalette[index % defaultLibraryAccentPalette.length],
+  });
+
+  const applyLibraryDraftToRow = ({ activate = false } = {}) => {
+    const library = buildLibraryDraft();
+    if (!library.path) {
+      showToast('请填写资源库路径');
+      return null;
+    }
+    const nextRow = createLibraryRowElement(library, index);
+    nextRow.dataset.logoAction = logoAction;
+    nextRow._pendingLogoFile = pendingFile;
+    nextRow._pendingLogoNeedsCrop = pendingLogoNeedsCrop;
+    if (editing) row.replaceWith(nextRow);
+    else {
+      $('#settings-library-list .settings-empty')?.remove();
+      $('#settings-library-list').appendChild(nextRow);
+    }
+    if (typeof bindRow === 'function') bindRow(nextRow);
+    reindexLibrarySettingsRows();
+    if (activate) {
+      state.serverSettings.active_library_id = library.id || '';
+      state.serverSettings.storage_path = library.path;
+    } else if (editing) {
+      const currentActiveID = String(state.serverSettings.active_library_id || '').trim();
+      const currentActivePath = String(state.serverSettings.storage_path || '').trim();
+      if ((originalLibraryID && originalLibraryID === currentActiveID) || (originalLibraryPath && originalLibraryPath === currentActivePath)) {
+        state.serverSettings.active_library_id = library.id || '';
+        state.serverSettings.storage_path = library.path;
+      }
+    }
+    syncActiveLibrarySelect();
+    applyLibraryBranding();
+    setSettingsDirty();
+    return nextRow;
+  };
+
+  const persistLibraryDraft = async (button, { activate = false, successMessage = '' } = {}) => {
+    const nextRow = applyLibraryDraftToRow({ activate });
+    if (!nextRow) return;
+    try {
+      await completeSettingsSave(button, { successMessage });
+      close();
+    } catch (e) {
+      alert('保存资源库失败: ' + ((e && e.error) || e.message || e));
+    }
+  };
+
   nameInput.addEventListener('input', updatePreview);
   pathInput.addEventListener('input', updatePreview);
   accentTextInput.addEventListener('input', () => {
@@ -5985,55 +7517,55 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     if (e.target === modal) close();
   });
   $('#library-editor-save', modal).addEventListener('click', async () => {
-    const library = {
-      id: draft.id || '',
-      name: nameInput.value.trim() || `资源库 ${index + 1}`,
-      path: pathInput.value.trim(),
-      logo_asset: logoAction === 'remove' ? '' : logoAsset,
-      logo_image_url: logoPreviewUrl,
-      accent_color: normalizeHexColor(accentTextInput.value || accentInput.value) || defaultLibraryAccentPalette[index % defaultLibraryAccentPalette.length],
-    };
-    if (!library.path) {
-      showToast('请填写资源库路径');
-      return;
+    await persistLibraryDraft($('#library-editor-save', modal), {
+      activate: false,
+      successMessage: editing ? '资源库已保存到 config.json' : '资源库已添加到 config.json',
+    });
+  });
+  $('#library-editor-switch', modal)?.addEventListener('click', async () => {
+    await persistLibraryDraft($('#library-editor-switch', modal), {
+      activate: true,
+      successMessage: '资源库切换中…',
+    });
+  });
+  $('#library-editor-delete', modal)?.addEventListener('click', async () => {
+    if (!editing) return;
+    const library = buildLibraryDraft();
+    if (!(await appConfirm(`确定要删除资源库「${library.name || '未命名资源库'}」吗？`, {
+      title: '删除资源库',
+      confirmText: '删除',
+      cancelText: '取消',
+      danger: true,
+    }))) return;
+    row.remove();
+    if (!$('#settings-library-list .settings-library-row')) {
+      $('#settings-library-list')?.insertAdjacentHTML('beforeend', '<div class="settings-empty">暂无资源库，请先添加一个路径。</div>');
     }
-    const nextRow = createLibraryRowElement(library, index);
-    nextRow.dataset.logoAction = logoAction;
-    nextRow._pendingLogoFile = pendingFile;
-    nextRow._pendingLogoNeedsCrop = pendingLogoNeedsCrop;
-    if (editing && row.classList.contains('active')) {
-      state.serverSettings.active_library_id = library.id || '';
-      state.serverSettings.storage_path = library.path;
-    }
-    if (editing) row.replaceWith(nextRow);
-    else {
-      $('#settings-library-list .settings-empty')?.remove();
-      $('#settings-library-list').appendChild(nextRow);
-    }
-    if (typeof bindRow === 'function') bindRow(nextRow);
     reindexLibrarySettingsRows();
+    const remainingLibraries = collectLibraryDrafts();
+    const currentActiveID = String(state.serverSettings.active_library_id || '').trim();
+    const currentActivePath = String(state.serverSettings.storage_path || '').trim();
+    if ((originalLibraryID && originalLibraryID === currentActiveID) || (originalLibraryPath && originalLibraryPath === currentActivePath)) {
+      state.serverSettings.active_library_id = remainingLibraries[0]?.id || '';
+      state.serverSettings.storage_path = remainingLibraries[0]?.path || '';
+    }
     syncActiveLibrarySelect();
     applyLibraryBranding();
     setSettingsDirty();
     try {
-      await withButtonBusy($('#library-editor-save', modal), '保存中…', async () => {
-        await persistSettingsWithLibraryAssets();
-      });
-      setSettingsDirty(false);
+      await completeSettingsSave($('#library-editor-delete', modal), { successMessage: '资源库已删除' });
       close();
-      showToast('资源库已保存到 config.json');
-      renderSettings();
     } catch (e) {
-      alert('保存资源库失败: ' + ((e && e.error) || e.message || e));
+      alert('删除资源库失败: ' + ((e && e.error) || e.message || e));
     }
   });
   updatePreview({ syncAccentText: true });
-  nameInput.focus();
 }
 
 function syncActiveLibrarySelect() {
   const select = $('#settings-active-library');
   const libraries = collectLibraryDrafts();
+  if (!select && !libraries.length) return;
   const previousIndex = select ? select.selectedIndex : -1;
   const current = ((select && select.value) || state.serverSettings.active_library_id || state.serverSettings.storage_path || '').trim();
   let activeLibrary = resolveActiveLibrary(libraries, current, state.serverSettings.storage_path || '');
@@ -6048,7 +7580,7 @@ function syncActiveLibrarySelect() {
   if (select) {
     select.innerHTML = libraries.map((library, index) => {
       const selected = (activeLibrary && ((library.id && library.id === activeLibrary.id) || library.path === activeLibrary.path)) || (!activePath && index === 0);
-      return `<option value="${escapeHTML(library.id || library.path)}" ${selected ? 'selected' : ''}>${library.name}</option>`;
+      return `<option value="${escapeHTML(library.id || library.path)}" ${selected ? 'selected' : ''} ${library.available === false ? 'disabled' : ''}>${library.name}</option>`;
     }).join('') || '<option value="">请先添加资源库</option>';
   }
   $$('.settings-library-row').forEach(row => {
@@ -6104,6 +7636,7 @@ async function persistSettingsWithLibraryAssets() {
 
   const resp = await persistSettings();
   let latestMessage = (resp && resp.message) || '设置已保存';
+  const requiresRestart = !!(resp && resp.requires_restart);
 
   for (const operation of libraryOps) {
     const targetIndex = state.serverSettings.libraries.findIndex(library => (library.path || '').trim() === operation.path);
@@ -6119,46 +7652,52 @@ async function persistSettingsWithLibraryAssets() {
     }
   }
 
-  return { message: latestMessage, data: state.serverSettings };
+  return { message: latestMessage, data: state.serverSettings, requires_restart: requiresRestart };
+}
+
+async function completeSettingsSave(button, { savingLabel = '保存中…', restartingLabel = '重启中…', successMessage = '' } = {}) {
+  const runSave = () => persistSettingsWithLibraryAssets();
+  const resp = button ? await withButtonBusy(button, renderButtonBusySpinner(), runSave, { ariaLabel: savingLabel }) : await runSave();
+  setSettingsDirty(false);
+  if (resp && resp.requires_restart) {
+    showToast(successMessage || (resp && resp.message) || '设置已保存', 2200);
+    if (button) await withButtonBusy(button, renderButtonBusySpinner(), () => restartApp(), { ariaLabel: restartingLabel, keepBusyState: true });
+    else await restartApp();
+    setTimeout(() => location.reload(), 1800);
+    return resp;
+  }
+  showToast(successMessage || (resp && resp.message) || '设置已保存');
+  renderSettings();
+  return resp;
 }
 
 function bindSettingsTopSaveButton() {
   const saveBtn = $('#settings-save-top-btn');
-  if (saveBtn) {
-    saveBtn.disabled = !state.settingsDirty;
-    saveBtn.onclick = async () => {
-      try {
-        collectSettingsFormState();
-        const payload = buildSettingsPayload();
-        const needsRestart = settingsPayloadRequiresRestart(payload, state.savedServerSettings || state.serverSettings);
-        const resp = await withButtonBusy(saveBtn, '保存中…', () => persistSettingsWithLibraryAssets());
-        setSettingsDirty(false);
-        if (needsRestart) {
-          showToast('设置已保存，正在重启服务…', 2600);
-          await withButtonBusy(saveBtn, '重启中…', () => restartApp());
-          setTimeout(() => location.reload(), 1800);
-          return;
+    if (saveBtn) {
+      saveBtn.disabled = !state.settingsDirty;
+      saveBtn.onclick = async () => {
+        try {
+          await completeSettingsSave(saveBtn);
+        } catch (e) {
+          alert('保存失败: ' + ((e && e.error) || e.message || e));
         }
-        showToast((resp && resp.message) || '设置已保存');
-        renderSettings();
-      } catch (e) {
-        alert('保存失败: ' + ((e && e.error) || e.message || e));
-      }
-    };
-  }
+      };
+    }
 }
 
 function collectSettingsFormState() {
-  state.serverSettings.libraries = collectLibraryInputs();
-  if (!state.serverSettings.libraries.length) throw new Error('请至少保留一个资源库');
-  state.serverSettings.port = parseInt($('#settings-port')?.value, 10) || state.serverSettings.port || 8080;
-  const activeValue = $('#settings-active-library')?.value.trim() || state.serverSettings.active_library_id || state.serverSettings.storage_path || '';
-  const activeLibrary = resolveActiveLibrary(state.serverSettings.libraries, activeValue, state.serverSettings.storage_path || '');
-  state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
-  state.serverSettings.storage_path = activeLibrary && activeLibrary.path || state.serverSettings.storage_path || state.serverSettings.libraries[0].path;
-  state.serverSettings.thumbnail_dir = $('#settings-thumbnail-dir').value.trim();
+  if (canManageLibraries()) {
+    state.serverSettings.libraries = collectLibraryInputs();
+    if (!state.serverSettings.libraries.length) throw new Error('请至少保留一个资源库');
+    state.serverSettings.port = parseInt($('#settings-port')?.value, 10) || state.serverSettings.port || 8080;
+    const activeValue = $('#settings-active-library')?.value.trim() || state.serverSettings.active_library_id || state.serverSettings.storage_path || '';
+    const activeLibrary = resolveActiveLibrary(state.serverSettings.libraries, activeValue, state.serverSettings.storage_path || '');
+    state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
+    state.serverSettings.storage_path = activeLibrary && activeLibrary.path || state.serverSettings.storage_path || state.serverSettings.libraries[0].path;
+  }
+  state.serverSettings.thumbnail_dir = $('#settings-thumbnail-dir')?.value.trim() || state.serverSettings.thumbnail_dir || '';
   state.serverSettings.thumbnail_size = 512;
-  state.serverSettings.trash_dir = $('#settings-trash-dir').value.trim();
+  state.serverSettings.trash_dir = $('#settings-trash-dir')?.value.trim() || state.serverSettings.trash_dir || '';
   state.serverSettings.use_system_player = !!state.serverSettings.use_system_player;
   state.videoSectionMinMinutes = Math.min(240, Math.max(1, Number($('#settings-video-section-min')?.value) || state.videoSectionMinMinutes || 10));
   state.videoAutoplayNext = !!$('#settings-video-autoplay-next')?.checked;
@@ -6168,7 +7707,7 @@ function collectSettingsFormState() {
 
 function renderSettingsShareRows() {
   if (!state.shareLinks.length) {
-    return `<div class="settings-empty">还没有分享链接。你可以在照片、视频或相册的操作菜单里创建。</div>`;
+    return `<div class="settings-share-empty">还没有分享链接。你可以在照片、视频或相册的操作菜单里创建。</div>`;
   }
   return state.shareLinks.map(link => {
     const typeLabel = link.type === 'album' ? '相册' : '照片 / 视频';
@@ -6284,6 +7823,21 @@ function setLibraryBatchWorkflowPhase(phase = '') {
 function clearLibraryBatchWorkflowPhase() {
   state.libraryBatchWorkflowStartPending = false;
   setLibraryBatchWorkflowPhase('');
+}
+
+function normalizeLibraryBatchWorkflowRuntimeState() {
+  const scanActive = isLibraryBatchBuildActive(state.libraryBatchBuildStatus);
+  const thumbnailActive = isLibraryBatchThumbnailBuildActive(state.libraryBatchThumbnailBuildStatus);
+  const awaitingThumbnailStart = state.libraryBatchWorkflowPhase === 'scan'
+    && state.libraryBatchWorkflowEnabled
+    && String(state.libraryBatchBuildStatus && state.libraryBatchBuildStatus.status || '') === 'completed';
+  if (!scanActive && !thumbnailActive) {
+    state.libraryBatchBuildCancelPending = false;
+    state.libraryBatchThumbnailBuildCancelPending = false;
+    if (!awaitingThumbnailStart && !state.libraryBatchWorkflowStartPending && libraryBatchWorkflowActive()) {
+      setLibraryBatchWorkflowPhase('');
+    }
+  }
 }
 
 function libraryBatchWorkflowActive() {
@@ -6408,6 +7962,7 @@ function libraryBatchWorkflowProgressCopy() {
 }
 
 function renderLibraryBatchWorkflowPanel() {
+  normalizeLibraryBatchWorkflowRuntimeState();
   const starting = !!state.libraryBatchWorkflowStartPending;
   const running = libraryBatchWorkflowActive();
   const controlsDisabled = starting || running || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive();
@@ -6435,7 +7990,7 @@ function renderLibraryBatchWorkflowPanel() {
       <span class="settings-batch-build-badge ${starting || running ? 'active' : ''}">${escapeHTML(starting ? '启动中' : (running ? '串行运行中' : '可选'))}</span>
     </div>
     <div class="settings-batch-workflow-progress" aria-label="批量工作流进度">
-      <span style="width:${progressPercent}%"></span>
+      <span style="width:${totalProgressPercent}%"></span>
     </div>
     <div class="settings-batch-build-meta">
       <span>${escapeHTML(libraryBatchWorkflowProgressCopy())}</span>
@@ -6449,7 +8004,7 @@ function renderLibraryBatchWorkflowPanel() {
       ${renderSettingsToggle('settings-library-batch-workflow-select-all', '批量范围全选', libraryBatchWorkflowAllSelected(), '开启后选择全部资源库；关闭后取消当前批量范围。', controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-enabled', '扫描后自动构建缩略图', state.libraryBatchWorkflowEnabled, '适合一次性把多个资源库扫描并补全缩略图。', controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-aggressive', '高资源无人值守模式', state.libraryBatchWorkflowAggressive, '临时提高扫描与缩略图并发，优先缩短总耗时。', controlsDisabled)}
-      <details class="settings-advanced-options">
+      <details class="settings-advanced-options" ${state.libraryBatchWorkflowAdvancedOpen ? 'open' : ''}>
         <summary>高级选项</summary>
         <div class="settings-advanced-options-body">
           ${renderSettingsToggle('settings-library-batch-workflow-move-legacy', '整理旧版资源库', state.libraryBatchWorkflowMoveLegacyThumbnails, '为旧资源库补齐稳定 ID，并把旧缩略图迁移到按资源库 ID 隔离的新目录。', controlsDisabled)}
@@ -6535,12 +8090,16 @@ function libraryBatchSelectionConfigured(status) {
   return !!(status && status.selection_configured) || libraryBatchSelectedSet(status).size > 0;
 }
 
+function enabledBatchSelectableLibraries(status) {
+  return allBatchSelectableLibraries(status).filter(library => library && library.available !== false);
+}
+
 function allBatchSelectableLibraryValues(status) {
-  return allBatchSelectableLibraries(status).map(library => String(library.id || library.path || '').trim()).filter(Boolean);
+  return enabledBatchSelectableLibraries(status).map(library => String(library.id || library.path || '').trim()).filter(Boolean);
 }
 
 function libraryBatchStatusAllSelected(status) {
-  const rows = allBatchSelectableLibraries(status);
+  const rows = enabledBatchSelectableLibraries(status);
   if (!rows.length) return false;
   const selected = libraryBatchSelectedSet(status);
   if (!libraryBatchSelectionConfigured(status)) return true;
@@ -6556,7 +8115,7 @@ function libraryBatchWorkflowAllSelected() {
 }
 
 function libraryBatchStatusHasSelection(status) {
-  const rows = allBatchSelectableLibraries(status);
+  const rows = enabledBatchSelectableLibraries(status);
   if (!rows.length) return false;
   if (!libraryBatchSelectionConfigured(status)) return true;
   return libraryBatchSelectedSet(status).size > 0;
@@ -6595,6 +8154,8 @@ function allBatchSelectableLibraries(status) {
       path,
       status: row.status || 'pending',
       message: row.message || '',
+      available: library.available !== false,
+      unavailable_reason: library.unavailable_reason || '',
       imported: row.imported || 0,
       skipped: row.skipped || 0,
       pruned: row.pruned || 0,
@@ -6613,15 +8174,18 @@ function renderLibraryBatchSelectionRows(status, inputName, disabled = false) {
   return rows.map((library, index) => {
     const value = String(library.id || library.path || '').trim();
     const compareValue = usingIDs ? value : String(library.path || '').trim();
-    const checked = selectionConfigured ? selected.has(compareValue) : true;
-    return `<label class="settings-batch-build-select-row ${checked ? 'is-selected' : ''}">
+    const libraryAvailable = library.available !== false;
+    const interactive = libraryAvailable && !disabled;
+    const checked = selectionConfigured ? selected.has(compareValue) : libraryAvailable;
+    return `<label class="settings-batch-build-select-row ${checked ? 'is-selected' : ''}${libraryAvailable ? '' : ' is-unavailable'}${interactive ? '' : ' is-disabled'}">
       <span class="settings-toggle-switch settings-batch-build-checkbox">
-        <input type="checkbox" name="${escapeHTML(inputName)}" value="${escapeHTML(value)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+        <input type="checkbox" name="${escapeHTML(inputName)}" value="${escapeHTML(value)}" ${checked ? 'checked' : ''} ${interactive ? '' : 'disabled'}>
         <span class="settings-toggle-slider" aria-hidden="true"></span>
       </span>
       <span class="settings-batch-build-select-copy">
         <strong>${escapeHTML(library.name || `资源库 ${index + 1}`)}</strong>
         <span>${escapeHTML(library.path || '')}</span>
+        ${libraryAvailable || !library.unavailable_reason ? '' : `<span class="settings-batch-build-select-note">${escapeHTML(library.unavailable_reason)}</span>`}
       </span>
     </label>`;
   }).join('');
@@ -6785,6 +8349,9 @@ function syncLibraryBatchWorkflowPanel() {
   const container = $('#settings-library-batch-workflow');
   if (!container) return;
   container.innerHTML = renderLibraryBatchWorkflowPanel();
+  $('.settings-advanced-options', container)?.addEventListener('toggle', e => {
+    state.libraryBatchWorkflowAdvancedOpen = !!e.target.open;
+  });
   $$('input[name="settings-library-batch-workflow-selection"]').forEach(input => {
     input.addEventListener('change', async () => {
       if (state.libraryBatchWorkflowStartPending || isLibraryBatchBuildActive() || isLibraryBatchThumbnailBuildActive()) {
@@ -6963,27 +8530,37 @@ function syncLibraryBatchThumbnailBuildPanel() {
 }
 
 function renderSettingsContent() {
-  const users = (state.serverSettings.users || []).map(name => `<span class="settings-chip">${name}</span>`).join('');
   const activeAccent = resolveLibraryAccentColor(currentLibraryBrand() || {});
   const activeAccentText = readableTextColorForBackground(activeAccent);
   const thumbnailBuildSize = 512;
   const pwa = normalizePWASettings(state.pwaSettings);
+  const hasShareLinks = Array.isArray(state.shareLinks) && state.shareLinks.length > 0;
+  const canManageLibrariesUI = canManageLibraries();
+  const canRunServerTasksUI = canRunServerTasks();
+  const canAccessBatchWorkflowUI = canAccessBatchWorkflow();
+  const canManageSharesUI = canManageShareLinks();
+  const canAdminUI = !!state.serverSettings.can_admin;
+  const showExperimentalSettings = !isVisitorUser();
   $('#content').innerHTML = `
 <div class="settings-layout">
+  ${canManageLibrariesUI ? `
   <section class="card settings-panel settings-panel-application">
     <h3>资源库</h3>
+    <p>管理当前用户可用的资源库、头像与主色；切换资源库会在保存后自动重启生效。</p>
     <div class="settings-application-grid">
       <div class="settings-control settings-control-panel settings-control-wide">
-        <label><span>资源库管理</span><span>为每个资源库配一个名字，可在这里增删改</span></label>
         <div class="settings-library-list" id="settings-library-list">${renderLibrarySettingsRows()}</div>
       </div>
     </div>
     <button class="btn btn-primary settings-floating-add-library" id="settings-add-library-btn" type="button" style="--highlight-bg:${activeAccent};--highlight-text:${activeAccentText}">${icons.libraryCreate} 添加资源库</button>
   </section>
+  ` : ''}
 
+  ${canAccessBatchWorkflowUI ? `
   <section class="card settings-panel settings-panel-batch-workflow">
     <div id="settings-library-batch-workflow">${renderLibraryBatchWorkflowPanel()}</div>
   </section>
+  ` : ''}
 
   <section class="card settings-panel settings-panel-display">
     <h3>浏览显示</h3>
@@ -7001,15 +8578,15 @@ function renderSettingsContent() {
         <label for="settings-thumbnail-size"><span>缩略图生成大小</span><span id="settings-thumbnail-size-value">${thumbnailBuildSize}px</span></label>
         <input class="input" id="settings-thumbnail-size" type="range" min="512" max="512" step="1" value="512" disabled>
       </div>
-      ${renderSettingsToggle('settings-low-resource-mode', '低资源占用模式', !!state.serverSettings.low_resource_mode, '降低扫描与缩略图并发，更适合挂机和机械硬盘场景。')}
-      <div class="settings-control">
+      ${canRunServerTasksUI ? renderSettingsToggle('settings-low-resource-mode', '低资源占用模式', !!state.serverSettings.low_resource_mode, '降低扫描与缩略图并发，更适合挂机和机械硬盘场景。') : ''}
+      ${canManageLibrariesUI ? `<div class="settings-control">
         <label for="settings-thumbnail-dir"><span>缩略图目录</span><span>建议放到空间更充足的磁盘，重启后生效</span></label>
         <input class="input" id="settings-thumbnail-dir" type="text" value="${escapeHTML(state.serverSettings.thumbnail_dir || '')}">
-      </div>
-      <div class="settings-control">
+      </div>` : ''}
+      ${canManageLibrariesUI ? `<div class="settings-control">
         <label for="settings-trash-dir"><span>回收站目录</span><span>永久删除时移动到这里</span></label>
         <input class="input" id="settings-trash-dir" type="text" value="${escapeHTML(state.serverSettings.trash_dir || '')}">
-      </div>
+      </div>` : ''}
     </div>
   </section>
 
@@ -7045,14 +8622,14 @@ function renderSettingsContent() {
       ${renderSettingsToggle('settings-continue-last-video-position', '继续上次播放位置', state.continueLastVideoPosition)}
       ${renderSettingsToggle('settings-prefetch-neighbors', '预加载前后相邻媒体', state.experimentalPrefetchNeighbors)}
       <div class="settings-actions">
-        <button class="btn" id="settings-refresh-video-thumbs-btn">刷新视频缩略图</button>
-        <button class="btn" id="settings-playback-cache-btn" type="button">管理播放兼容缓存</button>
-        <button class="btn" id="settings-backfill-exif-btn" type="button">补录旧照片 EXIF</button>
+        ${canRunServerTasksUI ? `<button class="btn" id="settings-refresh-video-thumbs-btn">刷新视频缩略图</button>` : ''}
+        ${canRunServerTasksUI ? `<button class="btn" id="settings-playback-cache-btn" type="button">管理播放兼容缓存</button>` : ''}
+        ${canRunServerTasksUI ? `<button class="btn" id="settings-backfill-exif-btn" type="button">修正 EXIF 信息</button>` : ''}
       </div>
     </div>
   </section>
 
-  <section class="card settings-panel settings-panel-experimental">
+  ${showExperimentalSettings ? `<section class="card settings-panel settings-panel-experimental">
     <h3>实验性功能</h3>
     <p>这些功能还在打磨中，可能会继续调整行为，开启状态会写入 config.json。</p>
     <div class="settings-group">
@@ -7062,18 +8639,18 @@ function renderSettingsContent() {
         <span>支持 macOS Option + 1-6、Windows Alt + 1-6 切换到时间线、个人收藏、乱序相册、相册、回收站、设置。</span>
       </div>
     </div>
-  </section>
+  </section>` : ''}
 
-  <section class="card settings-panel settings-panel-update">
+  <section class="card settings-panel settings-panel-update${showExperimentalSettings ? '' : ' settings-panel-update-full'}">
     <h3>PWA 安装体验</h3>
-    <p>这些选择会保存在当前浏览器，用于后续生成 Web App manifest、安装图标与离线壳缓存策略。</p>
-    <div class="settings-group">
+    <p>这些选项会保存在当前浏览器，用来生成安装名称、图标和离线壳。</p>
+    <div class="settings-group settings-group-pwa">
       <div class="settings-control">
-        <label for="settings-pwa-name"><span>App 显示名</span><span>安装后显示在桌面或主屏幕</span></label>
+        <label for="settings-pwa-name"><span>App 显示名</span><span>安装后显示在桌面或主屏幕。</span></label>
         <input class="input" id="settings-pwa-name" type="text" value="${escapeHTML(pwa.name)}" placeholder="EchoGallery">
       </div>
       <div class="settings-control">
-        <label for="settings-pwa-icon-source"><span>图标来源</span><span>决定安装图标优先使用哪一套资源</span></label>
+        <label for="settings-pwa-icon-source"><span>图标来源</span><span>决定优先使用哪套图标资源。</span></label>
         <select class="input" id="settings-pwa-icon-source">
           <option value="favicon" ${pwa.iconSource === 'favicon' ? 'selected' : ''}>沿用当前 favicon</option>
           <option value="library" ${pwa.iconSource === 'library' ? 'selected' : ''}>使用当前资源库头像</option>
@@ -7081,18 +8658,18 @@ function renderSettingsContent() {
         </select>
       </div>
       <div class="settings-control">
-        <label for="settings-pwa-theme-mode"><span>主题色</span><span>用于安装窗口、启动页与浏览器主题栏</span></label>
+        <label for="settings-pwa-theme-mode"><span>主题色</span><span>用于启动页和浏览器主题栏。</span></label>
         <select class="input" id="settings-pwa-theme-mode">
           <option value="accent" ${pwa.themeMode === 'accent' ? 'selected' : ''}>跟随当前资源库主色</option>
           <option value="fixed" ${pwa.themeMode === 'fixed' ? 'selected' : ''}>使用固定颜色</option>
         </select>
       </div>
       <div class="settings-control">
-        <label for="settings-pwa-theme-color"><span>固定主题色</span><span>仅在选择固定颜色时使用</span></label>
+        <label for="settings-pwa-theme-color"><span>固定主题色</span><span>仅在固定颜色模式下生效。</span></label>
         <input class="input" id="settings-pwa-theme-color" type="color" value="${escapeHTML(pwa.themeColor)}" ${pwa.themeMode === 'fixed' ? '' : 'disabled'}>
       </div>
       <div class="settings-control">
-        <label for="settings-pwa-start-page"><span>启动页</span><span>安装后打开 EchoGallery 的默认入口</span></label>
+        <label for="settings-pwa-start-page"><span>启动页</span><span>决定安装后默认打开的入口。</span></label>
         <select class="input" id="settings-pwa-start-page">
           <option value="/" ${pwa.startPage === '/' ? 'selected' : ''}>主页 / 自动进入当前资源库</option>
           <option value="/login" ${pwa.startPage === '/login' ? 'selected' : ''}>登录页</option>
@@ -7100,7 +8677,7 @@ function renderSettingsContent() {
         </select>
       </div>
       <div class="settings-control">
-        <label for="settings-pwa-cache-strategy"><span>缓存策略</span><span>默认不缓存媒体原图与缩略图，避免浏览器缓存膨胀</span></label>
+        <label for="settings-pwa-cache-strategy"><span>缓存策略</span><span>控制离线壳缓存范围，不缓存媒体文件。</span></label>
         <select class="input" id="settings-pwa-cache-strategy">
           <option value="static-only" ${pwa.cacheStrategy === 'static-only' ? 'selected' : ''}>仅缓存前端静态资源</option>
           <option value="app-shell" ${pwa.cacheStrategy === 'app-shell' ? 'selected' : ''}>缓存 App 壳页面，API 优先走网络</option>
@@ -7113,37 +8690,55 @@ function renderSettingsContent() {
   <section class="card settings-panel settings-panel-app">
     <h3>应用配置</h3>
     <p>这些入口从侧边栏移动到这里，保持浏览界面更轻盈。</p>
-    <div class="settings-actions settings-app-actions">
-      <a class="btn" id="settings-github-btn" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} 项目仓库</a>
-      <button class="btn" id="theme-btn" type="button"><span class="theme-icon">${document.documentElement.dataset.theme === 'dark' ? icons.sun : icons.moon}</span> 模式切换</button>
-      <button class="btn" id="logout-btn" type="button">${icons.logout} 退出登录</button>
-      <button class="btn btn-danger" id="shutdown-btn" type="button">${icons.shutdown} 退出程序</button>
+    <div class="settings-actions settings-app-actions settings-app-actions-${canRunServerTasksUI ? '4' : '3'}">
+      <a class="btn" id="settings-github-btn" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} 仓库</a>
+      <button class="btn" id="theme-btn" type="button"><span class="theme-icon">${document.documentElement.dataset.theme === 'dark' ? icons.sun : icons.moon}</span> 深色</button>
+      <button class="btn" id="logout-btn" type="button">${icons.logout} 注销</button>
+      ${canRunServerTasksUI ? `<button class="btn btn-danger" id="shutdown-btn" type="button">${icons.shutdown} 退出</button>` : ''}
     </div>
   </section>
 
+  ${canManageSharesUI ? `
   <section class="card settings-panel settings-panel-share">
     <h3>分享链接</h3>
-    <p>这里集中查看、复制和删除当前账号创建的全部分享链接。</p>
+    ${hasShareLinks ? '<p>这里集中查看、复制和删除当前账号创建的全部分享链接。</p>' : ''}
     <div class="settings-group">
+      ${hasShareLinks ? `
       <div class="settings-control">
         <label><span>链接管理</span><span>删除后原链接会立刻失效</span></label>
         <div class="settings-share-list" id="settings-share-list">${renderSettingsShareRows()}</div>
-      </div>
+      </div>` : `<div class="settings-share-list" id="settings-share-list">${renderSettingsShareRows()}</div>`}
     </div>
   </section>
+  ` : ''}
 </div>`;
 
   syncActiveLibrarySelect();
-  $('#settings-thumbnail-dir').value = state.serverSettings.thumbnail_dir || '';
-  $('#settings-trash-dir').value = state.serverSettings.trash_dir || '';
+  if ($('#settings-thumbnail-dir')) $('#settings-thumbnail-dir').value = state.serverSettings.thumbnail_dir || '';
+  if ($('#settings-trash-dir')) $('#settings-trash-dir').value = state.serverSettings.trash_dir || '';
   $('#settings-player-keymap').value = state.playerKeymapSource || '';
   syncRangeProgress($('#content'));
 
-  $('#settings-add-library-btn').addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
-  syncLibraryBatchWorkflowPanel();
+  $('#settings-add-library-btn')?.addEventListener('click', () => openLibraryEditorModal(null, bindLibraryRow));
+  if (canAccessBatchWorkflowUI) syncLibraryBatchWorkflowPanel();
 
   function bindLibraryRow(row) {
+    addUniversalLongPress(row, async () => {
+      const libraryName = String(row.dataset.libraryName || $('.settings-library-name', row)?.value || '这个资源库').trim() || '这个资源库';
+      const confirmed = await appConfirm(`长按将立即切换到「${libraryName}」并重启，是否继续？`, {
+        title: '切换资源库',
+        confirmText: '切换',
+      });
+      if (!confirmed) return;
+      row._suppressNextClick = true;
+      setTimeout(() => { row._suppressNextClick = false; }, 280);
+      void switchLibraryRowImmediately(row);
+    });
     row.addEventListener('dragstart', e => {
+      if (row.dataset.libraryAvailable === 'false') {
+        e.preventDefault();
+        return;
+      }
       if (e.target.closest('button, input, textarea, select')) {
         e.preventDefault();
         return;
@@ -7206,27 +8801,8 @@ function renderSettingsContent() {
     });
     row.addEventListener('click', async e => {
       if (row._suppressNextClick) return;
-      if (e.target.closest('button, input, textarea, select, .settings-library-row-actions')) return;
-      const path = $('.settings-library-path', row)?.value.trim() || '';
-      if (!path) {
-        showToast('请先填写资源库路径');
-        return;
-      }
-      if ((row.dataset.libraryId || '') === (state.serverSettings.active_library_id || '') || path === (state.serverSettings.storage_path || '').trim()) return;
-      state.serverSettings.active_library_id = row.dataset.libraryId || '';
-      state.serverSettings.storage_path = path;
-      syncActiveLibrarySelect();
-      applyLibraryBranding();
-      setSettingsDirty();
-      showToast('资源库切换已暂存，保存后会自动重启生效');
-    });
-    $('.settings-library-edit', row)?.addEventListener('click', () => openLibraryEditorModal(row, bindLibraryRow));
-    $('.settings-library-remove', row).addEventListener('click', () => {
-      row.remove();
-      reindexLibrarySettingsRows();
-      syncActiveLibrarySelect();
-      applyLibraryBranding();
-      setSettingsDirty();
+      if (e.target.closest('button, input, textarea, select')) return;
+      openLibraryEditorModal(row, bindLibraryRow);
     });
     $$('.settings-library-name, .settings-library-path, .settings-library-accent', row).forEach(input => {
       input.addEventListener('input', () => {
@@ -7238,8 +8814,10 @@ function renderSettingsContent() {
     });
     buildLibraryLogoPreview(row);
   }
-  $$('.settings-library-row').forEach(bindLibraryRow);
-  reindexLibrarySettingsRows();
+  if (canManageLibrariesUI) {
+    $$('.settings-library-row').forEach(bindLibraryRow);
+    reindexLibrarySettingsRows();
+  }
   $('#settings-active-library')?.addEventListener('change', e => {
     const activeLibrary = resolveActiveLibrary(collectLibraryDrafts(), e.target.value, state.serverSettings.storage_path || '');
     state.serverSettings.active_library_id = activeLibrary && activeLibrary.id || '';
@@ -7248,8 +8826,8 @@ function renderSettingsContent() {
     setSettingsDirty();
   });
   $('#settings-port')?.addEventListener('input', () => setSettingsDirty());
-  $('#settings-thumbnail-dir').addEventListener('input', () => setSettingsDirty());
-  $('#settings-trash-dir').addEventListener('input', () => setSettingsDirty());
+  $('#settings-thumbnail-dir')?.addEventListener('input', () => setSettingsDirty());
+  $('#settings-trash-dir')?.addEventListener('input', () => setSettingsDirty());
   $('#settings-grid-gap').addEventListener('input', e => {
     setGridGap(e.target.value);
     $('#settings-grid-gap-value').textContent = `${state.gridGap}px`;
@@ -7260,7 +8838,7 @@ function renderSettingsContent() {
     $('#settings-thumb-radius-value').textContent = `${state.thumbRadius}px`;
     setSettingsDirty();
   });
-  $('#settings-low-resource-mode').addEventListener('change', e => {
+  $('#settings-low-resource-mode')?.addEventListener('change', e => {
     state.serverSettings.low_resource_mode = !!e.target.checked;
     setSettingsDirty();
   });
@@ -7291,26 +8869,29 @@ function renderSettingsContent() {
   });
   $('#settings-continue-last-video-position').addEventListener('change', e => { state.continueLastVideoPosition = !!e.target.checked; setSettingsDirty(); });
   $('#settings-prefetch-neighbors').addEventListener('change', e => { setExperimentalSetting('prefetchNeighbors', e.target.checked); setSettingsDirty(); });
-  void pollVideoThumbnailRefreshStatus();
-  $('#settings-refresh-video-thumbs-btn').addEventListener('click', () => {
+  if (canRunServerTasksUI) void pollVideoThumbnailRefreshStatus();
+  $('#settings-refresh-video-thumbs-btn')?.addEventListener('click', () => {
     openVideoThumbnailRefreshWorkflow();
   });
   $('#settings-playback-cache-btn')?.addEventListener('click', openPlaybackCacheModal);
-  $('#settings-backfill-exif-btn').addEventListener('click', async () => {
+  $('#settings-backfill-exif-btn')?.addEventListener('click', async () => {
     const btn = $('#settings-backfill-exif-btn');
     try {
-      const resp = await withButtonBusy(btn, '补录中…', () => backfillPhotoEXIF());
+      const resp = await withButtonBusy(btn, '修正中…', () => repairEXIFMetadata());
       const data = resp.result || {};
-      showToast(`EXIF 补录完成：扫描 ${data.scanned || 0} 张，写入 ${data.updated || 0} 张，跳过 ${data.skipped || 0} 张，失败 ${data.failed || 0} 张`, 4200);
+      showToast(`EXIF 信息修正完成：扫描 ${data.scanned || 0} 项，更新 ${data.updated || 0} 项，跳过 ${data.skipped || 0} 项，失败 ${data.failed || 0} 项`, 4200);
       if (data.errors && data.errors.length) {
-        alert(`以下文件补录失败：\n${data.errors.join('\n')}`);
+        alert(`以下媒体修正失败：\n${data.errors.join('\n')}`);
       }
       if (state.view === 'settings') renderSettingsContent();
     } catch (e) {
-      alert('EXIF 补录失败: ' + ((e && e.error) || e));
+      alert('EXIF 信息修正失败: ' + ((e && e.error) || e));
     }
   });
-  $('#settings-exp-restore-last-view').addEventListener('change', e => { setExperimentalSetting('restoreLastView', e.target.checked); setSettingsDirty(); });
+  const restoreLastViewToggle = $('#settings-exp-restore-last-view');
+  if (restoreLastViewToggle) {
+    restoreLastViewToggle.addEventListener('change', e => { setExperimentalSetting('restoreLastView', e.target.checked); setSettingsDirty(); });
+  }
   const syncPWASettings = () => {
     state.pwaSettings = normalizePWASettings({
       name: $('#settings-pwa-name')?.value,
@@ -7331,7 +8912,7 @@ function renderSettingsContent() {
   $('#settings-pwa-start-page')?.addEventListener('change', syncPWASettings);
   $('#settings-pwa-cache-strategy')?.addEventListener('change', syncPWASettings);
   $('#theme-btn')?.addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
-  void pollThumbnailBuildStatus();
+  if (canRunServerTasksUI) void pollThumbnailBuildStatus();
   $('#shutdown-btn')?.addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
   $('#logout-btn')?.addEventListener('click', e => { e.preventDefault(); logout(); });
   refreshShareManagementUI();
@@ -7380,15 +8961,16 @@ function bindTrashSelectionBarHandlers() {
 
 async function renderTimeline() {
   state.timelineAutoLoadPaused = false;
+  const writable = canWriteMedia();
   $('#topbar-title').textContent = '时间线';
   $('#topbar-leading').innerHTML = renderTimelineOrderControl();
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '张已选',
-    extraAction: `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>`,
+    extraAction: writable ? `<button class="btn btn-sm" id="delete-sel-btn">${icons.trash} 删除</button>` : '',
   }) + `<span class="timeline-jump-status" id="timeline-jump-status" hidden></span>` + renderMediaKindFilterControl();
-  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'timeline-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部' })}${renderTopbarGlassButton({ id: 'upload-btn', icon: icons.topbarUpload, label: '上传', variant: 'accent' })}</div>`;
+  $('#topbar-actions').innerHTML = `<div class="topbar-action-group">${renderTopbarGlassButton({ id: 'timeline-load-all-btn', icon: icons.topbarLoadAll, label: '加载全部' })}${writable ? renderTopbarGlassButton({ id: 'upload-btn', icon: icons.topbarUpload, label: '上传', variant: 'accent' }) : ''}</div>`;
   bindMediaKindFilterControl();
-  bindSelectionBarHandlers({ extraButtonID: 'delete-sel-btn', extraAction: deleteSelected });
+  bindSelectionBarHandlers({ extraButtonID: writable ? 'delete-sel-btn' : '', extraAction: writable ? deleteSelected : null });
   $('#timeline-order-btn').addEventListener('click', () => {
     state.timelineOrder = state.timelineOrder === 'asc' ? 'desc' : 'asc';
     localStorage.setItem(timelineOrderStorageKey, state.timelineOrder);
@@ -7401,7 +8983,7 @@ async function renderTimeline() {
     switchView('timeline');
   });
   $('#timeline-load-all-btn').addEventListener('click', openTimelineLoadAllModal);
-  $('#upload-btn').addEventListener('click', openUploadModal);
+  $('#upload-btn')?.addEventListener('click', openUploadModal);
 
   $('#content').innerHTML = `
 <div id="timeline-wrap"></div>
@@ -7511,8 +9093,8 @@ async function fetchTimelinePage(cursor, limit, signal) {
   });
   appendMediaKindParam(params);
   if (cursor) params.set('cursor', cursor);
-  const response = await fetch(`/api/media?${params.toString()}`, { signal });
-  if (!response.ok) throw await response.json();
+  const response = await fetchWithPageSession(`/api/media?${params.toString()}`, { signal });
+  if (!response.ok) throw await buildAPIError(response);
   return response.json();
 }
 
@@ -7588,29 +9170,34 @@ async function loadAllTimelinePhotos() {
 }
 
 async function renderFavorites() {
+  const writable = canWriteMedia();
   $('#topbar-title').textContent = '个人收藏';
   $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
     renderTopbarGlassButton({ id: 'download-all-favorites-btn', icon: icons.topbarDownloadFavorites, label: '下载全部收藏', variant: 'accent' }),
   ]);
   $('#topbar-meta').innerHTML = renderSelectionBarMarkup({
     countLabel: '条已选',
-    extraAction: `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.dislike || icons.favorite} 取消喜欢</button>`,
+    extraAction: writable ? `<button class="btn btn-sm" id="unfavorite-sel-btn">${icons.dislike || icons.favorite} 取消喜欢</button>` : '',
   }) + renderMediaKindFilterControl();
   $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
-  bindSelectionBarHandlers({ extraButtonID: 'unfavorite-sel-btn', extraAction: unfavoriteSelected });
+  bindSelectionBarHandlers({ extraButtonID: writable ? 'unfavorite-sel-btn' : '', extraAction: writable ? unfavoriteSelected : null });
 
   $('#content').innerHTML = `
 <div id="favorite-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>加载中…</div>`;
   $('#download-all-favorites-btn').addEventListener('click', () => {
-    downloadAllFavorites();
+    void confirmDownloadAction('确定要下载全部个人收藏吗？', () => {
+      void downloadAllFavorites();
+    });
   });
 
   await loadShareMap();
   if (state.favoriteLoaded) {
     appendFavoriteGrid(state.favoritePhotos);
+    requestVisibleThumbnailWarmup('favorites', state.favoritePhotos);
     updateFavoriteTotalHint();
+    updateLoadMoreUI('load-more', state.favoriteHasMore);
     observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
     restoreViewScroll('favorites');
     return;
@@ -7692,6 +9279,7 @@ function appendFavoriteGrid(newPhotos) {
   if (!container) return;
   if (state.favoritePhotos.length === 0 && newPhotos.length === 0) {
     container.innerHTML = `<div class="empty">${icons.favorite}<p>还没有加入个人收藏的媒体</p></div>`;
+    updateLoadMoreUI('load-more', false);
     return;
   }
   if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
@@ -7742,14 +9330,16 @@ async function loadMoreFavorites() {
     const query = params.toString();
     const url = '/api/media/favorites' + (query ? `?${query}` : '');
     const page = await api.get(url);
-    state.favoriteTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.favoritePhotos.length + (page.photos || []).length;
+    const photos = page.photos || [];
+    state.favoriteTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.favoritePhotos.length + photos.length;
     updateFavoriteTotalHint();
-    state.favoritePhotos.push(...(page.photos || []));
+    state.favoritePhotos.push(...photos);
     sortFavoritePhotosInPlace();
     state.favoriteCursor = page.next_cursor || '';
     state.favoriteHasMore = page.has_more || false;
     state.favoriteLoaded = true;
     rerenderFavoriteGrid();
+    requestVisibleThumbnailWarmup('favorites', photos);
   } catch (e) {
     console.error(e);
   } finally {
@@ -7867,15 +9457,41 @@ function requiresBrowserPlaybackConversion(photo) {
 }
 
 function mediaThumbURL(photo) {
-  return `/media/thumbnails/${photo.uuid}`;
+  if (!photo) return '';
+  const preferred = isVideoMedia(photo)
+    ? (photo.poster_url || photo.thumbnail_url)
+    : photo.thumbnail_url;
+  return withPageSessionURL(preferred || `/media/thumbnails/${photo.uuid}`);
 }
 
 function mediaFileURL(photo) {
-  return isVideoMedia(photo) ? `/media/files/${photo.uuid}` : `/media/photos/${photo.uuid}`;
+  if (photo && photo.file_url) return withPageSessionURL(photo.file_url);
+  return withPageSessionURL(isVideoMedia(photo) ? `/media/files/${photo.uuid}` : `/media/photos/${photo.uuid}`);
 }
 
 function mediaPlaybackURL(photo) {
-  return isVideoMedia(photo) ? `/media/playback/${photo.uuid}` : mediaFileURL(photo);
+  if (photo && photo.playback_url) return withPageSessionURL(photo.playback_url);
+  return withPageSessionURL(isVideoMedia(photo) ? `/media/playback/${photo.uuid}` : mediaFileURL(photo));
+}
+
+function shouldAutoplayVideoInLightbox(photo) {
+  if (!photo || !isVideoMedia(photo)) return false;
+  return !!(state.slideshowPlaying || state.experimentalAutoplayVideo || isWindowsClient());
+}
+
+function mediaThumbURLFromUUID(uuid) {
+  return withPageSessionURL(`/media/thumbnails/${uuid}`);
+}
+
+function stableMediaPlaceholderColor(photo) {
+  if (photo && photo.dominant_color) return String(photo.dominant_color);
+  const seed = String((photo && (photo.uuid || photo.original_name || photo.id)) || 'echogallery');
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue} 20% 82%)`;
 }
 
 function videoFormatLabel(photo) {
@@ -7990,6 +9606,14 @@ function formatExifOrientation(value) {
     default: return `方向 ${compactExifValue(value) || '—'}`;
   }
 }
+function formatExifLocation(exif) {
+  const address = compactExifValue(exif && (exif.location_address || exif.address));
+  if (address) return address;
+  if (exif && exif.has_gps && Number.isFinite(Number(exif.latitude)) && Number.isFinite(Number(exif.longitude))) {
+    return `${Number(exif.latitude).toFixed(5)}, ${Number(exif.longitude).toFixed(5)}`;
+  }
+  return '';
+}
 function buildExifInfoItems(photo) {
   const exif = photo && photo.exif;
   if (!exif || typeof exif !== 'object') return [];
@@ -8001,9 +9625,8 @@ function buildExifInfoItems(photo) {
   if (Number(exif.iso_speed) > 0) items.push([icons.exifISO, 'ISO', String(Number(exif.iso_speed))]);
   if (compactExifValue(exif.focal_length)) items.push([icons.exifFocal, '焦距', formatExifFocalLength(exif.focal_length)]);
   if (Number(exif.orientation) > 0) items.push([icons.exifOrientation, '方向', formatExifOrientation(exif.orientation)]);
-  if (exif.has_gps && Number.isFinite(Number(exif.latitude)) && Number.isFinite(Number(exif.longitude))) {
-    items.push([icons.exifGPS, 'GPS', `${Number(exif.latitude).toFixed(5)}, ${Number(exif.longitude).toFixed(5)}`]);
-  }
+  const location = formatExifLocation(exif);
+  if (location) items.push([icons.exifGPS, '位置', location]);
   return items;
 }
 
@@ -8055,7 +9678,7 @@ function buildLightboxInfoItems(photo) {
   const base = [
     [isVideoMedia(photo) ? icons.mediaVideo : icons.mediaImage, '类型', isVideoMedia(photo) ? '视频' : '图片'],
     [icons.infoMime, 'MIME', photo.mime_type],
-    [icons.infoDate, '拍摄时间', formatDateTime(photo.taken_at)],
+    [icons.infoDate, '拍摄时间', formatMediaDateTime(photo.taken_at)],
     [icons.infoDimensions, '尺寸', photo.width && photo.height ? `${photo.width} × ${photo.height}` : ''],
     [icons.infoFileSize, '大小（MB）', formatSizeMB(photo.size)],
   ];
@@ -8086,7 +9709,7 @@ function retryThumbnailLoad(imageEl, photo) {
     return;
   }
   imageEl.dataset.thumbRetryAttempt = String(attempt + 1);
-  const nextURL = `${mediaThumbURL(photo)}?r=${Date.now()}`;
+  const nextURL = appendURLParam(mediaThumbURL(photo), 'r', String(Date.now()));
   imageEl.closest('.photo-thumb')?.classList.add('thumb-loading');
   window.setTimeout(() => {
     if (!document.body.contains(imageEl)) return;
@@ -8128,10 +9751,13 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const div = el('div', 'photo-thumb');
   div.dataset.id = photo.id;
   div.dataset.kind = photo.media_kind || 'image';
+  div.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
   div.classList.add('thumb-loading');
 
+  const isDebugMedia = isRootDebugMedia(photo);
+  const thumbListRef = Array.isArray(listRef) ? listRef : [photo];
   const isShared = !!state.shareMap[`photo:${photo.id}`];
-  const favoriteToggle = opts.trashMode
+  const favoriteToggle = opts.trashMode || opts.disableFavorite || !canWriteMedia() || isDebugMedia
     ? ''
     : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}${photo.is_super_favorite ? ' super-active' : ''}" type="button" aria-label="${escapeHTML(favoriteLabelForPhoto(photo))}" title="${escapeHTML(favoriteLabelForPhoto(photo))}">${favoriteIconForPhoto(photo)}</button>`;
   const shareBadge = isShared
@@ -8149,7 +9775,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const imageEl = div.querySelector('img');
   if (imageEl) {
     imageEl.addEventListener('load', () => {
-      requestAnimationFrame(() => div.classList.remove('thumb-loading', 'thumb-load-failed'));
+      requestAnimationFrame(() => requestAnimationFrame(() => div.classList.remove('thumb-loading', 'thumb-load-failed')));
       delete imageEl.dataset.thumbFailed;
     });
   }
@@ -8161,10 +9787,14 @@ function makePhotoThumb(photo, listRef, opts = {}) {
 
   // b-1: 点击 .check 区域直接进入/切换选择模式
   const checkEl = div.querySelector('.check');
-  checkEl.addEventListener('click', e => {
-    e.stopPropagation();
-    toggleSelect(photo.id, div, { event: e, listRef });
-  });
+  if (opts.disableSelection || isDebugMedia) {
+    checkEl.remove();
+  } else {
+    checkEl.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleSelect(photo.id, div, { event: e, listRef: thumbListRef });
+    });
+  }
   const favoriteEl = div.querySelector('.favorite-toggle');
   if (favoriteEl) {
     favoriteEl.addEventListener('click', async e => {
@@ -8180,7 +9810,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   if (isVideoMedia(photo)) requestVideoPlaybackIndicatorSync(photo);
   const photoIndex = Array.isArray(listRef) ? listRef.indexOf(photo) : -1;
   const warmIntent = () => {
-    if (photoIndex >= 0) prefetchPhotosForLightboxIntent(listRef, photoIndex);
+    if (photoIndex >= 0) prefetchPhotosForLightboxIntent(thumbListRef, photoIndex);
   };
   div.addEventListener('pointerenter', warmIntent, { passive: true });
   div.addEventListener('focusin', warmIntent);
@@ -8189,13 +9819,18 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   div.addEventListener('click', e => {
     setFocusedPhoto(photo.id, { scroll: false });
     if (opts.trashMode) {
-      openLightbox(listRef, listRef.indexOf(photo));
+      openLightbox(thumbListRef, thumbListRef.indexOf(photo));
+      return;
+    }
+    if (isDebugMedia) {
+      openLightbox(thumbListRef, thumbListRef.indexOf(photo), { returnView: 'settings', debugControls: true });
       return;
     }
     if (state.selected.size > 0) {
-      toggleSelect(photo.id, div, { event: e, listRef });
+      if (opts.disableSelection) return;
+      toggleSelect(photo.id, div, { event: e, listRef: thumbListRef });
     } else {
-      openLightbox(listRef, listRef.indexOf(photo));
+      openLightbox(thumbListRef, thumbListRef.indexOf(photo));
     }
   });
 
@@ -8205,7 +9840,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
     setFocusedPhoto(photo.id, { scroll: false });
     const menuOptions = { mobile: isTouchLikeDevice() };
     if (opts.trashMode) showTrashContextMenu(e.clientX, e.clientY, photo, menuOptions);
-    else showPhotoContextMenu(e.clientX, e.clientY, photo, div, listRef, menuOptions);
+    else if (!isDebugMedia) showPhotoContextMenu(e.clientX, e.clientY, photo, div, thumbListRef, menuOptions);
   });
 
   // c-3: 长按触发操作菜单（移动端）
@@ -8290,6 +9925,7 @@ function findKnownPhotoByID(id) {
     state.albumPhotos,
     state.trashPhotos,
     state.memoryPhotos,
+    state.searchResults,
   ];
   for (const pool of pools) {
     const found = (pool || []).find(photo => Number(photo && photo.id) === targetID);
@@ -8319,7 +9955,7 @@ function refreshVisiblePendingThumbnails(force = false) {
     imageEl.dataset.thumbRetryAttempt = '0';
     thumb.classList.add('thumb-loading');
     thumb.classList.remove('thumb-load-failed');
-    imageEl.src = `${mediaThumbURL(photo)}?live=${now}-${photo.id}`;
+    imageEl.src = appendURLParam(mediaThumbURL(photo), 'live', `${now}-${photo.id}`);
   });
 }
 
@@ -8349,7 +9985,9 @@ function openFocusedPhoto() {
 }
 
 function findPhotoThumb(id) {
-  return document.querySelector(`.photo-thumb[data-id="${id}"]`);
+  const matches = Array.from(document.querySelectorAll(`.photo-thumb[data-id="${id}"]`));
+  if (!matches.length) return null;
+  return matches.find(node => node.offsetParent !== null) || matches[0];
 }
 
 function currentLoadedPreviewURLForPhoto(photo) {
@@ -8360,6 +9998,61 @@ function currentLoadedPreviewURLForPhoto(photo) {
     return image.currentSrc || image.src || '';
   }
   return '';
+}
+
+function lightboxDismissPhotoThumbRect(photo = state.lightboxPhotos[state.lightboxIndex]) {
+  if (!photo || !photo.id) return null;
+  const thumb = findPhotoThumb(photo.id);
+  if (!thumb) return null;
+  const rect = thumb.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  const style = getComputedStyle(thumb);
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    borderRadius: style.borderRadius || '0px',
+  };
+}
+
+function currentLightboxMediaRect() {
+  const media = currentLightboxMediaElement();
+  if (!media || media.classList.contains('hidden')) return null;
+  const rect = media.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function setLightboxDismissFade(progress) {
+  const lightbox = $('#lightbox');
+  if (!lightbox) return;
+  const next = clampLightboxValue(Number(progress) || 0, 0, 1);
+  lightbox.style.setProperty('--lightbox-dismiss-fade-progress', next.toFixed(4));
+}
+
+function clearLightboxDismissFade() {
+  $('#lightbox')?.style.removeProperty('--lightbox-dismiss-fade-progress');
+}
+
+function activeLightboxDismissProxy() {
+  return false;
+}
+
+function updateLightboxDismissProxy(translateY, scale = 1) {
+  return;
+}
+
+function resetLightboxDismissProxy() {
+  state.lightboxDismissProxyActive = false;
+  state.lightboxDismissProxyRect = null;
+  state.lightboxDismissProxySourceRect = null;
+  state.lightboxDismissProxyTargetRect = null;
 }
 
 function compactContextMenuItems(items) {
@@ -8379,8 +10072,16 @@ function compactContextMenuItems(items) {
 function filterPhotoContextMenuItemsForDevice(items, options = {}) {
   const mobile = !!options.mobile;
   const lightbox = !!options.lightbox;
-  if (!mobile) return compactContextMenuItems(items);
-  return compactContextMenuItems((items || []).filter(item => {
+  const filtered = (items || []).filter(item => {
+    if (item === '-') return true;
+    if (!item) return false;
+    if (!canWriteMedia() && ['favorite', 'share', 'delete', 'convert-playback'].includes(item.role)) return false;
+    if (!canEditBookmarks() && ['bookmark'].includes(item.role)) return false;
+    if (!canManageLibraries() && item.role === 'reveal') return false;
+    return true;
+  });
+  if (!mobile) return compactContextMenuItems(filtered);
+  return compactContextMenuItems(filtered.filter(item => {
     if (item === '-') return true;
     if (!item) return false;
     if (['select', 'view', 'share'].includes(item.role)) return false;
@@ -8401,7 +10102,7 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     { role: 'timeline', icon: icons.contextTimeline, label: '在时间线中查看', action: () => openInTimeline(photo.id) },
     { role: 'favorite', icon: favoriteIcon || icons.contextFavorite, label: favoriteLabel, action: favoriteAction },
     { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
-    { role: 'download', icon: icons.contextDownload, label: '下载', action: () => confirmDownloadAction('确定要下载这个媒体吗？', () => triggerDownload(`/api/media/${photo.id}/download`)) },
+    { role: 'download', icon: icons.contextDownload, label: singleMediaSaveLabel(), action: () => confirmDownloadAction(`确定要${singleMediaSaveLabel()}这个媒体吗？`, () => saveOrDownloadMedia(photo)) },
   ];
   if (requiresBrowserPlaybackConversion(photo)) {
     const converted = playbackCacheExistsForPhoto(photo);
@@ -8452,6 +10153,7 @@ async function showPhotoContextMenu(x, y, photo, thumbEl, listRef, options = {})
 async function showCurrentLightboxContextMenu() {
   const photo = state.lightboxPhotos[state.lightboxIndex];
   if (!photo) return;
+  if (isRootDebugMedia(photo)) return;
   const button = $('#lb-more');
   const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 64, right: window.innerWidth - 18, top: 32, bottom: 84, width: 46, height: 52 };
   await showPhotoContextMenu(rect.right, rect.bottom, photo, findPhotoThumb(photo.id), state.lightboxPhotos, {
@@ -8480,20 +10182,13 @@ function renderVideoBookmarkMenuContent(photo, video) {
         const label = bookmark
           ? `${bookmark.name || `书签 ${slot}`} · ${timeText}`
           : `书签 ${slot} · 点击保存当前时间`;
-        if (!bookmark) {
-          return `
-            <button type="button" class="lightbox-bookmark-jump lightbox-bookmark-jump-standalone" data-video-bookmark-slot="${slot}" title="${escapeHTML(label)}">
-              <span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span>
-              <span class="lightbox-bookmark-text">${escapeHTML(label)}</span>
-            </button>`;
-        }
         return `
-          <div class="lightbox-bookmark-row" data-slot="${slot}">
+          <div class="lightbox-bookmark-row${bookmark ? '' : ' is-empty'}" data-slot="${slot}">
             <button type="button" class="lightbox-bookmark-jump" data-video-bookmark-slot="${slot}" title="${escapeHTML(label)}">
               <span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span>
               <span class="lightbox-bookmark-text">${escapeHTML(label)}</span>
             </button>
-            <button type="button" class="btn-icon lightbox-bookmark-delete" data-video-bookmark-delete="${slot}" aria-label="删除书签 ${slot}" title="删除书签 ${slot}">${icons.contextDelete}</button>
+            <button type="button" class="btn-icon lightbox-bookmark-delete" data-video-bookmark-delete="${slot}" aria-label="删除书签 ${slot}" title="删除书签 ${slot}" ${bookmark ? '' : 'disabled'}>${icons.contextDelete}</button>
           </div>`;
       }).join('')}
     </div>`;
@@ -8506,6 +10201,7 @@ function refreshVideoBookmarkMenu() {
   menu.innerHTML = renderVideoBookmarkMenuContent(photo, video);
 }
 function showVideoBookmarkMenu() {
+  if (!canEditBookmarks()) return;
   const photo = state.lightboxPhotos[state.lightboxIndex];
   const video = $('#lb-video');
   if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) return;
@@ -8528,11 +10224,12 @@ function showVideoBookmarkMenu() {
 
 // 回收站图片右键菜单 (b-4)
 function showTrashContextMenu(x, y, photo, options = {}) {
+  const writable = canWriteMedia();
   const items = [
-    options.mobile ? null : { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
+    (options.mobile || !canManageLibraries()) ? null : { icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     '-',
-    { icon: icons.contextRestore, label: '恢复到时间线', action: () => restorePhoto(photo.id) },
-    { icon: icons.contextDelete, label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) },
+    writable ? { icon: icons.contextRestore, label: '恢复到时间线', action: () => restorePhoto(photo.id) } : null,
+    writable ? { icon: icons.contextDelete, label: '永久删除', danger: true, action: () => hardDeleteSinglePhoto(photo.id) } : null,
   ];
   showContextMenu(x, y, compactContextMenuItems(items), options);
 }
@@ -8548,10 +10245,10 @@ function albumContextMenuItems(album, options = {}) {
     items.push({ role: 'view', icon: icons.contextView, label: '查看', action: () => openAlbumDetail(album) });
   }
   items.push(
-    { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealAlbumInFinder(album.id) },
+    canManageLibraries() ? { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealAlbumInFinder(album.id) } : null,
     { role: 'download', icon: icons.albumContextDownload, label: '下载', action: () => confirmDownloadAction('确定要下载这个相册吗？', () => triggerDownload(`/api/media/albums/${album.id}/download`)) },
   );
-  if (!mobile) return items;
+  if (!mobile) return compactContextMenuItems(items);
   return compactContextMenuItems(items.filter(item => item.role !== 'view'));
 }
 
@@ -8595,6 +10292,8 @@ function updatePhotoFavoriteInCollections(photoId, favorite, superFavorite = fal
     state.albumPhotos,
     state.trashPhotos,
     state.lightboxPhotos,
+    state.memoryPhotos,
+    state.searchResults,
   ];
   collections.forEach(list => {
     if (!Array.isArray(list)) return;
@@ -8602,6 +10301,44 @@ function updatePhotoFavoriteInCollections(photoId, favorite, superFavorite = fal
       if (photo && photo.id === photoId) applyFavoriteStateToPhoto(photo, favorite, superFavorite);
     });
   });
+}
+
+function sortFavoritePhotosInPlace() {
+  state.favoritePhotos.sort((a, b) => {
+    const superDiff = Number(!!b.is_super_favorite) - Number(!!a.is_super_favorite);
+    if (superDiff !== 0) return superDiff;
+    const takenA = a && a.taken_at ? new Date(a.taken_at).getTime() : 0;
+    const takenB = b && b.taken_at ? new Date(b.taken_at).getTime() : 0;
+    if (takenA !== takenB) return takenB - takenA;
+    return Number(b && b.id) - Number(a && a.id);
+  });
+}
+
+function syncFavoritePhotoList(photoId, favorite, superFavorite = false, sourcePhoto = null) {
+  const existingIndex = state.favoritePhotos.findIndex(photo => Number(photo && photo.id) === Number(photoId));
+  if (!favorite) {
+    if (existingIndex >= 0) {
+      state.favoritePhotos.splice(existingIndex, 1);
+      if (state.favoriteLoaded) {
+        state.favoriteTotal = Math.max(0, (state.favoriteTotal || 0) - 1);
+        updateFavoriteTotalHint();
+      }
+    }
+    return;
+  }
+  if (existingIndex >= 0) {
+    applyFavoriteStateToPhoto(state.favoritePhotos[existingIndex], favorite, superFavorite);
+    sortFavoritePhotosInPlace();
+    if (state.favoriteLoaded) updateFavoriteTotalHint();
+    return;
+  }
+  if (!state.favoriteLoaded || !sourcePhoto) return;
+  const favoritePhoto = { ...sourcePhoto };
+  applyFavoriteStateToPhoto(favoritePhoto, favorite, superFavorite);
+  state.favoritePhotos.push(favoritePhoto);
+  sortFavoritePhotosInPlace();
+  state.favoriteTotal = Math.max(0, Number(state.favoriteTotal) || 0) + 1;
+  updateFavoriteTotalHint();
 }
 
 function updateFavoriteButtonsInDOM(photoId, favorite, superFavorite = false, { animateButton = null } = {}) {
@@ -8696,8 +10433,15 @@ async function setPhotoFavorite(photoId, favorite, superFavorite = false) {
 
 function updateLightboxFavoriteButton(photo) {
   const favoriteBtn = $('#lb-favorite');
-  if (!favoriteBtn || !photo) return;
+  if (!favoriteBtn) return;
+  favoriteBtn.classList.toggle('hidden', !canWriteMedia() || isRootDebugMedia(photo));
+  if (!photo || !canWriteMedia() || isRootDebugMedia(photo)) return;
   syncFavoriteButtonState(favoriteBtn, photo);
+}
+function syncLightboxShareButton() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  $('#lb-share')?.classList.toggle('hidden', !canManageShareLinks() || isRootDebugMedia(photo));
+  $('#lb-more')?.classList.toggle('hidden', isRootDebugMedia(photo));
 }
 
 function favoriteToastForTransition(next, photo) {
@@ -8709,6 +10453,7 @@ function favoriteToastForTransition(next, photo) {
 }
 
 async function toggleFavorite(photo, { mode = 'click', sourceButton = null } = {}) {
+  if (!canWriteMedia()) return forbidVisitorAction();
   const next = mode === 'hold'
     ? alternateFavoriteStateForPhoto(photo)
     : nextFavoriteStateForPhoto(photo, { context: state.view });
@@ -8719,6 +10464,7 @@ async function toggleFavorite(photo, { mode = 'click', sourceButton = null } = {
     await setPhotoFavorite(photo.id, nextFavorite, nextSuperFavorite);
     const knownPhoto = findKnownPhotoByID(photo.id) || photo;
     applyFavoriteStateToPhoto(knownPhoto, nextFavorite, nextSuperFavorite);
+    syncFavoritePhotoList(photo.id, nextFavorite, nextSuperFavorite, knownPhoto);
     updateFavoriteButtonsInDOM(photo.id, nextFavorite, nextSuperFavorite, {
       animateButton: mode === 'hold' ? sourceButton : null,
     });
@@ -8736,16 +10482,18 @@ async function toggleFavorite(photo, { mode = 'click', sourceButton = null } = {
     if (state.view === 'favorites' && (next.kind === 'upgrade' || next.kind === 'downgrade')) rerenderFavoriteGrid();
     showToast(favoriteToastForTransition(next, knownPhoto));
   } catch (e) {
-    alert('操作失败: ' + ((e && e.error) || e));
+    showToast('操作失败: ' + ((e && e.error) || e), 3200);
   }
 }
 
 async function unfavoriteSelected() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!state.selected.size) return;
   const ids = [...state.selected];
   for (const id of ids) {
     try {
       await setPhotoFavorite(id, false);
+      syncFavoritePhotoList(id, false, false);
     } catch (e) {
       console.error('取消收藏失败:', id, e);
     }
@@ -8755,19 +10503,21 @@ async function unfavoriteSelected() {
 }
 
 async function deleteSinglePhoto(photoId) {
-  if (!confirm('确定要将这个媒体移到回收站吗？')) return;
+  if (!canWriteMedia()) return forbidVisitorAction();
+  if (!(await appConfirm('确定要将这个媒体移到回收站吗？', { danger: true }))) return;
   try {
     await api.del(`/api/media/${photoId}`);
     removeDeletedPhotosFromUI([photoId]);
     showToast('已移入回收站');
   }
-  catch(e) { alert('删除失败: ' + (e.error || e)); }
+  catch(e) { showToast('删除失败: ' + (e.error || e), 3200); }
 }
 
 async function hardDeleteSinglePhoto(photoId) {
-  if (!confirm('确定要永久删除这条照片/视频吗？此操作不可恢复。')) return;
+  if (!canWriteMedia()) return forbidVisitorAction();
+  if (!(await appConfirm('确定要永久删除这条照片/视频吗？此操作不可恢复。', { danger: true }))) return;
   try { await api.del(`/api/trash/${photoId}`); switchView('trash'); }
-  catch(e) { alert('删除失败: ' + (e.error || e)); }
+  catch(e) { showToast('删除失败: ' + (e.error || e), 3200); }
 }
 
 // ── 选择 ─────────────────────────────────────────────
@@ -8858,8 +10608,9 @@ function selectAllInGroup(groupEl) {
   updateTrashSelBar();
 }
 async function deleteSelected() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!state.selected.size) return;
-  if (!confirm(`确定要将选中的 ${state.selected.size} 条媒体移到回收站吗？`)) return;
+  if (!(await appConfirm(`确定要将选中的 ${state.selected.size} 条媒体移到回收站吗？`, { danger: true }))) return;
   const ids = [...state.selected];
   const deleted = [];
   const failed = [];
@@ -8993,8 +10744,9 @@ function openInAlbum(album, photoId) {
   openAlbumDetail(album);
 }
 
-async function focusPendingTimelinePhoto() {
+async function focusPendingTimelinePhoto(options = {}) {
   if (!state.pendingTimelinePhotoID) return false;
+  const skipScroll = !!options.skipScroll;
   const photoId = state.pendingTimelinePhotoID;
   const token = ++state.timelineJumpToken;
   setTimelineJumpStatus('正在时间线中定位媒体，可能需要继续加载…');
@@ -9027,7 +10779,7 @@ async function focusPendingTimelinePhoto() {
     showToast('目标媒体暂未在当前时间线中找到');
     return false;
   }
-  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  if (!skipScroll) thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
   thumb.classList.add('photo-thumb-focus');
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
   setTimelineJumpStatus('');
@@ -9069,6 +10821,7 @@ async function ensureAlbumsLoaded() {
   if (state.albumsLoaded && Array.isArray(state.albums)) return state.albums;
   state.albums = await api.get('/api/media/albums');
   state.albumsLoaded = true;
+  clearAlbumChildrenIndex();
   return state.albums;
 }
 
@@ -9129,12 +10882,9 @@ function compareAlbumsByPath(a, b) {
 
 function albumChildrenForParent(parentPath = '') {
   const target = normalizeAlbumPath(parentPath);
-  return (state.albums || [])
-    .filter(album => {
-      if (!isFolderAlbum(album)) return false;
-      return albumParentPath(album) === target;
-    })
-    .sort(compareAlbumsByPath);
+  const index = buildAlbumChildrenIndex();
+  const children = index.get(target) || [];
+  return children.slice().sort(compareAlbumsByPath);
 }
 
 function albumSiblingList(album = state.currentAlbum) {
@@ -9144,11 +10894,29 @@ function albumSiblingList(album = state.currentAlbum) {
 
 function albumDirectChildCount(album) {
   if (!album || !isFolderAlbum(album)) return 0;
-  return albumChildrenForParent(folderAlbumPath(album)).length;
+  const index = buildAlbumChildrenIndex();
+  return (index.get(folderAlbumPath(album)) || []).length;
 }
 
 function albumItemCount(album) {
   return Math.max(0, Number(album && album.photo_count) || 0) + albumDirectChildCount(album);
+}
+
+function buildAlbumChildrenIndex() {
+  if (state.albumChildrenIndex) return state.albumChildrenIndex;
+  const index = new Map();
+  for (const album of state.albums || []) {
+    if (!isFolderAlbum(album)) continue;
+    const parent = albumParentPath(album);
+    if (!index.has(parent)) index.set(parent, []);
+    index.get(parent).push(album);
+  }
+  state.albumChildrenIndex = index;
+  return index;
+}
+
+function clearAlbumChildrenIndex() {
+  state.albumChildrenIndex = null;
 }
 
 function findAlbumByPath(path = '') {
@@ -9180,7 +10948,7 @@ function makeAlbumCard(album) {
   const card = el('div', `album-card album-card-${albumKind}${state.albumViewMode === 'list' ? ' list' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const coverHtml = album.cover_uuid
-    ? `<img loading="lazy" src="/media/thumbnails/${album.cover_uuid}" alt="${escapeHTML(title)}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
+    ? `<img loading="lazy" src="${mediaThumbURLFromUUID(album.cover_uuid)}" alt="${escapeHTML(title)}" onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'">`
     : `<div class="album-cover-empty">${icons.photo}</div>`;
   card.innerHTML = `
 	<div class="album-cover">${coverHtml}</div>
@@ -9340,6 +11108,7 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
   }
   if (state.albumDetailLoadedKey === detailStateKey && !hasPendingAlbumFocus) {
     renderAlbumGroups(state.albumPhotos);
+    requestVisibleThumbnailWarmup(`album:${album.id}`, state.albumPhotos);
     updateLoadMoreUI('load-more', state.albumHasMore);
     observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
     maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
@@ -9375,23 +11144,25 @@ function syncAlbumState(updatedAlbum) {
   state.albums = (state.albums || []).map(album => (
     Number(album.id) === targetID ? { ...album, ...updatedAlbum } : album
   ));
+  clearAlbumChildrenIndex();
   if (state.currentAlbum && Number(state.currentAlbum.id) === targetID) {
     state.currentAlbum = { ...state.currentAlbum, ...updatedAlbum };
   }
 }
 async function deleteAlbum(album) {
   if (!album) return;
-  if (!confirm(`确定要删除相册「${album.name}」吗？照片/视频本身不会被删除。`)) return;
+  if (!(await appConfirm(`确定要删除相册「${album.name}」吗？照片/视频本身不会被删除。`, { danger: true }))) return;
   try {
 	await api.del(`/api/media/albums/${album.id}`);
     state.albums = (state.albums || []).filter(item => Number(item.id) !== Number(album.id));
+    clearAlbumChildrenIndex();
     state.currentAlbum = null;
     state.currentAlbumID = null;
     state.lastAlbumDetailID = null;
     showToast('已删除相册');
     switchView('albums');
   } catch (e) {
-    alert('删除相册失败: ' + (e.error || e));
+    showToast('删除相册失败: ' + (e.error || e), 3200);
   }
 }
 async function loadMoreAlbumPhotos() {
@@ -9406,10 +11177,12 @@ async function loadMoreAlbumPhotos() {
 		const query = params.toString();
 		const url = `/api/media/albums/${id}` + (query ? `?${query}` : '');
 		const page = await api.get(url);
-    state.albumPhotos.push(...(page.photos || []));
+    const photos = page.photos || [];
+    state.albumPhotos.push(...photos);
     state.albumCursor = page.next_cursor || '';
     state.albumHasMore = page.has_more || false;
-    renderAlbumGroups(page.photos || []);
+    renderAlbumGroups(photos);
+    requestVisibleThumbnailWarmup(`album:${id}`, photos);
   } catch(e) { console.error(e); }
   finally {
     state.albumLoading = false;
@@ -9419,8 +11192,9 @@ async function loadMoreAlbumPhotos() {
   }
 }
 
-async function focusPendingAlbumPhoto() {
+async function focusPendingAlbumPhoto(options = {}) {
   if (!state.pendingAlbumPhotoID) return false;
+  const skipScroll = !!options.skipScroll;
   const photoId = state.pendingAlbumPhotoID;
   let thumb = findPhotoThumb(photoId);
   while (!thumb && state.albumHasMore && !state.albumLoading) {
@@ -9432,7 +11206,30 @@ async function focusPendingAlbumPhoto() {
     showToast('目标媒体暂未在当前相册中找到');
     return false;
   }
-  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  if (!skipScroll) thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  thumb.classList.add('photo-thumb-focus');
+  setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
+  return true;
+}
+
+async function focusPendingRandomAlbumPhoto({ quiet = false, skipScroll = false } = {}) {
+  if (!state.pendingRandomAlbumPhotoID || state.view !== 'random-album') return false;
+  const photoId = state.pendingRandomAlbumPhotoID;
+  let thumb = findPhotoThumb(photoId);
+  while (!thumb && state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused) {
+    await loadMoreRandomAlbum();
+    thumb = findPhotoThumb(photoId);
+  }
+  if (!thumb) {
+    if (!quiet && !state.randomAlbumHasMore) {
+      state.pendingRandomAlbumPhotoID = null;
+      showToast('目标媒体暂未在乱序相册中找到');
+    }
+    return false;
+  }
+  state.pendingRandomAlbumPhotoID = null;
+  state.randomAlbumLastViewedPhotoID = photoId;
+  if (!skipScroll) thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
   thumb.classList.add('photo-thumb-focus');
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
   return true;
@@ -9444,6 +11241,14 @@ function focusPhotoThumbInCurrentView(photoId) {
   thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
   thumb.classList.add('photo-thumb-focus');
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
+  return true;
+}
+
+function prepositionLightboxReturnTarget(photoId, returnView) {
+  if (!photoId || !['timeline', 'album-detail', 'random-album', 'favorites'].includes(returnView)) return false;
+  const thumb = findPhotoThumb(photoId);
+  if (!thumb) return false;
+  thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
   return true;
 }
 function renderAlbumGroups(newPhotos) {
@@ -9471,16 +11276,17 @@ function renderAlbumGroups(newPhotos) {
 
 // ── 回收站 (b-4 修复) ─────────────────────────────────
 async function renderTrash() {
+  const writable = canWriteMedia();
   $('#topbar-title').textContent = '回收站';
   $('#topbar-leading').innerHTML = renderTopbarLeadingGroup([
-    renderTopbarGlassButton({ id: 'restore-all-trash-btn', icon: icons.topbarRestoreAll || icons.restore, label: '恢复全部' }),
-    renderTopbarGlassButton({ id: 'empty-trash-btn', icon: icons.topbarEmptyTrash, label: '清空回收站', variant: 'danger' }),
+    writable ? renderTopbarGlassButton({ id: 'restore-all-trash-btn', icon: icons.topbarRestoreAll || icons.restore, label: '恢复全部' }) : '',
+    writable ? renderTopbarGlassButton({ id: 'empty-trash-btn', icon: icons.topbarEmptyTrash, label: '清空回收站', variant: 'danger' }) : '',
   ]);
-  $('#topbar-meta').innerHTML = renderTrashSelectionBarMarkup() + renderMediaKindFilterControl();
+  $('#topbar-meta').innerHTML = (writable ? renderTrashSelectionBarMarkup() : '') + renderMediaKindFilterControl();
   $('#topbar-actions').innerHTML = '';
   bindMediaKindFilterControl();
-  bindTrashSelectionBarHandlers();
-  $('#empty-trash-btn').addEventListener('click', emptyTrash);
+  if (writable) bindTrashSelectionBarHandlers();
+  $('#empty-trash-btn')?.addEventListener('click', emptyTrash);
   $('#restore-all-trash-btn')?.addEventListener('click', restoreAllTrash);
 
   // c-5: 加入批量恢复工具栏
@@ -9490,6 +11296,8 @@ async function renderTrash() {
 
   if (state.trashLoaded) {
     renderTrashGroups(state.trashPhotos);
+    requestVisibleThumbnailWarmup('trash', state.trashPhotos);
+    updateLoadMoreUI('load-more', state.trashHasMore);
     observeLoadMore('load-more', loadMoreTrash, () => state.trashHasMore && !state.trashLoading);
     restoreViewScroll('trash');
     return;
@@ -9510,11 +11318,13 @@ async function loadMoreTrash() {
 		const query = params.toString();
 		const url = '/api/media/trash' + (query ? `?${query}` : '');
     const page = await api.get(url);
-    state.trashPhotos.push(...(page.photos || []));
+    const photos = page.photos || [];
+    state.trashPhotos.push(...photos);
     state.trashCursor = page.next_cursor || '';
     state.trashHasMore = page.has_more || false;
     state.trashLoaded = true;
-    renderTrashGroups(page.photos || []);
+    renderTrashGroups(photos);
+    requestVisibleThumbnailWarmup('trash', photos);
   } catch(e) { console.error(e); }
   finally {
     state.trashLoading = false;
@@ -9527,6 +11337,7 @@ function renderTrashGroups(newPhotos) {
   if (!container) return;
   if (state.trashPhotos.length === 0 && newPhotos.length === 0) {
     container.innerHTML = `<div class="empty">${icons.trash}<p>${escapeHTML(copyText('app.empty.trash', '回收站是空的'))}</p></div>`;
+    updateLoadMoreUI('load-more', false);
     return;
   }
   if (newPhotos.length && container.querySelector('.empty')) container.innerHTML = '';
@@ -9544,13 +11355,15 @@ function renderTrashGroups(newPhotos) {
   grid.appendChild(fragment);
 }
 async function emptyTrash() {
-  if (!confirm('确定要永久删除回收站中所有照片/视频吗？此操作不可恢复。')) return;
+  if (!canWriteMedia()) return forbidVisitorAction();
+  if (!(await appConfirm('确定要永久删除回收站中所有照片/视频吗？此操作不可恢复。', { danger: true }))) return;
   try { await api.del('/api/media/trash'); switchView('trash'); }
-  catch(e) { alert('操作失败: ' + (e.error || e)); }
+  catch(e) { showToast('操作失败: ' + (e.error || e), 3200); }
 }
 async function restorePhoto(id) {
+  if (!canWriteMedia()) return forbidVisitorAction();
   try { await api.post(`/api/media/${id}/restore`, {}); switchView('trash'); }
-  catch(e) { alert('恢复失败: ' + (e.error || e)); }
+  catch(e) { showToast('恢复失败: ' + (e.error || e), 3200); }
 }
 
 // c-5: 更新回收站批量操作栏
@@ -9565,8 +11378,9 @@ function updateTrashSelBar() {
 
 // c-5: 批量恢复选中图片
 async function restoreSelected() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!state.selected.size) return;
-  if (!confirm(`确定要恢复选中的 ${state.selected.size} 条照片/视频吗？`)) return;
+  if (!(await appConfirm(`确定要恢复选中的 ${state.selected.size} 条照片/视频吗？`))) return;
   const ids = [...state.selected];
   clearSelection();
   for (const id of ids) {
@@ -9604,13 +11418,14 @@ async function collectTrashPhotoIDs() {
 }
 
 async function restoreAllTrash() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   try {
     const ids = await collectTrashPhotoIDs();
     if (!ids.length) {
       showToast('当前没有可恢复的媒体');
       return;
     }
-    if (!confirm(`确定要恢复当前列表中的 ${ids.length} 条媒体吗？`)) return;
+    if (!(await appConfirm(`确定要恢复当前列表中的 ${ids.length} 条媒体吗？`))) return;
     for (const id of ids) {
       try {
         await api.post(`/api/media/${id}/restore`, {});
@@ -9621,13 +11436,14 @@ async function restoreAllTrash() {
     showToast(`已恢复 ${ids.length} 条媒体`);
     switchView('trash');
   } catch (e) {
-    alert('恢复全部失败: ' + ((e && e.error) || e.message || e));
+    showToast('恢复全部失败: ' + ((e && e.error) || e.message || e), 3200);
   }
 }
 
 async function hardDeleteSelected() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!state.selected.size) return;
-  if (!confirm(`确定要永久删除选中的 ${state.selected.size} 条照片/视频吗？此操作不可恢复。`)) return;
+  if (!(await appConfirm(`确定要永久删除选中的 ${state.selected.size} 条照片/视频吗？此操作不可恢复。`, { danger: true }))) return;
   const ids = [...state.selected];
   clearSelection();
   for (const id of ids) {
@@ -9679,7 +11495,7 @@ function renderLightbox() {
       <div class="lightbox-control-pill lightbox-zoom-panel">
         <label class="lightbox-zoom-wrap" for="lb-zoom">
           <span class="lightbox-zoom-step" aria-hidden="true">-</span>
-          <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="300" step="10" aria-label="媒体缩放">
+          <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="500" step="10" aria-label="媒体缩放">
           <span class="lightbox-zoom-step" aria-hidden="true">+</span>
           <span id="lb-zoom-value">100%</span>
         </label>
@@ -9694,9 +11510,9 @@ function renderLightbox() {
       </div>
     </div>
     <div class="lightbox-action-group">
-      <button class="btn-icon hidden" id="lb-video-bookmark" title="视频书签" aria-label="视频书签">${icons.bookmark}</button>
-      <button class="btn-icon" id="lb-favorite" title="收藏" aria-label="收藏">${icons.favorite}</button>
-      <button class="btn-icon" id="lb-share" title="分享" aria-label="分享">${icons.share}</button>
+      <button class="btn-icon hidden" id="lb-video-bookmark" title="视频书签" aria-label="视频书签">${icons.bookmarkBlank || icons.bookmark}</button>
+      <button class="btn-icon${canWriteMedia() ? '' : ' hidden'}" id="lb-favorite" title="收藏" aria-label="收藏">${icons.favorite}</button>
+      <button class="btn-icon${canManageShareLinks() ? '' : ' hidden'}" id="lb-share" title="分享" aria-label="分享">${icons.share}</button>
       <button class="btn-icon" id="lb-more" title="更多操作" aria-label="更多操作">${icons.more}</button>
       <button class="btn-icon lightbox-play-btn" id="lb-slideshow-toggle"><span class="lightbox-play-icon"></span></button>
     </div>
@@ -9707,6 +11523,7 @@ function renderLightbox() {
       <img class="lightbox-img" id="lb-img" src="" alt="" draggable="false">
       <video class="lightbox-video hidden" id="lb-video" playsinline preload="metadata"></video>
       <div class="lightbox-swipe-strip" id="lb-swipe-strip" aria-hidden="true">
+        <div class="lightbox-swipe-divider" aria-hidden="true"></div>
         <img class="lightbox-swipe-preview" id="lb-swipe-prev" alt="" draggable="false">
         <img class="lightbox-swipe-preview" id="lb-swipe-current" alt="" draggable="false">
         <img class="lightbox-swipe-preview" id="lb-swipe-next" alt="" draggable="false">
@@ -9782,6 +11599,7 @@ function refreshLightboxUiActivity() {
   if (!lightbox || !lightbox.classList.contains('open')) return;
   lightbox.classList.remove('ui-idle');
   clearTimeout(state.lightboxUiIdleTimer);
+  if (state.lightboxDebugControls) return;
   state.lightboxUiIdleTimer = setTimeout(() => {
     if ($('#lightbox')?.classList.contains('open')) lightbox.classList.add('ui-idle');
   }, 3000);
@@ -9789,21 +11607,64 @@ function refreshLightboxUiActivity() {
 function clearLightboxUiIdleTimer() {
   clearTimeout(state.lightboxUiIdleTimer);
   state.lightboxUiIdleTimer = null;
-  $('#lightbox')?.classList.remove('ui-idle');
+  clearTimeout(state.lightboxInfoInteractionTimer);
+  state.lightboxInfoInteractionTimer = null;
+  $('#lightbox')?.classList.remove('ui-idle', 'lightbox-info-interacting');
+}
+function markLightboxInfoInteraction(settleMs = 1100) {
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) return;
+  lightbox.classList.add('lightbox-info-interacting');
+  refreshLightboxUiActivity();
+  clearTimeout(state.lightboxInfoInteractionTimer);
+  state.lightboxInfoInteractionTimer = setTimeout(() => {
+    $('#lightbox')?.classList.remove('lightbox-info-interacting');
+  }, settleMs);
 }
 function lockPageScrollForLightbox() {
   if (document.body.classList.contains('lightbox-page-lock')) return;
   state.lightboxPageScrollTop = window.scrollY || window.pageYOffset || 0;
-  document.body.classList.add('lightbox-page-lock');
-  document.body.style.top = `-${state.lightboxPageScrollTop}px`;
+  // 暂时禁用滚动锁定；保留滚动位置记录以便后续恢复。
 }
 function unlockPageScrollForLightbox() {
-  if (!document.body.classList.contains('lightbox-page-lock')) return;
+  if (state.lightboxSkipScrollRestore) {
+    state.lightboxSkipScrollRestore = false;
+    state.lightboxPageScrollTop = 0;
+    return;
+  }
   const top = Number(state.lightboxPageScrollTop) || 0;
-  document.body.classList.remove('lightbox-page-lock');
-  document.body.style.top = '';
   window.scrollTo(0, top);
   state.lightboxPageScrollTop = 0;
+}
+function handleLightboxVideoAppHidden() {
+  const lightbox = $('#lightbox');
+  const video = $('#lb-video');
+  if (!lightbox || !lightbox.classList.contains('open') || !video || video.classList.contains('hidden')) return;
+  saveCurrentVideoResumePosition({ quiet: true });
+  flushPendingVideoPlaybackPreference(undefined, { keepalive: true });
+  state.lightboxVisibilityResumeTime = Math.max(0, Number(video.currentTime) || 0);
+  state.lightboxVisibilityResumePending = !video.paused;
+  if (!video.paused) video.pause();
+}
+function handleLightboxVideoAppVisible() {
+  const lightbox = $('#lightbox');
+  const video = $('#lb-video');
+  if (!lightbox || !lightbox.classList.contains('open') || !video || video.classList.contains('hidden')) {
+    state.lightboxVisibilityResumePending = false;
+    return;
+  }
+  void restoreVideoAudioOutput(video);
+  if (!state.lightboxVisibilityResumePending) return;
+  const resumeTime = Math.max(0, Number(state.lightboxVisibilityResumeTime) || 0);
+  state.lightboxVisibilityResumePending = false;
+  requestAnimationFrame(() => {
+    if (resumeTime > 0 && Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = Math.min(Math.max(0, resumeTime), Math.max(0, video.duration - 0.2));
+    }
+    void restoreVideoAudioOutput(video).finally(() => {
+      video.play().catch(() => {});
+    });
+  });
 }
 function bindGlobal() {
   bindHoldAction($('#lb-favorite'), e => {
@@ -9832,7 +11693,7 @@ function bindGlobal() {
   document.addEventListener('click', e => {
     if (!e.target.closest('.context-menu')) closeContextMenu();
   });
-  window.addEventListener('scroll', () => saveViewScroll(), { passive: true });
+  window.addEventListener('scroll', noteManualViewScroll, { passive: true });
   window.addEventListener('keydown', e => {
     if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
@@ -9865,9 +11726,21 @@ function bindGlobal() {
     if (!e.altKey && e.key === 'Alt') syncLightboxTemporaryZoom(false);
   }, true);
   window.addEventListener('blur', () => resetLightboxTemporaryZoom());
-  window.addEventListener('orientationchange', () => scheduleLightboxViewportChangeCheck(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) handleLightboxVideoAppHidden();
+    else handleLightboxVideoAppVisible();
+  });
+  window.addEventListener('pagehide', () => handleLightboxVideoAppHidden());
+  window.addEventListener('pageshow', () => handleLightboxVideoAppVisible());
+  window.addEventListener('orientationchange', () => {
+    refreshDeviceClassesSoon();
+    scheduleLightboxViewportChangeCheck(true);
+  });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => scheduleLightboxViewportChangeCheck(false));
+    window.visualViewport.addEventListener('resize', () => {
+      refreshDeviceClassesSoon();
+      scheduleLightboxViewportChangeCheck(false);
+    });
   }
   document.addEventListener('fullscreenchange', () => {
     const lightbox = $('#lightbox');
@@ -9893,6 +11766,12 @@ function bindGlobal() {
     updateLightboxFocusPointFromPointer(e.clientX, e.clientY);
     if (state.lightboxBoostActive && state.lightboxPointerInside) applyLightboxZoom();
   }, { passive: true });
+  document.addEventListener('scroll', e => {
+    if (e.target?.closest?.('#lb-info')) markLightboxInfoInteraction(1300);
+  }, true);
+  document.addEventListener('wheel', e => {
+    if (e.target?.closest?.('#lb-info')) markLightboxInfoInteraction(1300);
+  }, { passive: true, capture: true });
   document.addEventListener('click', e => {
     if (Date.now() < state.lightboxSwipeClickSuppressUntil) {
       e.preventDefault();
@@ -9948,10 +11827,10 @@ function bindGlobal() {
           video.currentTime = bookmark.time;
           updateVideoBookmarkProgress(video, photo);
           showToast(`已跳转到书签 ${slot}${bookmark.name ? `：${bookmark.name}` : ''}`);
-        } else if (setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
+        } else if (canEditBookmarks() && setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
           showToast(`已添加书签 ${slot}`);
           refreshVideoBookmarkMenu();
-        } else {
+        } else if (canEditBookmarks()) {
           showToast('附近 1 秒内已有书签，未新增');
         }
       }
@@ -9966,7 +11845,6 @@ function bindGlobal() {
     if (e.target.closest('#search-close-btn')) closeGlobalSearch();
     if (e.target.closest('#search-overlay') && !e.target.closest('.search-panel')) closeGlobalSearch();
     if (e.target.closest('#search-more-btn') && state.searchHasMore) runGlobalSearch(state.searchQuery, { reset: false });
-    if (e.target.closest('#search-download-all-btn')) downloadAllSearchResults();
     const filterBtn = e.target.closest('[data-search-filter]');
     if (filterBtn) {
       state.searchFilter = filterBtn.dataset.searchFilter || 'all';
@@ -9979,6 +11857,7 @@ function bindGlobal() {
   });
   document.addEventListener('pointerdown', e => {
     if (!$('#lightbox').classList.contains('open')) return;
+    if (e.target?.closest?.('#lb-info')) markLightboxInfoInteraction(1400);
     state.lightboxLastPointerType = e.pointerType || '';
     const progressTrack = e.target.closest('.lightbox-video-progress-track');
     if (progressTrack) beginVideoProgressScrub(e, progressTrack);
@@ -9988,6 +11867,7 @@ function bindGlobal() {
     }
   }, true);
   document.addEventListener('pointermove', e => {
+    if ($('#lightbox').classList.contains('open') && e.target?.closest?.('#lb-info')) markLightboxInfoInteraction(1200);
     if (state.videoSurfaceSwipe && updateVideoSurfaceSwipe(e)) return;
     if (state.lightboxSwipe && updateLightboxSwipe(e)) return;
     if (state.videoProgressScrubPointerId != null) updateVideoProgressScrub(e);
@@ -10147,14 +12027,21 @@ async function openLightbox(photos, index, options = {}) {
   }
   applyLightboxStatusBarSurface();
   clearLightboxUnderzoomState();
+  resetLightboxDismissProxy();
+  clearLightboxDismissFade();
   clearLightboxDismissGesture();
   resetLightboxZoomToDefault();
   state.lightboxPhotos = photos;
   state.lightboxIndex  = Math.max(0, index);
   state.lightboxSeedPhotoID = target && target.id ? Number(target.id) : null;
   state.lightboxSeedPreviewURL = currentLoadedPreviewURLForPhoto(target);
+  state.lightboxOriginThumbRect = lightboxDismissPhotoThumbRect(target);
   state.lightboxReturnView = options.returnView || state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
+  state.lightboxDebugControls = !!options.debugControls;
+  if (state.lightboxReturnView === 'random-album' && target && target.id) {
+    state.randomAlbumLastViewedPhotoID = Number(target.id);
+  }
   state.slideshowRandomQueue = [];
   state.videoSurfaceSwipe = null;
   state.lightboxSwipe = null;
@@ -10175,8 +12062,7 @@ async function openLightbox(photos, index, options = {}) {
 }
 function closeLightbox() {
   stopSlideshow();
-  clearLightboxUnderzoomState();
-  clearLightboxDismissGesture();
+  const lightbox = $('#lightbox');
   clearLightboxUiIdleTimer();
   clearTimeout(state.lightboxVideoProgressTimer);
   clearTimeout(state.videoSurfaceTapTimer);
@@ -10196,6 +12082,7 @@ function closeLightbox() {
   resetLightboxFocusPoint();
   resetLightboxTemporaryZoom();
   saveCurrentVideoResumePosition({ quiet: true });
+  flushPendingVideoPlaybackPreference();
   syncTouchPlaybackButton(null, null);
   clearLightboxMediaSession();
   const video = $('#lb-video');
@@ -10212,19 +12099,38 @@ function closeLightbox() {
   $('#lightbox').classList.remove('open');
   unlockPageScrollForLightbox();
   restoreLightboxStatusBarSurface();
+  document.body.classList.remove('lightbox-exiting-to-grid');
+  document.documentElement.classList.remove('lightbox-exiting-to-grid');
+  clearLightboxUnderzoomState();
+  resetLightboxDismissProxy();
+  clearLightboxDismissFade();
+  clearLightboxDismissGesture();
   state.lightboxSeedPhotoID = null;
   state.lightboxSeedPreviewURL = '';
+  state.lightboxOriginThumbRect = null;
   state.lightboxReturnView = '';
   state.lightboxReturnAlbumID = null;
+  state.lightboxDebugControls = false;
   state.lightboxPageLoading = false;
+  clearLightboxUnderzoomState();
+  resetLightboxDismissProxy();
+  clearLightboxDismissFade();
 }
 function exitLightboxToContext() {
   const returnView = state.lightboxReturnView;
   const returnAlbumID = state.lightboxReturnAlbumID;
   const currentPhotoID = state.lightboxPhotos[state.lightboxIndex]?.id || null;
-  closeLightbox();
+  const shouldUseOriginalScroll = currentPhotoID && Number(currentPhotoID) === Number(state.lightboxSeedPhotoID || 0);
   if (currentPhotoID && returnView === 'album-detail') state.pendingAlbumPhotoID = currentPhotoID;
   if (currentPhotoID && returnView === 'timeline') state.pendingTimelinePhotoID = currentPhotoID;
+  if (currentPhotoID && returnView === 'random-album') state.pendingRandomAlbumPhotoID = currentPhotoID;
+  const prepositioned = shouldUseOriginalScroll ? false : prepositionLightboxReturnTarget(currentPhotoID, returnView);
+  if (prepositioned || shouldUseOriginalScroll) {
+    state.lightboxSkipScrollRestore = prepositioned;
+    document.body.classList.add('lightbox-exiting-to-grid');
+    document.documentElement.classList.add('lightbox-exiting-to-grid');
+  }
+  closeLightbox();
   if (returnView === 'album-detail' && returnAlbumID && state.view !== 'album-detail') {
     if (state.currentAlbum && state.currentAlbum.id !== returnAlbumID) state.currentAlbum = null;
     state.currentAlbumID = returnAlbumID;
@@ -10235,14 +12141,22 @@ function exitLightboxToContext() {
     return;
   }
   if (currentPhotoID && returnView === 'album-detail') {
-    focusPendingAlbumPhoto();
+    focusPendingAlbumPhoto({ skipScroll: shouldUseOriginalScroll });
     return;
   }
   if (currentPhotoID && returnView === 'timeline') {
-    focusPendingTimelinePhoto();
+    focusPendingTimelinePhoto({ skipScroll: shouldUseOriginalScroll });
     return;
   }
-  if (currentPhotoID && ['favorites', 'random-album'].includes(returnView)) {
+  if (currentPhotoID && returnView === 'random-album') {
+    focusPendingRandomAlbumPhoto({ skipScroll: shouldUseOriginalScroll });
+    return;
+  }
+  if (returnView === 'search') {
+    openGlobalSearch(state.searchQuery || $('#global-search-input')?.value || '', { focus: !isTouchLikeDevice() });
+    return;
+  }
+  if (currentPhotoID && returnView === 'favorites') {
     focusPhotoThumbInCurrentView(currentPhotoID);
   }
 }
@@ -10337,6 +12251,7 @@ async function lbGoTo(index, options = {}) {
   const video = $('#lb-video');
   if (video) {
     saveCurrentVideoResumePosition({ quiet: true });
+    flushPendingVideoPlaybackPreference();
     video.pause();
     syncTouchPlaybackButton(null, null);
     clearLightboxMediaSession();
@@ -10349,6 +12264,10 @@ async function lbGoTo(index, options = {}) {
     video.load();
   }
   state.lightboxIndex = index;
+  if (state.lightboxReturnView === 'random-album') {
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    if (photo && photo.id) state.randomAlbumLastViewedPhotoID = Number(photo.id);
+  }
   if (state.slideshowMode === 'random' && !options.fromSlideshow) resetRandomQueue();
   lbRender();
 }
@@ -10418,7 +12337,7 @@ function lbRender() {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
     }
-    if (state.slideshowPlaying || state.experimentalAutoplayVideo || isWindowsClient()) autoplayLightboxVideo(video);
+    if (shouldAutoplayVideoInLightbox(p)) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
     const renderToken = state.lightboxPlaybackToken;
@@ -10496,6 +12415,7 @@ function lbRender() {
   }
   $('#lb-title').textContent = p.original_name;
   updateLightboxFavoriteButton(p);
+  syncLightboxShareButton();
   updateVideoBookmarkButton(p);
   updateVideoBookmarkProgress(video, p);
   $('#lb-prev').classList.toggle('hidden', state.lightboxIndex === 0);
@@ -10506,10 +12426,14 @@ function lbRender() {
   if (state.slideshowPlaying) scheduleSlideshowStep();
   if (state.experimentalPrefetchNeighbors || isTouchLikeDevice()) prefetchAdjacentMedia();
   const items = buildLightboxInfoItems(p);
-  $('#lb-info').innerHTML = items.map(([icon, k, v]) => `<div class="lb-info-item" title="${escapeHTML(`${k}: ${v}`)}" aria-label="${escapeHTML(`${k}: ${v}`)}"><span class="lb-info-key">${icon}</span><span class="lb-info-value">${escapeHTML(v)}</span></div>`).join('');
+  $('#lb-info').innerHTML = items.map(([icon, k, v]) => {
+    const value = addPanguSpacing(v);
+    return `<div class="lb-info-item" title="${escapeHTML(`${k}: ${value}`)}" aria-label="${escapeHTML(`${k}: ${value}`)}"><span class="lb-info-key">${icon}</span><span class="lb-info-value">${escapeHTML(value)}</span></div>`;
+  }).join('');
 }
 
 async function toggleCurrentLightboxFavorite() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
   await toggleFavorite(p);
@@ -10549,6 +12473,7 @@ function warmLightboxIndex(index) {
   prefetchPhotosForLightboxIntent(state.lightboxPhotos, index);
 }
 async function lbShare() {
+  if (!canManageShareLinks()) return forbidVisitorAction();
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
   closeLightbox();
@@ -10559,41 +12484,105 @@ async function lbShare() {
 
 function triggerDownload(url) {
 	const a = document.createElement('a');
-	a.href = url;
+	a.href = withPageSessionURL(url);
 	a.style.display = 'none';
 	document.body.appendChild(a);
 	a.click();
 	a.remove();
 }
-function confirmDownloadAction(message, action) {
-  if (!confirm(message || '确定要下载吗？')) return false;
+
+function shouldUseSystemPhotoSave() {
+  return isTouchLikeDevice() && typeof navigator.share === 'function';
+}
+
+function singleMediaSaveLabel() {
+  return shouldUseSystemPhotoSave() ? '保存到相册' : '下载';
+}
+
+function parseDownloadFilename(disposition, fallbackName = 'EchoGallery') {
+  const text = String(disposition || '');
+  const encoded = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1].trim().replace(/^"|"$/g, ''));
+    } catch (_) {}
+  }
+  const plain = text.match(/filename="?([^";]+)"?/i);
+  return plain ? plain[1].trim() : fallbackName;
+}
+
+async function saveMediaToSystemPhotos(photo) {
+  if (!photo || !photo.id || !shouldUseSystemPhotoSave()) return false;
+  const response = await fetchWithPageSession(`/api/media/${photo.id}/download`);
+  if (!response.ok) throw await buildAPIError(response);
+  const blob = await response.blob();
+  const filename = parseDownloadFilename(response.headers.get('Content-Disposition'), photo.original_name || 'EchoGallery');
+  const file = new File([blob], filename, { type: blob.type || photo.mime_type || 'application/octet-stream' });
+  const payload = {
+    files: [file],
+    title: photo.original_name || 'EchoGallery',
+  };
+  if (typeof navigator.canShare === 'function' && !navigator.canShare(payload)) return false;
+  await navigator.share(payload);
+  return true;
+}
+
+async function saveOrDownloadMedia(photo) {
+  if (!photo || !photo.id) return;
+  if (shouldUseSystemPhotoSave()) {
+    try {
+      const shared = await saveMediaToSystemPhotos(photo);
+      if (shared) {
+        showToast('已打开系统保存面板');
+        return;
+      }
+      showToast('当前浏览器不支持直接保存到相册，已改为下载');
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      showToast('保存到相册失败，已改为下载', 2600);
+    }
+  }
+  triggerDownload(`/api/media/${photo.id}/download`);
+}
+
+async function confirmDownloadAction(message, action) {
+  if (!(await appConfirm(message || '确定要下载吗？'))) return false;
   if (typeof action === 'function') action();
   return true;
 }
 
-async function withButtonBusy(button, busyText, fn) {
+function renderButtonBusySpinner() {
+	return '<span class="button-busy-inline" aria-hidden="true"><span class="button-busy-spinner"></span></span>';
+}
+
+async function withButtonBusy(button, busyText, fn, options = {}) {
 	if (!button) return fn();
 	const prevHTML = button.innerHTML;
 	const prevDisabled = button.disabled;
+	const prevAriaLabel = button.getAttribute('aria-label');
 	button.disabled = true;
 	button.innerHTML = busyText;
+	if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
 	try {
 		return await fn();
 	} finally {
+		if (options.keepBusyState) return;
 		button.disabled = prevDisabled;
 		button.innerHTML = prevHTML;
+		if (prevAriaLabel == null) button.removeAttribute('aria-label');
+		else button.setAttribute('aria-label', prevAriaLabel);
 	}
 }
 
 async function triggerPostDownload(url, payload, fallbackName, options = {}) {
-	const res = await fetch(url, {
+	const res = await fetchWithPageSession(url, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
 		body: JSON.stringify(payload),
 		signal: options.signal,
 	});
 	if (!res.ok) {
-		throw await res.json();
+		throw await buildAPIError(res);
 	}
 	const blob = await res.blob();
 	const objectURL = URL.createObjectURL(blob);
@@ -10609,24 +12598,29 @@ async function triggerPostDownload(url, payload, fallbackName, options = {}) {
 	setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
 }
 
-function downloadCurrentPhoto() {
+async function downloadCurrentPhoto() {
 	const p = state.lightboxPhotos[state.lightboxIndex];
 	if (!p) return;
-  if (!confirm('确定要下载这个媒体吗？')) return;
+  const label = singleMediaSaveLabel();
+  if (!(await appConfirm(`确定要${label}这个媒体吗？`))) return;
+  if (isRootDebugMedia(p)) {
+    triggerDownload(mediaPlaybackURL(p));
+    return;
+  }
 	const btn = $('#lb-download');
 	if (!btn) {
-		triggerDownload(`/api/media/${p.id}/download`);
+		await saveOrDownloadMedia(p);
 		return;
 	}
-	withButtonBusy(btn, '下载中…', async () => {
-		triggerDownload(`/api/media/${p.id}/download`);
+	await withButtonBusy(btn, shouldUseSystemPhotoSave() ? '保存中…' : '下载中…', async () => {
+		await saveOrDownloadMedia(p);
 		await new Promise(resolve => setTimeout(resolve, 600));
 	});
 }
 
 async function downloadSelected() {
 	if (!state.selected.size) return;
-  if (!confirm(`确定要下载选中的 ${state.selected.size} 条媒体吗？`)) return;
+  if (!(await appConfirm(`确定要下载选中的 ${state.selected.size} 条媒体吗？`))) return;
 	const btn = $('#download-sel-btn');
 	try {
 		await withButtonBusy(btn, '打包中…', async () => {
@@ -10635,7 +12629,7 @@ async function downloadSelected() {
 			}, `echogallery-selection-${Date.now()}.zip`);
 		});
 	} catch (e) {
-		alert('下载失败: ' + (e.error || e));
+		showToast('下载失败: ' + (e.error || e), 3200);
 	}
 }
 
@@ -10669,13 +12663,14 @@ async function downloadAllFavorites() {
       }, `echogallery-favorites-${Date.now()}.zip`);
     });
   } catch (e) {
-    alert('下载失败: ' + (e.error || e));
+    showToast('下载失败: ' + (e.error || e), 3200);
   }
 }
 
 async function buildBrowserPlaybackCacheForPhoto(photo) {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!photo || !photo.id) return;
-  if (!confirm(`确定要将“${photo.original_name || '这个视频'}”转换为受支持的 MP4 格式吗？`)) return;
+  if (!(await appConfirm(`确定要将“${photo.original_name || '这个视频'}”转换为受支持的 MP4 格式吗？`))) return;
   try {
     showToast('正在转换为受支持的格式…', 2200);
     const resp = await api.post(`/api/media/${photo.id}/playback-cache`, {});
@@ -10691,7 +12686,7 @@ async function buildBrowserPlaybackCacheForPhoto(photo) {
         if (video && !video.classList.contains('hidden')) {
           const wasPaused = video.paused;
           const currentTime = Number(video.currentTime) || 0;
-          video.src = `${mediaPlaybackURL(photo)}?converted=${Date.now()}`;
+          video.src = appendURLParam(mediaPlaybackURL(photo), 'converted', String(Date.now()));
           video.load();
           video.addEventListener('loadedmetadata', function onLoadedMetadata() {
             video.removeEventListener('loadedmetadata', onLoadedMetadata);
@@ -10704,74 +12699,7 @@ async function buildBrowserPlaybackCacheForPhoto(photo) {
       }
     }
   } catch (e) {
-    alert('转换失败: ' + ((e && e.error) || e));
-  }
-}
-
-function buildSearchMediaParams(query, cursor = '') {
-  const params = new URLSearchParams({ q: query, limit: '240' });
-  if (state.searchFilter === 'photo') params.set('kind', 'image');
-  if (state.searchFilter === 'video') params.set('kind', 'video');
-  if (state.searchFilter === 'favorite') params.set('favorite', '1');
-  if (cursor) params.set('cursor', cursor);
-  return params;
-}
-
-async function collectAllSearchMediaIDs(query, signal) {
-  const ids = [];
-  let cursor = '';
-  for (;;) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const response = await fetch(`/api/media/search?${buildSearchMediaParams(query, cursor).toString()}`, { signal });
-    if (!response.ok) throw await response.json();
-    const page = await response.json();
-    (page.photos || []).forEach(photo => {
-      if (photo && photo.id) ids.push(photo.id);
-    });
-    if (!page.has_more || !page.next_cursor) break;
-    cursor = page.next_cursor;
-  }
-  return ids;
-}
-
-async function downloadAllSearchResults() {
-  if (state.searchDownloadAbortController) {
-    state.searchDownloadAbortController.abort();
-    return;
-  }
-  const query = $('#global-search-input')?.value.trim() || state.searchQuery;
-  if (!query || state.searchFilter === 'album') {
-    showToast('当前筛选没有可打包下载的媒体结果');
-    return;
-  }
-  const btn = $('#search-download-all-btn');
-  const controller = new AbortController();
-  state.searchDownloadAbortController = controller;
-  state.searchDownloadLoading = true;
-  renderSearchResults();
-  try {
-    if (btn) btn.textContent = '取消下载';
-    const ids = await collectAllSearchMediaIDs(query, controller.signal);
-    if (!ids.length) {
-      showToast('没有可下载的媒体结果');
-      return;
-    }
-    if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    await triggerPostDownload('/api/media/download', {
-      media_ids: ids,
-    }, `echogallery-search-${Date.now()}.zip`, { signal: controller.signal });
-  } catch (e) {
-    if (e && e.name === 'AbortError') {
-      showToast('已取消打包下载');
-      return;
-    }
-    alert('下载失败: ' + ((e && e.error) || e));
-  } finally {
-    if (state.searchDownloadAbortController === controller) {
-      state.searchDownloadAbortController = null;
-      state.searchDownloadLoading = false;
-      renderSearchResults();
-    }
+    showToast('转换失败: ' + (((e && e.error) || e)), 3200);
   }
 }
 
@@ -10796,6 +12724,7 @@ function renderUploadModal() {
 }
 let _uploadZoneBound = false;
 function openUploadModal() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   $('#upload-modal').classList.add('open');
   $('#upload-queue').innerHTML = '';
   $('#retry-failed-btn').style.display = 'none';
@@ -10969,6 +12898,7 @@ function renderEditAlbumModal() {
 </div>`;
 }
 function openCreateAlbumModal() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   $('#create-album-modal').classList.add('open');
   $('#album-name-input').value = '';
   $('#album-desc-input').value = '';
@@ -10976,6 +12906,7 @@ function openCreateAlbumModal() {
   $('#confirm-album-btn').onclick = createAlbum;
 }
 function openEditAlbumModal(album = state.currentAlbum) {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!album) return;
   const modal = $('#edit-album-modal');
   if (!modal) return;
@@ -10987,6 +12918,7 @@ function openEditAlbumModal(album = state.currentAlbum) {
   $('#confirm-edit-album-btn').onclick = saveEditedAlbum;
 }
 async function createAlbum() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   const name = $('#album-name-input').value.trim();
   if (!name) { alert(copyText('app.createAlbum.emptyNameAlert', '请输入相册名称')); return; }
   try {
@@ -10997,6 +12929,7 @@ async function createAlbum() {
   } catch(e) { alert('创建失败: ' + (e.error || e)); }
 }
 async function saveEditedAlbum() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   const modal = $('#edit-album-modal');
   const albumID = Number(modal?.dataset.albumId || 0);
   const name = $('#edit-album-name-input').value.trim();
@@ -11045,6 +12978,7 @@ let _pickerPhotoIds = null;
 let _pickerSelected = null;
 
 async function openAlbumPickerModal(photoIds) {
+  if (!canWriteMedia()) return forbidVisitorAction();
 	// photoIds: null=用已选集合, 数组=指定媒体
   _pickerPhotoIds = photoIds;
   _pickerSelected = null;
@@ -11092,6 +13026,7 @@ async function openAlbumPickerModal(photoIds) {
 }
 
 async function confirmAlbumPicker() {
+  if (!canWriteMedia()) return forbidVisitorAction();
   if (!_pickerSelected) { $('#album-picker-hint').textContent = '请先选择一个相册'; return; }
 	const album = _pickerSelected;
 	const ids = _pickerPhotoIds || [...state.selected];
@@ -11137,6 +13072,7 @@ function renderShareModal() {
 }
 let _shareTarget = null;
 function openShareModal(type, targetId) {
+  if (!canManageShareLinks()) return forbidVisitorAction();
   _shareTarget = { type, targetId };
   $('#share-modal').classList.add('open');
   $('#share-result').style.display = 'none';
@@ -11144,6 +13080,7 @@ function openShareModal(type, targetId) {
   $('#share-confirm-btn').onclick = generateShareLink;
 }
 async function generateShareLink() {
+  if (!canManageShareLinks()) return forbidVisitorAction();
   if (!_shareTarget) return;
   const days = parseInt($('#share-expires').value);
   const body = { type: _shareTarget.type, target_id: _shareTarget.targetId };
@@ -11342,6 +13279,7 @@ function cropLibraryLogoFile(file, crop, options = {}) {
 
 let _shareListTarget = null;
 function openShareListModal(type, targetId) {
+  if (!canManageShareLinks()) return forbidVisitorAction();
   _shareListTarget = { type, targetId };
   const modal = $('#share-list-modal');
   modal.classList.add('open');
@@ -11404,12 +13342,17 @@ async function shutdownFromUI() {
 }
 
 async function logout() {
-  await fetch('/api/auth/logout', { method: 'POST' });
-  location.reload();
+  stopPageSessionHeartbeat();
+  try {
+    await api.post('/api/auth/logout', {}, { suppressForbiddenToast: true });
+  } finally {
+    await releaseCurrentPageSession({ keepalive: true });
+    location.href = '/login';
+  }
 }
 
 // ── 启动 ──────────────────────────────────────────────
-initDeviceClasses();
+scheduleInitialDeviceClassRefreshes();
 initTheme();
 initGridScale();
 initDisplaySettings();
@@ -11421,7 +13364,7 @@ initExperimentalSettings();
 // c-2: 从 hash 恢复视图，支持刷新后保持页面
 function getHashView() {
   const h = location.hash.replace('#', '');
-  if (['timeline','favorites','random-album','albums','memories','trash','settings'].includes(h)) {
+  if (isAllowedRootView(h)) {
     return { view: h, albumID: null };
   }
   if (h.startsWith('album/')) {
@@ -11432,7 +13375,7 @@ function getHashView() {
   }
   if (state.experimentalRestoreLastView) {
     const last = localStorage.getItem('last_view_hash') || '';
-    if (['timeline','favorites','random-album','albums','memories','trash','settings'].includes(last)) {
+    if (isAllowedRootView(last)) {
       return { view: last, albumID: null };
     }
   }
@@ -11444,7 +13387,7 @@ function setHashView(view, albumID = null) {
     if (state.experimentalRestoreLastView) localStorage.setItem('last_view_hash', `album/${albumID}`);
     return;
   }
-  if (['timeline','favorites','random-album','albums','memories','trash','settings'].includes(view)) {
+  if (isAllowedRootView(view)) {
     history.replaceState(null, '', '#' + view);
     if (state.experimentalRestoreLastView) localStorage.setItem('last_view_hash', view);
   }
@@ -11453,10 +13396,23 @@ const initialRoute = getHashView();
 state.view = initialRoute.view;
 state.currentAlbumID = initialRoute.albumID;
 async function bootstrapApp() {
+  const transferred = consumeLoginTransferPageSessionID();
+  if (!transferred && navigationType() !== 'reload') {
+    resetPageSessionID();
+  } else {
+    ensurePageSessionID();
+  }
+  startPageSessionHeartbeat();
   await Promise.all([
     loadCopyCatalog(),
     loadInlineSVGIcons(),
   ]);
   renderApp();
 }
+window.addEventListener('pagehide', () => {
+  void releaseCurrentPageSession({ keepalive: true });
+});
+window.addEventListener('beforeunload', () => {
+  void releaseCurrentPageSession({ keepalive: true });
+});
 bootstrapApp();

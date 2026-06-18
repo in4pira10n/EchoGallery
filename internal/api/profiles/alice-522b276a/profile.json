@@ -1,11 +1,6 @@
 {
-  "storage_path": "/var/folders/qk/03q0f7jd2bz8g7yzt5vwyrww0000gn/T/TestServeThumbnailFile_Success1323925839/001",
-  "libraries": [
-    {
-      "name": "资源库 1",
-      "path": "/var/folders/qk/03q0f7jd2bz8g7yzt5vwyrww0000gn/T/TestServeThumbnailFile_Success1323925839/001"
-    }
-  ],
+  "active_library_id": "lib_a",
+  "storage_path": "/tmp/library-a",
   "thumbnail_dir": "thumbnails",
   "thumbnail_size": 512,
   "trash_dir": "Trash",
@@ -26,6 +21,7 @@
     "experimental_prefetch_neighbors": false,
     "experimental_restore_last_view": false,
     "continue_last_video_position": false,
+    "low_resource_mode": false,
     "player_keymap": ""
   }
 }

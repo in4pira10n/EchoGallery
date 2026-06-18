@@ -111,22 +111,37 @@ func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 // ListAlbums 查询用户所有相册（photo_count 不含已软删除的图片，附带封面 UUID）
 func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 	rows, err := s.db.Query(`
-		SELECT a.id, a.name, a.description, a.cover_photo_id, a.source_kind, a.source_rel_path, a.created_by, a.created_at,
-		       COUNT(p.id) as photo_count,
-		       COALESCE(
-		         (SELECT ph.uuid FROM photos ph
-		          WHERE ph.id = a.cover_photo_id AND ph.deleted_at IS NULL LIMIT 1),
-		         (SELECT ph.uuid FROM photos ph
-		          INNER JOIN album_photos ap2 ON ap2.photo_id = ph.id
-		          WHERE ap2.album_id = a.id AND ph.deleted_at IS NULL
-		          ORDER BY ph.taken_at DESC LIMIT 1)
-		       ) as cover_uuid
-		FROM albums a
-		LEFT JOIN album_photos ap ON ap.album_id = a.id
-		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
-		WHERE a.created_by = ?
-		GROUP BY a.id
-		ORDER BY a.created_at DESC`, userID)
+		WITH user_albums AS (
+			SELECT id, name, description, cover_photo_id, source_kind, source_rel_path, created_by, created_at
+			FROM albums
+			WHERE created_by = ?
+		),
+		photo_counts AS (
+			SELECT ap.album_id, COUNT(p.id) AS photo_count
+			FROM album_photos ap
+			INNER JOIN user_albums ua ON ua.id = ap.album_id
+			INNER JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
+			GROUP BY ap.album_id
+		),
+		latest_album_photos AS (
+			SELECT album_id, uuid
+			FROM (
+				SELECT ap.album_id, ph.uuid,
+				       ROW_NUMBER() OVER (PARTITION BY ap.album_id ORDER BY ph.taken_at DESC, ph.id DESC) AS rn
+				FROM album_photos ap
+				INNER JOIN user_albums ua ON ua.id = ap.album_id
+				INNER JOIN photos ph ON ph.id = ap.photo_id AND ph.deleted_at IS NULL
+			)
+			WHERE rn = 1
+		)
+		SELECT ua.id, ua.name, ua.description, ua.cover_photo_id, ua.source_kind, ua.source_rel_path, ua.created_by, ua.created_at,
+		       COALESCE(pc.photo_count, 0) AS photo_count,
+		       COALESCE(cover.uuid, latest.uuid) AS cover_uuid
+		FROM user_albums ua
+		LEFT JOIN photo_counts pc ON pc.album_id = ua.id
+		LEFT JOIN photos cover ON cover.id = ua.cover_photo_id AND cover.deleted_at IS NULL
+		LEFT JOIN latest_album_photos latest ON latest.album_id = ua.id
+		ORDER BY ua.created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询相册失败: %w", err)
 	}
@@ -338,6 +353,9 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 		where += " AND p.media_kind = ?"
 		args = append(args, params.MediaKind)
 	}
+	if sort == "name" {
+		return s.listAlbumPhotosByNaturalName(where, joinClause, args, params.Cursor, limit)
+	}
 
 	orderBy := "p.taken_at DESC, p.id DESC"
 	if params.Cursor != "" {
@@ -349,9 +367,6 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 		case "timeline_asc":
 			where += " AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))"
 			args = append(args, c.Time, c.Time, c.ID)
-		case "name":
-			where += " AND (lower(p.original_name) > ? OR (lower(p.original_name) = ? AND p.id > ?))"
-			args = append(args, c.Name, c.Name, c.ID)
 		case "size":
 			where += " AND (p.size < ? OR (p.size = ? AND p.id < ?))"
 			args = append(args, c.Size, c.Size, c.ID)
@@ -363,8 +378,6 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	switch sort {
 	case "timeline_asc":
 		orderBy = "p.taken_at ASC, p.id ASC"
-	case "name":
-		orderBy = "lower(p.original_name) ASC, p.id ASC"
 	case "size":
 		orderBy = "p.size DESC, p.id DESC"
 	}
@@ -386,6 +399,62 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	defer rows.Close()
 
 	return collectAlbumPhotoPage(rows, limit, sort)
+}
+
+func (s *DB) listAlbumPhotosByNaturalName(where string, joinClause string, args []interface{}, cursor string, limit int) (*storage.PhotoPage, error) {
+	queryArgs := append([]interface{}{}, args...)
+	rows, err := s.db.Query(`
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			`+joinClause+`
+			WHERE `+where+`
+			ORDER BY lower(p.original_name) ASC, p.id ASC`, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("查询相册图片失败: %w", err)
+	}
+	defer rows.Close()
+
+	var photos []*storage.Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows)
+		if err != nil {
+			return nil, err
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortPhotosByNaturalName(photos)
+	start := 0
+	if cursor != "" {
+		c, err := decodeAlbumPhotoCursor(cursor, "name")
+		if err != nil {
+			return nil, err
+		}
+		for start < len(photos) {
+			cmp := compareNaturalStrings(photos[start].OriginalName, c.Name)
+			if cmp > 0 || (cmp == 0 && photos[start].ID > c.ID) {
+				break
+			}
+			start++
+		}
+	}
+	end := start + limit
+	page := &storage.PhotoPage{}
+	if end < len(photos) {
+		page.HasMore = true
+		last := photos[end-1]
+		page.NextCursor = encodeAlbumPhotoCursor(albumPhotoCursor{Sort: "name", Name: last.OriginalName, ID: last.ID})
+	} else {
+		end = len(photos)
+	}
+	if start < len(photos) {
+		page.Photos = photos[start:end]
+	}
+	return page, nil
 }
 
 func collectAlbumPhotoPage(rows *sql.Rows, limit int, sort string) (*storage.PhotoPage, error) {

@@ -59,6 +59,9 @@ func formatVideoThumbnailRefreshTime(value time.Time) string {
 
 func handleGetVideoThumbnailRefreshStatus(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(videoThumbnailRefreshManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusOK, videoThumbnailRefreshStatusResponse{Status: "idle", Message: "当前没有视频缩略图任务"})
@@ -75,6 +78,9 @@ func handleGetVideoThumbnailRefreshStatus(cfg *config.Config, registrar interfac
 
 func handleStartVideoThumbnailRefresh(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(videoThumbnailRefreshManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持刷新视频缩略图"})
@@ -96,6 +102,9 @@ func handleStartVideoThumbnailRefresh(cfg *config.Config, registrar interface{})
 
 func handleCancelVideoThumbnailRefresh(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if scoped := requestRegistrar(c, nil); scoped != nil {
+			registrar = scoped
+		}
 		manager, ok := registrar.(videoThumbnailRefreshManager)
 		if !ok || manager == nil {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消视频缩略图刷新"})

@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -20,7 +24,9 @@ import (
 
 	"echogallery/internal/config"
 	imgpkg "echogallery/internal/image"
+	"echogallery/internal/pagesession"
 	"echogallery/internal/service"
+	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage"
 )
 
@@ -66,6 +72,8 @@ type stubRegistrar struct {
 	startVideoThumbnailRefresh     func(userID int64) (service.VideoThumbnailRefreshStatus, error)
 	getVideoThumbnailRefreshStatus func(userID int64) service.VideoThumbnailRefreshStatus
 	cancelVideoThumbnailRefresh    func(userID int64) (service.VideoThumbnailRefreshStatus, error)
+	getVideoPlaybackPreference     func(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
+	saveVideoPlaybackPreference    func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error)
 	revealAlbumInFinder            func(id int64, userID int64) error
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
@@ -302,6 +310,26 @@ func (s stubRegistrar) CancelVideoThumbnailRefresh(userID int64) (service.VideoT
 	return s.cancelVideoThumbnailRefresh(userID)
 }
 
+func (s stubRegistrar) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
+	if s.getVideoPlaybackPreference == nil {
+		return nil, nil
+	}
+	return s.getVideoPlaybackPreference(photoID, userID)
+}
+
+func (s stubRegistrar) SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+	if s.saveVideoPlaybackPreference == nil {
+		return &storage.VideoPlaybackPreference{
+			PhotoID:    photoID,
+			Volume:     volume,
+			Muted:      muted,
+			ResumeTime: resumeTime,
+			Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
+		}, nil
+	}
+	return s.saveVideoPlaybackPreference(photoID, userID, volume, muted, resumeTime, bookmarks)
+}
+
 func (s stubRegistrar) RevealInFinder(id int64, userID int64) error {
 	return s.revealInFinder(id, userID)
 }
@@ -516,7 +544,18 @@ func testConfig() *config.Config {
 		AppDataDir:  tTempStoragePath,
 		JWTSecret:   "test-secret",
 		Users: []config.User{
-			{Username: "alice", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2"},
+			{Username: "alice", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleAdmin},
+		},
+	}
+}
+
+func visitorConfig() *config.Config {
+	return &config.Config{
+		StoragePath: tTempStoragePath,
+		AppDataDir:  tTempStoragePath,
+		JWTSecret:   "test-secret",
+		Users: []config.User{
+			{Username: "alice", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleVisitor},
 		},
 	}
 }
@@ -569,6 +608,20 @@ func mp4Sample() []byte {
 	}, bytes.Repeat([]byte{0x00}, 1024)...)
 }
 
+func pngSample(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 0x5d, G: 0x8f, B: 0xff, A: 0xff})
+	img.Set(1, 0, color.RGBA{R: 0xff, G: 0xc8, B: 0x4d, A: 0xff})
+	img.Set(0, 1, color.RGBA{R: 0x3d, G: 0xd4, B: 0x99, A: 0xff})
+	img.Set(1, 1, color.RGBA{R: 0xff, G: 0x7b, B: 0x92, A: 0xff})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("生成 PNG 样本失败: %v", err)
+	}
+	return buf.Bytes()
+}
+
 func TestNewRouter_MediaPlaceholder(t *testing.T) {
 	router := NewRouter(testConfig(), okRegistrar())
 	req := httptest.NewRequest(http.MethodGet, "/api/media", nil)
@@ -613,6 +666,8 @@ func TestSettingsEndpoint_ReturnsConfig(t *testing.T) {
 		t.Fatalf("期望 200，得到 %d", w.Code)
 	}
 	var resp struct {
+		Role            string   `json:"role"`
+		CanWrite        bool     `json:"can_write"`
 		Port            int      `json:"port"`
 		UseSystemPlayer bool     `json:"use_system_player"`
 		Users           []string `json:"users"`
@@ -623,11 +678,715 @@ func TestSettingsEndpoint_ReturnsConfig(t *testing.T) {
 	if resp.Port != 8080 {
 		t.Fatalf("期望端口为 8080，得到 %d", resp.Port)
 	}
+	if resp.Role != config.UserRoleAdmin {
+		t.Fatalf("期望 role=admin，得到 %q", resp.Role)
+	}
+	if !resp.CanWrite {
+		t.Fatalf("期望 admin can_write=true")
+	}
 	if !resp.UseSystemPlayer {
 		t.Fatalf("期望返回 use_system_player=true")
 	}
 	if len(resp.Users) != 1 || resp.Users[0] != "alice" {
 		t.Fatalf("期望返回用户 alice，得到 %+v", resp.Users)
+	}
+}
+
+func TestSettingsEndpoint_VisitorSeesSharedLibraries(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor, AllowedLibraryIDs: []string{"lib_a"}, DefaultLibraryID: "lib_a"},
+	}
+	cfg.ActiveProfile = "bob"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a"},
+	}
+
+	adminProfile := &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+		Preferences: config.Preferences{
+			Theme:           "light",
+			GridSize:        180,
+			GridGap:         2,
+			ThumbRadius:     2,
+			SlideshowMode:   "random",
+			PlayerKeymap:    "default",
+			LightboxZoom:    100,
+			SidebarAutoHide: true,
+		},
+	}
+	if err := config.SaveProfile(cfg, "alice", adminProfile); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+	visitorProfile := config.NewUserProfileTemplate(cfg)
+	visitorProfile.Preferences.Theme = "dark"
+	if err := config.SaveProfile(cfg, "bob", visitorProfile); err != nil {
+		t.Fatalf("保存访客 profile 失败: %v", err)
+	}
+
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Role        string            `json:"role"`
+		CanWrite    bool              `json:"can_write"`
+		StoragePath string            `json:"storage_path"`
+		Libraries   []libraryResponse `json:"libraries"`
+		Theme       string            `json:"theme"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析访客设置响应失败: %v", err)
+	}
+	if resp.Role != config.UserRoleVisitor {
+		t.Fatalf("期望 role=visitor，得到 %q", resp.Role)
+	}
+	if resp.CanWrite {
+		t.Fatalf("期望访客 can_write=false")
+	}
+	if resp.StoragePath != "/libraries/a" {
+		t.Fatalf("期望访客看到管理员资源库路径，得到 %q", resp.StoragePath)
+	}
+	if len(resp.Libraries) != 1 || resp.Libraries[0].ID != "lib_a" {
+		t.Fatalf("期望访客看到共享资源库，得到 %+v", resp.Libraries)
+	}
+	if resp.Theme != "dark" {
+		t.Fatalf("期望保留访客自己的主题，得到 %q", resp.Theme)
+	}
+}
+
+func TestSettingsEndpoint_VisitorDefaultsToPrimaryLibrary(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor},
+	}
+	cfg.ActiveProfile = "bob"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a"},
+	}
+	if err := config.SaveProfile(cfg, "alice", config.NewUserProfileTemplate(cfg)); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+	visitorProfile := config.NewUserProfileTemplate(cfg)
+	visitorProfile.Preferences.Theme = "dark"
+	if err := config.SaveProfile(cfg, "bob", visitorProfile); err != nil {
+		t.Fatalf("保存访客 profile 失败: %v", err)
+	}
+
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		StoragePath string            `json:"storage_path"`
+		Libraries   []libraryResponse `json:"libraries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析访客设置响应失败: %v", err)
+	}
+	if resp.StoragePath != "/libraries/a" {
+		t.Fatalf("期望访客默认落到主要资源库，得到 %q", resp.StoragePath)
+	}
+	if len(resp.Libraries) != 1 || resp.Libraries[0].ID != "lib_a" {
+		t.Fatalf("期望访客默认看到主要资源库，得到 %+v", resp.Libraries)
+	}
+}
+
+func TestTimelineEndpoint_VisitorUsesSharedLibraryOwner(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor, AllowedLibraryIDs: []string{"lib_a"}, DefaultLibraryID: "lib_a"},
+	}
+	cfg.ActiveProfile = "bob"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a"},
+	}
+	adminProfile := &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+	}
+	if err := config.SaveProfile(cfg, "alice", adminProfile); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+	if err := config.SaveProfile(cfg, "bob", config.NewUserProfileTemplate(cfg)); err != nil {
+		t.Fatalf("保存访客 profile 失败: %v", err)
+	}
+
+	var gotUserID int64
+	router := NewRouter(cfg, stubRegistrar{
+		getTimeline: func(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
+			gotUserID = params.UserID
+			return &storage.PhotoPage{}, nil
+		},
+		getPhoto:           okRegistrar().getPhoto,
+		getByUUID:          okRegistrar().getByUUID,
+		mediaPath:          okRegistrar().mediaPath,
+		posterPath:         okRegistrar().posterPath,
+		register:           okRegistrar().register,
+		deletePhoto:        okRegistrar().deletePhoto,
+		emptyTrash:         okRegistrar().emptyTrash,
+		getDownloadEntries: okRegistrar().getDownloadEntries,
+		getAlbumMedia:      okRegistrar().getAlbumMedia,
+		getTrash:           okRegistrar().getTrash,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/media", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if gotUserID != 1 {
+		t.Fatalf("期望访客读取共享资源库 user_id=1，得到 %d", gotUserID)
+	}
+}
+
+func TestTimelineEndpoint_AdminUsesLibraryOwnerWhenSwitchedUserHasNoMedia(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "administrator", PasswordHash: "hash", Role: config.UserRoleAdmin},
+	}
+	cfg.ActiveProfile = "administrator"
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = "/libraries/a"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a", OwnerUsername: "alice"},
+	}
+	if err := config.SaveProfile(cfg, "alice", &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+	}); err != nil {
+		t.Fatalf("保存 alice profile 失败: %v", err)
+	}
+	if err := config.SaveProfile(cfg, "administrator", &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+	}); err != nil {
+		t.Fatalf("保存 administrator profile 失败: %v", err)
+	}
+
+	var gotUserID int64
+	router := NewRouter(cfg, stubRegistrar{
+		getTimeline: func(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
+			gotUserID = params.UserID
+			return &storage.PhotoPage{}, nil
+		},
+		getPhoto:           okRegistrar().getPhoto,
+		getByUUID:          okRegistrar().getByUUID,
+		mediaPath:          okRegistrar().mediaPath,
+		posterPath:         okRegistrar().posterPath,
+		register:           okRegistrar().register,
+		deletePhoto:        okRegistrar().deletePhoto,
+		emptyTrash:         okRegistrar().emptyTrash,
+		getDownloadEntries: okRegistrar().getDownloadEntries,
+		getAlbumMedia:      okRegistrar().getAlbumMedia,
+		getTrash:           okRegistrar().getTrash,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/media", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "administrator")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if gotUserID != 1 {
+		t.Fatalf("期望新管理员读取资源库 owner user_id=1，得到 %d", gotUserID)
+	}
+}
+
+func TestVideoPlaybackPreference_UsesLibraryOwnerRecordForAllUsers(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor, AllowedLibraryIDs: []string{"lib_a"}, DefaultLibraryID: "lib_a"},
+	}
+	cfg.ActiveProfile = "bob"
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = "/libraries/a"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a", OwnerUsername: "alice"},
+	}
+	if err := config.SaveProfile(cfg, "alice", &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+	}); err != nil {
+		t.Fatalf("保存 alice profile 失败: %v", err)
+	}
+	if err := config.SaveProfile(cfg, "bob", config.NewUserProfileTemplate(cfg)); err != nil {
+		t.Fatalf("保存 bob profile 失败: %v", err)
+	}
+
+	savedByUser := make(map[int64]*storage.VideoPlaybackPreference)
+	router := NewRouter(cfg, stubRegistrar{
+		getVideoPlaybackPreference: func(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
+			if pref, ok := savedByUser[userID]; ok {
+				copyPref := *pref
+				copyPref.Bookmarks = append([]storage.VideoPlaybackBookmark(nil), pref.Bookmarks...)
+				return &copyPref, nil
+			}
+			if userID == 1 {
+				return &storage.VideoPlaybackPreference{
+					PhotoID:    photoID,
+					Volume:     0.7,
+					Muted:      true,
+					ResumeTime: 33000,
+					Bookmarks:  []storage.VideoPlaybackBookmark{{Slot: 1, Time: 12000, Name: "A"}},
+				}, nil
+			}
+			if userID == 2 {
+				return &storage.VideoPlaybackPreference{
+					PhotoID:    photoID,
+					Volume:     0.45,
+					Muted:      false,
+					ResumeTime: 99000,
+				}, nil
+			}
+			return nil, nil
+		},
+		saveVideoPlaybackPreference: func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+			pref := &storage.VideoPlaybackPreference{
+				PhotoID:    photoID,
+				Volume:     volume,
+				Muted:      muted,
+				ResumeTime: resumeTime,
+				Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
+			}
+			savedByUser[userID] = pref
+			return pref, nil
+		},
+	})
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/media/9/playback", nil)
+	getReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	getResp := httptest.NewRecorder()
+	router.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", getResp.Code, getResp.Body.String())
+	}
+	var prefResp storage.VideoPlaybackPreference
+	if err := json.Unmarshal(getResp.Body.Bytes(), &prefResp); err != nil {
+		t.Fatalf("解析播放偏好失败: %v", err)
+	}
+	if prefResp.ResumeTime != 33000 || prefResp.Volume != 0.7 || !prefResp.Muted {
+		t.Fatalf("期望 visitor 读取资源库 owner 的媒体播放偏好，得到 %+v", prefResp)
+	}
+	if len(prefResp.Bookmarks) != 1 || prefResp.Bookmarks[0].Time != 12000 {
+		t.Fatalf("期望 visitor 读取共享书签，得到 %+v", prefResp.Bookmarks)
+	}
+
+	muteReq := httptest.NewRequest(http.MethodPut, "/api/media/9/playback", strings.NewReader(`{"muted":false,"resume_time":45000}`))
+	muteReq.Header.Set("Content-Type", "application/json")
+	muteReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	muteResp := httptest.NewRecorder()
+	router.ServeHTTP(muteResp, muteReq)
+	if muteResp.Code != http.StatusOK {
+		t.Fatalf("期望 visitor 可保存媒体播放状态 200，得到 %d，响应: %s", muteResp.Code, muteResp.Body.String())
+	}
+	if ownerPref := savedByUser[1]; ownerPref == nil || ownerPref.Muted || ownerPref.ResumeTime != 45000 {
+		t.Fatalf("期望 visitor 的静音/续播写入资源库 owner 记录，得到 %+v", ownerPref)
+	}
+	if visitorPref := savedByUser[2]; visitorPref != nil {
+		t.Fatalf("visitor 不应写入自己的播放记录，得到 %+v", visitorPref)
+	}
+
+	saveReq := httptest.NewRequest(http.MethodPut, "/api/media/9/playback", strings.NewReader(`{"bookmarks":[{"slot":2,"time":45000,"name":"Shared"}]}`))
+	saveReq.Header.Set("Content-Type", "application/json")
+	saveReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	saveResp := httptest.NewRecorder()
+	router.ServeHTTP(saveResp, saveReq)
+	if saveResp.Code != http.StatusForbidden {
+		t.Fatalf("期望 403，得到 %d，响应: %s", saveResp.Code, saveResp.Body.String())
+	}
+	if ownerPref := savedByUser[1]; ownerPref == nil || len(ownerPref.Bookmarks) != 1 || ownerPref.Bookmarks[0].Slot != 1 {
+		t.Fatalf("visitor 不应修改共享书签，得到 %+v", ownerPref)
+	}
+	if visitorPref := savedByUser[2]; visitorPref != nil {
+		t.Fatalf("visitor 不应写入自己的书签，得到 %+v", visitorPref)
+	}
+}
+
+func TestSettingsUpdate_VisitorOnlySavesOwnPreferences(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor},
+	}
+	cfg.ActiveProfile = "alice"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a"},
+	}
+
+	adminProfile := &config.Profile{
+		ActiveLibraryID: "lib_a",
+		StoragePath:     "/libraries/a",
+		ThumbnailDir:    filepath.Join(cfg.AppDataDir, "thumbs"),
+		TrashDir:        filepath.Join(cfg.AppDataDir, "trash"),
+		Preferences: config.Preferences{
+			Theme:           "light",
+			GridSize:        180,
+			GridGap:         2,
+			ThumbRadius:     2,
+			SlideshowMode:   "random",
+			LightboxZoom:    100,
+			PlayerKeymap:    "default",
+			SidebarAutoHide: true,
+		},
+	}
+	if err := config.SaveProfile(cfg, "alice", adminProfile); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+	visitorProfile := config.NewUserProfileTemplate(cfg)
+	if err := config.SaveProfile(cfg, "bob", visitorProfile); err != nil {
+		t.Fatalf("保存访客 profile 失败: %v", err)
+	}
+
+	router := NewRouter(cfg, okRegistrar())
+	body := `{
+		"port":9090,
+		"active_library_id":"lib_a",
+		"storage_path":"/libraries/a",
+		"libraries":[{"id":"lib_a","name":"A","path":"/libraries/a"}],
+		"thumbnail_dir":"` + filepath.ToSlash(filepath.Join(cfg.AppDataDir, "thumbs")) + `",
+		"thumbnail_size":512,
+		"trash_dir":"` + filepath.ToSlash(filepath.Join(cfg.AppDataDir, "trash")) + `",
+		"use_system_player":true,
+		"theme":"dark",
+		"grid_size":220,
+		"grid_gap":4,
+		"thumb_radius":6,
+		"sidebar_auto_hide":true,
+		"slideshow_mode":"sequential",
+		"slideshow_loop":false,
+		"slideshow_interval":8000,
+		"lightbox_zoom":110,
+		"video_autoplay_next":true,
+		"video_section_min_minutes":12,
+		"experimental_prefetch_neighbors":true,
+		"experimental_restore_last_view":true,
+		"continue_last_video_position":true,
+		"low_resource_mode":true,
+		"player_keymap":"custom"
+	}`
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		RequiresRestart bool `json:"requires_restart"`
+		Data            struct {
+			Theme string `json:"theme"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析访客设置更新响应失败: %v", err)
+	}
+	if resp.RequiresRestart {
+		t.Fatalf("期望访客偏好保存不触发重启")
+	}
+	if resp.Data.Theme != "dark" {
+		t.Fatalf("期望返回访客自己的主题 dark，得到 %q", resp.Data.Theme)
+	}
+	if cfg.ActiveProfile != "alice" {
+		t.Fatalf("期望访客保存后不修改全局 active_profile，得到 %q", cfg.ActiveProfile)
+	}
+	savedVisitor, err := config.LoadProfile(cfg, "bob")
+	if err != nil {
+		t.Fatalf("读取访客 profile 失败: %v", err)
+	}
+	if savedVisitor.Preferences.Theme != "dark" {
+		t.Fatalf("期望访客主题已保存，得到 %q", savedVisitor.Preferences.Theme)
+	}
+	if len(savedVisitor.Libraries) != 0 || strings.TrimSpace(savedVisitor.StoragePath) != "" {
+		t.Fatalf("期望访客 profile 不写入共享资源库，得到 %+v", savedVisitor)
+	}
+}
+
+func TestSettingsUpdate_ReturnsRequiresRestartWhenSwitchingLibrary(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Port = 8080
+	cfg.ThumbnailDir = filepath.Join(cfg.AppDataDir, "thumbnails")
+	cfg.TrashDir = filepath.Join(cfg.AppDataDir, "Trash")
+	libA := filepath.Join(cfg.AppDataDir, "library-a")
+	libB := filepath.Join(cfg.AppDataDir, "library-b")
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = libA
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: libA},
+		{ID: "lib_b", Name: "B", Path: libB},
+	}
+	router := NewRouter(cfg, okRegistrar())
+	body := fmt.Sprintf(`{
+		"port":8080,
+		"active_library_id":"lib_b",
+		"storage_path":%q,
+		"libraries":[
+			{"id":"lib_a","name":"A","path":%q},
+			{"id":"lib_b","name":"B","path":%q}
+		],
+		"thumbnail_dir":%q,
+		"thumbnail_size":512,
+		"trash_dir":%q,
+		"use_system_player":false,
+		"theme":"light",
+		"grid_size":180,
+		"grid_gap":2,
+		"thumb_radius":2,
+		"slideshow_mode":"random",
+		"slideshow_loop":true,
+		"slideshow_interval":5000,
+		"lightbox_zoom":100,
+		"video_section_min_minutes":10,
+		"experimental_prefetch_neighbors":true,
+		"continue_last_video_position":true
+	}`, libB, libA, libB, cfg.ThumbnailDir, cfg.TrashDir)
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		RequiresRestart bool `json:"requires_restart"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析设置更新响应失败: %v", err)
+	}
+	if !resp.RequiresRestart {
+		t.Fatalf("期望切换资源库时返回 requires_restart=true，得到 %s", w.Body.String())
+	}
+}
+
+func TestSettingsUpdate_PreservesLibraryOwnerUsername(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Port = 8080
+	cfg.ActiveProfile = "Administrator"
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = "/libraries/a"
+	cfg.ThumbnailDir = filepath.Join(cfg.AppDataDir, "thumbnails")
+	cfg.TrashDir = filepath.Join(cfg.AppDataDir, "Trash")
+	cfg.Users = []config.User{
+		{Username: "admin", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "Administrator", PasswordHash: "hash", Role: config.UserRoleAdmin},
+	}
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a", OwnerUsername: "admin"},
+	}
+	profile := config.NewUserProfileTemplate(cfg)
+	profile.ActiveLibraryID = "lib_a"
+	profile.StoragePath = "/libraries/a"
+	if err := config.SaveProfile(cfg, "Administrator", profile); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+
+	router := NewRouter(cfg, okRegistrar())
+	body := fmt.Sprintf(`{
+		"port":8080,
+		"active_library_id":"lib_a",
+		"storage_path":%q,
+		"libraries":[{"id":"lib_a","name":"A","path":%q}],
+		"thumbnail_dir":%q,
+		"thumbnail_size":512,
+		"trash_dir":%q,
+		"use_system_player":false,
+		"theme":"light",
+		"grid_size":180,
+		"grid_gap":2,
+		"thumb_radius":2,
+		"slideshow_mode":"random",
+		"slideshow_loop":true,
+		"slideshow_interval":5000,
+		"lightbox_zoom":100,
+		"video_section_min_minutes":10,
+		"experimental_prefetch_neighbors":true,
+		"continue_last_video_position":true
+	}`, "/libraries/a", "/libraries/a", cfg.ThumbnailDir, cfg.TrashDir)
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "Administrator")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if got := cfg.Libraries[0].OwnerUsername; got != "admin" {
+		t.Fatalf("期望设置保存后保留原 owner=admin，得到 %q", got)
+	}
+}
+
+func TestSettingsUpdate_LibraryAccessChangesAreIgnoredBySettingsAPI(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Port = 8080
+	cfg.ActiveProfile = "alice"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: "/libraries/a"},
+		{ID: "lib_b", Name: "B", Path: "/libraries/b"},
+	}
+	cfg.Users = []config.User{
+		{Username: "alice", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "bob", PasswordHash: "hash", Role: config.UserRoleVisitor, AllowedLibraryIDs: []string{"lib_a"}, DefaultLibraryID: "lib_a"},
+	}
+	adminProfile := config.NewUserProfileTemplate(cfg)
+	adminProfile.ActiveLibraryID = "lib_a"
+	adminProfile.StoragePath = "/libraries/a"
+	if err := config.SaveProfile(cfg, "alice", adminProfile); err != nil {
+		t.Fatalf("保存管理员 profile 失败: %v", err)
+	}
+	visitorProfile := config.NewUserProfileTemplate(cfg)
+	visitorProfile.ActiveLibraryID = "lib_a"
+	visitorProfile.StoragePath = "/libraries/a"
+	if err := config.SaveProfile(cfg, "bob", visitorProfile); err != nil {
+		t.Fatalf("保存访客 profile 失败: %v", err)
+	}
+
+	router := NewRouter(cfg, okRegistrar())
+	body := `{
+		"port":8080,
+		"active_library_id":"lib_a",
+		"storage_path":"/libraries/a",
+		"libraries":[
+			{"id":"lib_a","name":"A","path":"/libraries/a"},
+			{"id":"lib_b","name":"B","path":"/libraries/b"}
+		],
+		"thumbnail_dir":"` + filepath.ToSlash(filepath.Join(cfg.AppDataDir, "thumbs")) + `",
+		"thumbnail_size":512,
+		"trash_dir":"` + filepath.ToSlash(filepath.Join(cfg.AppDataDir, "trash")) + `",
+		"use_system_player":false,
+		"theme":"light",
+		"grid_size":180,
+		"grid_gap":2,
+		"thumb_radius":2,
+		"sidebar_auto_hide":true,
+		"slideshow_mode":"random",
+		"slideshow_loop":true,
+		"slideshow_interval":5000,
+		"lightbox_zoom":100,
+		"video_section_min_minutes":10,
+		"experimental_prefetch_neighbors":true,
+		"continue_last_video_position":true,
+		"library_access":[
+			{"username":"alice","allowed_library_ids":["lib_a","lib_b"],"default_library_id":"lib_b","current_library_id":"lib_a"},
+			{"username":"bob","allowed_library_ids":["lib_b"],"default_library_id":"lib_b","current_library_id":"lib_b"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	adminUser, _ := config.FindUser(cfg, "alice")
+	if adminUser == nil {
+		t.Fatal("期望管理员用户仍存在")
+	}
+	if !slices.Equal(adminUser.AllowedLibraryIDs, []string{"lib_a", "lib_b"}) {
+		t.Fatalf("期望管理员固定可访问全部资源库，得到 %+v", adminUser.AllowedLibraryIDs)
+	}
+	visitorUser, _ := config.FindUser(cfg, "bob")
+	if visitorUser == nil {
+		t.Fatal("期望访客用户仍存在")
+	}
+	if !slices.Equal(visitorUser.AllowedLibraryIDs, []string{"lib_a"}) {
+		t.Fatalf("设置页不应再改动访客资源库授权，得到 %+v", visitorUser.AllowedLibraryIDs)
+	}
+	if visitorUser.DefaultLibraryID != "lib_a" {
+		t.Fatalf("设置页不应再改动访客默认资源库，得到 %q", visitorUser.DefaultLibraryID)
+	}
+	savedVisitor, err := config.LoadProfile(cfg, "bob")
+	if err != nil {
+		t.Fatalf("读取访客 profile 失败: %v", err)
+	}
+	if savedVisitor.ActiveLibraryID != "lib_a" || savedVisitor.StoragePath != "/libraries/a" {
+		t.Fatalf("设置页不应再改动访客当前资源库，得到 id=%q path=%q", savedVisitor.ActiveLibraryID, savedVisitor.StoragePath)
+	}
+}
+
+func TestServeLibraryLogo_RegeneratesFromLibraryThumbnails(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Port = 8080
+	cfg.ThumbnailDir = filepath.Join(cfg.AppDataDir, "thumbnails")
+	cfg.TrashDir = filepath.Join(cfg.AppDataDir, "Trash")
+	libA := filepath.Join(cfg.AppDataDir, "library-a")
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = libA
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: libA},
+	}
+	thumbPath := filepath.Join(cfg.ThumbnailDir, "lib_a", "ab", "cd", "sample.png")
+	if err := os.MkdirAll(filepath.Dir(thumbPath), 0755); err != nil {
+		t.Fatalf("创建缩略图目录失败: %v", err)
+	}
+	if err := os.WriteFile(thumbPath, pngSample(t), 0644); err != nil {
+		t.Fatalf("写入缩略图样本失败: %v", err)
+	}
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/libraries/0/logo", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if strings.TrimSpace(cfg.Libraries[0].LogoAsset) == "" {
+		t.Fatalf("期望自动写入资源库头像")
 	}
 }
 
@@ -1550,6 +2309,69 @@ func TestServeThumbnailFile_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，得到 %d", w.Code)
 	}
+	if cacheControl := w.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "immutable") {
+		t.Fatalf("期望缩略图使用强缓存，得到 %q", cacheControl)
+	}
+}
+
+func TestListMedia_IncludesThumbnailMetadata(t *testing.T) {
+	cfg := testConfig()
+	storageDir := t.TempDir()
+	thumbDir := filepath.Join(storageDir, ".thumbnails")
+	thumbFile := imgpkg.ThumbnailShardPath(thumbDir, "photo-1")
+	if err := os.MkdirAll(filepath.Dir(thumbFile), 0755); err != nil {
+		t.Fatalf("创建缩略图目录失败: %v", err)
+	}
+	if err := os.WriteFile(thumbFile, []byte("thumb-data"), 0644); err != nil {
+		t.Fatalf("创建测试缩略图失败: %v", err)
+	}
+	router := NewRouter(cfg, stubRegistrar{
+		register: okRegistrar().register,
+		getTimeline: func(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
+			return &storage.PhotoPage{Photos: []*storage.Photo{{
+				ID:           11,
+				UUID:         "photo-1",
+				OriginalName: "photo.jpg",
+				MediaKind:    storage.MediaKindImage,
+				MimeType:     "image/jpeg",
+				Width:        1200,
+				Height:       800,
+				UploadedBy:   params.UserID,
+			}}}, nil
+		},
+		thumbnailPath: func(photo *storage.Photo) string { return imgpkg.ThumbnailShardPath(thumbDir, photo.UUID) },
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/media", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Photos []struct {
+			UUID           string `json:"uuid"`
+			Width          int    `json:"width"`
+			Height         int    `json:"height"`
+			ThumbnailURL   string `json:"thumbnail_url"`
+			ThumbnailReady bool   `json:"thumbnail_ready"`
+		} `json:"photos"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if len(resp.Photos) != 1 {
+		t.Fatalf("期望 1 张媒体，得到 %d", len(resp.Photos))
+	}
+	photo := resp.Photos[0]
+	if photo.ThumbnailURL != "/media/thumbnails/photo-1" || !photo.ThumbnailReady {
+		t.Fatalf("缩略图字段不正确: %+v", photo)
+	}
+	if photo.Width != 1200 || photo.Height != 800 {
+		t.Fatalf("尺寸字段不正确: %+v", photo)
+	}
 }
 
 func TestServeSharedMediaFile_AlbumSuccess(t *testing.T) {
@@ -2176,6 +2998,156 @@ func TestRevealMediaInFinder_Success(t *testing.T) {
 	}
 }
 
+func TestRevealMediaInFinder_UsesLibraryOwnerUserID(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "owner", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "administrator", PasswordHash: "hash", Role: config.UserRoleAdmin},
+	}
+	cfg.ActiveProfile = "administrator"
+	cfg.ActiveLibraryID = "lib_owner"
+	cfg.StoragePath = "/tmp/owner-library"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_owner", Name: "Owner Library", Path: "/tmp/owner-library", OwnerUsername: "owner"},
+	}
+	if err := config.SaveProfile(cfg, "owner", &config.Profile{
+		ActiveLibraryID: "lib_owner",
+		StoragePath:     "/tmp/owner-library",
+	}); err != nil {
+		t.Fatalf("保存 owner profile 失败: %v", err)
+	}
+	if err := config.SaveProfile(cfg, "administrator", &config.Profile{
+		ActiveLibraryID: "lib_owner",
+		StoragePath:     "/tmp/owner-library",
+	}); err != nil {
+		t.Fatalf("保存 administrator profile 失败: %v", err)
+	}
+
+	var gotUserID int64
+	router := NewRouter(cfg, stubRegistrar{
+		addPhoto:                okRegistrar().addPhoto,
+		createAlbum:             okRegistrar().createAlbum,
+		createShare:             okRegistrar().createShare,
+		deleteAlbum:             okRegistrar().deleteAlbum,
+		deleteShare:             okRegistrar().deleteShare,
+		getAlbum:                okRegistrar().getAlbum,
+		getAlbumDownloadEntries: okRegistrar().getAlbumDownloadEntries,
+		getShareByToken:         okRegistrar().getShareByToken,
+		listAlbums:              okRegistrar().listAlbums,
+		listShares:              okRegistrar().listShares,
+		removePhoto:             okRegistrar().removePhoto,
+		updateAlbum:             okRegistrar().updateAlbum,
+		register:                okRegistrar().register,
+		upload:                  okRegistrar().upload,
+		deletePhoto:             okRegistrar().deletePhoto,
+		emptyTrash:              okRegistrar().emptyTrash,
+		getDownloadEntries:      okRegistrar().getDownloadEntries,
+		getAlbumMedia:           okRegistrar().getAlbumMedia,
+		getPhoto:                okRegistrar().getPhoto,
+		getByUUID:               okRegistrar().getByUUID,
+		getTrash:                okRegistrar().getTrash,
+		getTimeline:             okRegistrar().getTimeline,
+		mediaPath:               okRegistrar().mediaPath,
+		permanentlyDeletePhoto:  okRegistrar().permanentlyDeletePhoto,
+		posterPath:              okRegistrar().posterPath,
+		revealInFinder: func(id int64, userID int64) error {
+			gotUserID = userID
+			return nil
+		},
+		restorePhoto:  okRegistrar().restorePhoto,
+		thumbnailPath: okRegistrar().thumbnailPath,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/media/2/reveal", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "administrator")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if gotUserID != 1 {
+		t.Fatalf("期望 reveal 使用资源库 owner user_id=1，得到 %d", gotUserID)
+	}
+}
+
+func TestRevealAlbumInFinder_UsesLibraryOwnerUserID(t *testing.T) {
+	cfg := testConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Users = []config.User{
+		{Username: "owner", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "administrator", PasswordHash: "hash", Role: config.UserRoleAdmin},
+	}
+	cfg.ActiveProfile = "administrator"
+	cfg.ActiveLibraryID = "lib_owner"
+	cfg.StoragePath = "/tmp/owner-library"
+	cfg.Libraries = []config.Library{
+		{ID: "lib_owner", Name: "Owner Library", Path: "/tmp/owner-library", OwnerUsername: "owner"},
+	}
+	if err := config.SaveProfile(cfg, "owner", &config.Profile{
+		ActiveLibraryID: "lib_owner",
+		StoragePath:     "/tmp/owner-library",
+	}); err != nil {
+		t.Fatalf("保存 owner profile 失败: %v", err)
+	}
+	if err := config.SaveProfile(cfg, "administrator", &config.Profile{
+		ActiveLibraryID: "lib_owner",
+		StoragePath:     "/tmp/owner-library",
+	}); err != nil {
+		t.Fatalf("保存 administrator profile 失败: %v", err)
+	}
+
+	var gotUserID int64
+	router := NewRouter(cfg, stubRegistrar{
+		addPhoto:                okRegistrar().addPhoto,
+		createAlbum:             okRegistrar().createAlbum,
+		createShare:             okRegistrar().createShare,
+		deleteAlbum:             okRegistrar().deleteAlbum,
+		deleteShare:             okRegistrar().deleteShare,
+		getAlbum:                okRegistrar().getAlbum,
+		getAlbumDownloadEntries: okRegistrar().getAlbumDownloadEntries,
+		getShareByToken:         okRegistrar().getShareByToken,
+		listAlbums:              okRegistrar().listAlbums,
+		listShares:              okRegistrar().listShares,
+		removePhoto:             okRegistrar().removePhoto,
+		updateAlbum:             okRegistrar().updateAlbum,
+		register:                okRegistrar().register,
+		upload:                  okRegistrar().upload,
+		deletePhoto:             okRegistrar().deletePhoto,
+		emptyTrash:              okRegistrar().emptyTrash,
+		getDownloadEntries:      okRegistrar().getDownloadEntries,
+		getAlbumMedia:           okRegistrar().getAlbumMedia,
+		getPhoto:                okRegistrar().getPhoto,
+		getByUUID:               okRegistrar().getByUUID,
+		getTrash:                okRegistrar().getTrash,
+		getTimeline:             okRegistrar().getTimeline,
+		mediaPath:               okRegistrar().mediaPath,
+		permanentlyDeletePhoto:  okRegistrar().permanentlyDeletePhoto,
+		posterPath:              okRegistrar().posterPath,
+		revealAlbumInFinder: func(id int64, userID int64) error {
+			gotUserID = userID
+			return nil
+		},
+		restorePhoto:  okRegistrar().restorePhoto,
+		thumbnailPath: okRegistrar().thumbnailPath,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/media/albums/7/reveal", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "administrator")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if gotUserID != 1 {
+		t.Fatalf("期望相册 reveal 使用资源库 owner user_id=1，得到 %d", gotUserID)
+	}
+}
+
 func TestDownloadMedia_NotFound(t *testing.T) {
 	registrar := okRegistrar()
 	registrar.getPhoto = func(id int64, userID int64) (*storage.Photo, error) {
@@ -2390,6 +3362,390 @@ func TestLogin_UsesPortScopedCookie(t *testing.T) {
 	}
 }
 
+func TestLogin_NewPageSessionReplacesOldPage(t *testing.T) {
+	cfg := testConfig()
+	store, err := pagesession.New(filepath.Join(t.TempDir(), "page-sessions.db"))
+	if err != nil {
+		t.Fatalf("failed to create page session store: %v", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Fatalf("failed to close page session store: %v", closeErr)
+		}
+	}()
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{PageSessions: store})
+
+	loginA := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginA.Header.Set("Content-Type", "application/json")
+	loginA.Header.Set(pageSessionHeader, "page-a")
+	loginAW := httptest.NewRecorder()
+	router.ServeHTTP(loginAW, loginA)
+	if loginAW.Code != http.StatusOK {
+		t.Fatalf("first login expected 200, got %d with body %s", loginAW.Code, loginAW.Body.String())
+	}
+
+	loginB := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginB.Header.Set("Content-Type", "application/json")
+	loginB.Header.Set(pageSessionHeader, "page-b")
+	loginBW := httptest.NewRecorder()
+	router.ServeHTTP(loginBW, loginB)
+	if loginBW.Code != http.StatusOK {
+		t.Fatalf("second login expected 200, got %d with body %s", loginBW.Code, loginBW.Body.String())
+	}
+
+	oldReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	oldReq.Header.Set(pageSessionHeader, "page-a")
+	for _, cookie := range loginAW.Result().Cookies() {
+		oldReq.AddCookie(cookie)
+	}
+	oldW := httptest.NewRecorder()
+	router.ServeHTTP(oldW, oldReq)
+	if oldW.Code != http.StatusUnauthorized {
+		t.Fatalf("old page session expected 401, got %d with body %s", oldW.Code, oldW.Body.String())
+	}
+	if !strings.Contains(oldW.Body.String(), "duplicate_page_session") {
+		t.Fatalf("old page session should be rejected as duplicate, got %s", oldW.Body.String())
+	}
+
+	newReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	newReq.Header.Set(pageSessionHeader, "page-b")
+	for _, cookie := range loginBW.Result().Cookies() {
+		newReq.AddCookie(cookie)
+	}
+	newW := httptest.NewRecorder()
+	router.ServeHTTP(newW, newReq)
+	if newW.Code != http.StatusOK {
+		t.Fatalf("new page session expected 200, got %d with body %s", newW.Code, newW.Body.String())
+	}
+}
+
+func TestAuth_PageSessionKeepsDifferentUsersIsolatedWhenCookieChanges(t *testing.T) {
+	cfg := testConfig()
+	cfg.Users = append(cfg.Users, config.User{
+		Username:     "bob",
+		PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2",
+		Role:         config.UserRoleAdmin,
+	})
+	store, err := pagesession.New(filepath.Join(t.TempDir(), "page-sessions.db"))
+	if err != nil {
+		t.Fatalf("failed to create page session store: %v", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Fatalf("failed to close page session store: %v", closeErr)
+		}
+	}()
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{PageSessions: store})
+
+	loginAlice := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginAlice.Header.Set("Content-Type", "application/json")
+	loginAlice.Header.Set(pageSessionHeader, "page-alice")
+	loginAliceW := httptest.NewRecorder()
+	router.ServeHTTP(loginAliceW, loginAlice)
+	if loginAliceW.Code != http.StatusOK {
+		t.Fatalf("alice login expected 200, got %d with body %s", loginAliceW.Code, loginAliceW.Body.String())
+	}
+
+	loginBob := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"bob","password":"password123"}`))
+	loginBob.Header.Set("Content-Type", "application/json")
+	loginBob.Header.Set(pageSessionHeader, "page-bob")
+	loginBobW := httptest.NewRecorder()
+	router.ServeHTTP(loginBobW, loginBob)
+	if loginBobW.Code != http.StatusOK {
+		t.Fatalf("bob login expected 200, got %d with body %s", loginBobW.Code, loginBobW.Body.String())
+	}
+
+	oldAliceReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	oldAliceReq.Header.Set(pageSessionHeader, "page-alice")
+	for _, cookie := range loginBobW.Result().Cookies() {
+		oldAliceReq.AddCookie(cookie)
+	}
+	oldAliceW := httptest.NewRecorder()
+	router.ServeHTTP(oldAliceW, oldAliceReq)
+	if oldAliceW.Code != http.StatusOK {
+		t.Fatalf("alice page should survive bob cookie overwrite, got %d with body %s", oldAliceW.Code, oldAliceW.Body.String())
+	}
+	if !strings.Contains(oldAliceW.Body.String(), `"current_username":"alice"`) {
+		t.Fatalf("alice page should keep alice identity, got %s", oldAliceW.Body.String())
+	}
+}
+
+func TestLogin_RedirectToFreshPageSessionStillAuthenticates(t *testing.T) {
+	cfg := testConfig()
+	store, err := pagesession.New(filepath.Join(t.TempDir(), "page-sessions.db"))
+	if err != nil {
+		t.Fatalf("failed to create page session store: %v", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Fatalf("failed to close page session store: %v", closeErr)
+		}
+	}()
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{PageSessions: store})
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set(pageSessionHeader, "login-page-session")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login expected 200, got %d with body %s", loginW.Code, loginW.Body.String())
+	}
+
+	releaseReq := httptest.NewRequest(http.MethodPost, "/api/auth/session/release?eg_page_session=login-page-session", nil)
+	for _, cookie := range loginW.Result().Cookies() {
+		releaseReq.AddCookie(cookie)
+	}
+	releaseW := httptest.NewRecorder()
+	router.ServeHTTP(releaseW, releaseReq)
+	if releaseW.Code != http.StatusOK {
+		t.Fatalf("release expected 200, got %d with body %s", releaseW.Code, releaseW.Body.String())
+	}
+
+	appReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	appReq.Header.Set(pageSessionHeader, "app-page-session")
+	for _, cookie := range loginW.Result().Cookies() {
+		appReq.AddCookie(cookie)
+	}
+	appW := httptest.NewRecorder()
+	router.ServeHTTP(appW, appReq)
+	if appW.Code != http.StatusOK {
+		t.Fatalf("fresh app page session should authenticate, got %d with body %s", appW.Code, appW.Body.String())
+	}
+}
+
+func TestLogin_RedirectUsingSamePageSessionStillAuthenticates(t *testing.T) {
+	cfg := testConfig()
+	store, err := pagesession.New(filepath.Join(t.TempDir(), "page-sessions.db"))
+	if err != nil {
+		t.Fatalf("failed to create page session store: %v", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Fatalf("failed to close page session store: %v", closeErr)
+		}
+	}()
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{PageSessions: store})
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set(pageSessionHeader, "login-page-session")
+	loginW := httptest.NewRecorder()
+	router.ServeHTTP(loginW, loginReq)
+	if loginW.Code != http.StatusOK {
+		t.Fatalf("login expected 200, got %d with body %s", loginW.Code, loginW.Body.String())
+	}
+
+	appReq := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	appReq.Header.Set(pageSessionHeader, "login-page-session")
+	for _, cookie := range loginW.Result().Cookies() {
+		appReq.AddCookie(cookie)
+	}
+	appW := httptest.NewRecorder()
+	router.ServeHTTP(appW, appReq)
+	if appW.Code != http.StatusOK {
+		t.Fatalf("same page session after login redirect should authenticate, got %d with body %s", appW.Code, appW.Body.String())
+	}
+}
+
+func TestPageSessionRelease_WithoutAuthCookieStillReleasesLocks(t *testing.T) {
+	cfg := testConfig()
+	pageStore, err := pagesession.New(filepath.Join(t.TempDir(), "page-sessions.db"))
+	if err != nil {
+		t.Fatalf("failed to create page session store: %v", err)
+	}
+	defer func() {
+		if closeErr := pageStore.Close(); closeErr != nil {
+			t.Fatalf("failed to close page session store: %v", closeErr)
+		}
+	}()
+	lockStore, err := sessionlock.New(filepath.Join(t.TempDir(), "locks.db"))
+	if err != nil {
+		t.Fatalf("failed to create lock store: %v", err)
+	}
+	defer func() {
+		if closeErr := lockStore.Close(); closeErr != nil {
+			t.Fatalf("failed to close lock store: %v", closeErr)
+		}
+	}()
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "资源库 A", Path: "/tmp/library-a"},
+	}
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = "/tmp/library-a"
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{PageSessions: pageStore, LockStore: lockStore})
+
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set(pageSessionHeader, "page-a")
+	loginResp := httptest.NewRecorder()
+	router.ServeHTTP(loginResp, loginReq)
+	if loginResp.Code != http.StatusOK {
+		t.Fatalf("login expected 200, got %d with body %s", loginResp.Code, loginResp.Body.String())
+	}
+
+	settingsReq := httptest.NewRequest(http.MethodGet, "/api/media", nil)
+	settingsReq.Header.Set(pageSessionHeader, "page-a")
+	for _, cookie := range loginResp.Result().Cookies() {
+		settingsReq.AddCookie(cookie)
+	}
+	settingsResp := httptest.NewRecorder()
+	router.ServeHTTP(settingsResp, settingsReq)
+	if settingsResp.Code != http.StatusOK {
+		t.Fatalf("media expected 200, got %d with body %s", settingsResp.Code, settingsResp.Body.String())
+	}
+
+	activeBefore, err := lockStore.ActiveForLibrary("lib_a")
+	if err != nil {
+		t.Fatalf("failed to inspect active locks before release: %v", err)
+	}
+	if len(activeBefore) == 0 {
+		t.Fatal("expected browse lock to exist before release")
+	}
+
+	releaseReq := httptest.NewRequest(http.MethodPost, "/api/auth/session/release?eg_page_session=page-a", nil)
+	releaseResp := httptest.NewRecorder()
+	router.ServeHTTP(releaseResp, releaseReq)
+	if releaseResp.Code != http.StatusOK {
+		t.Fatalf("release expected 200, got %d with body %s", releaseResp.Code, releaseResp.Body.String())
+	}
+
+	activeAfter, err := lockStore.ActiveForLibrary("lib_a")
+	if err != nil {
+		t.Fatalf("failed to inspect active locks after release: %v", err)
+	}
+	if len(activeAfter) != 0 {
+		t.Fatalf("expected release to clear browse locks immediately, got %+v", activeAfter)
+	}
+}
+
+func TestLogin_VisitorDefaultsToPrimaryLibrary(t *testing.T) {
+	cfg := visitorConfig()
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "资源库 A", Path: "/tmp/library-a"},
+	}
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"active_library_id":"lib_a"`) {
+		t.Fatalf("期望登录后落到主要资源库，得到 %s", w.Body.String())
+	}
+}
+
+func TestLogin_RootAccountMustUseRootConsole(t *testing.T) {
+	cfg := &config.Config{
+		StoragePath: tTempStoragePath,
+		AppDataDir:  tTempStoragePath,
+		JWTSecret:   "test-secret",
+		Users: []config.User{
+			{Username: "root", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleRoot},
+		},
+	}
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"root","password":"password123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("期望 403，得到 %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "./EchoGallery root") {
+		t.Fatalf("期望提示使用 root 控制台，得到 %s", w.Body.String())
+	}
+}
+
+func TestFavoritesUseCurrentLibraryOwnerForAdminBrowsing(t *testing.T) {
+	cfg := testConfig()
+	cfg.Users = []config.User{
+		{Username: "owner", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleAdmin},
+		{Username: "alice", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleAdmin},
+	}
+	cfg.Libraries = []config.Library{
+		{ID: "lib_owner", Name: "Owner Library", Path: "/tmp/owner-library", OwnerUsername: "owner"},
+	}
+	cfg.ActiveLibraryID = "lib_owner"
+	cfg.StoragePath = "/tmp/owner-library"
+
+	called := false
+	router := NewRouter(cfg, stubRegistrar{
+		register: okRegistrar().register,
+		getFavorites: func(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
+			called = true
+			if params.UserID != 1 {
+				return nil, fmt.Errorf("unexpected user id: %d", params.UserID)
+			}
+			return &storage.PhotoPage{Photos: []*storage.Photo{}, NextCursor: "", HasMore: false, Total: 0}, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/media/favorites", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if !called {
+		t.Fatal("应调用收藏列表查询")
+	}
+}
+
+func TestFavoritesUseCurrentLibraryOwnerForAdminMutation(t *testing.T) {
+	cfg := testConfig()
+	cfg.Users = []config.User{
+		{Username: "owner", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleAdmin},
+		{Username: "alice", PasswordHash: "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2", Role: config.UserRoleAdmin},
+	}
+	cfg.Libraries = []config.Library{
+		{ID: "lib_owner", Name: "Owner Library", Path: "/tmp/owner-library", OwnerUsername: "owner"},
+	}
+	cfg.ActiveLibraryID = "lib_owner"
+	cfg.StoragePath = "/tmp/owner-library"
+
+	called := false
+	router := NewRouter(cfg, stubRegistrar{
+		register: okRegistrar().register,
+		setPhotoFavorite: func(id int64, userID int64, favorite bool, superFavorite bool) error {
+			called = true
+			if id != 9 {
+				return fmt.Errorf("unexpected photo id: %d", id)
+			}
+			if userID != 1 {
+				return fmt.Errorf("unexpected user id: %d", userID)
+			}
+			if !favorite || superFavorite {
+				return fmt.Errorf("unexpected favorite payload: favorite=%v super=%v", favorite, superFavorite)
+			}
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/media/9/favorite", strings.NewReader(`{"favorite":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if !called {
+		t.Fatal("应调用收藏写入逻辑")
+	}
+}
+
 func TestLogin_WrongPassword(t *testing.T) {
 	router := NewRouter(testConfig(), okRegistrar())
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"alice","password":"wrongpass"}`))
@@ -2442,6 +3798,102 @@ func TestRegisterPage_Returns200(t *testing.T) {
 	}
 }
 
+func TestRootConsole_ForcedSessionCanOpenAppAndReadSettings(t *testing.T) {
+	cfg := testConfig()
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "资源库 A", Path: "/tmp/library-a"},
+		{ID: "lib_b", Name: "资源库 B", Path: "/tmp/library-b"},
+	}
+	cfg.StoragePath = "/tmp/library-a"
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{ForcedUsername: rootConsoleUsername})
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageResp := httptest.NewRecorder()
+	router.ServeHTTP(pageResp, pageReq)
+	if pageResp.Code != http.StatusOK {
+		t.Fatalf("期望 root 控制台首页返回 200，得到 %d", pageResp.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		CurrentUsername string `json:"current_username"`
+		Role            string `json:"role"`
+		CanRoot         bool   `json:"can_root"`
+		CanWrite        bool   `json:"can_write"`
+		ActiveLibraryID string `json:"active_library_id"`
+		StoragePath     string `json:"storage_path"`
+		Libraries       []struct {
+			ID string `json:"id"`
+		} `json:"libraries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 settings 响应失败: %v", err)
+	}
+	if resp.CurrentUsername != "root" || resp.Role != config.UserRoleRoot {
+		t.Fatalf("期望 root 会话信息，得到 %+v", resp)
+	}
+	if !resp.CanRoot || resp.CanWrite {
+		t.Fatalf("期望 root 仅拥有 root 能力，得到 can_root=%v can_write=%v", resp.CanRoot, resp.CanWrite)
+	}
+	if resp.ActiveLibraryID != "" || resp.StoragePath != "" {
+		t.Fatalf("root 控制台不应绑定当前资源库，得到 active=%q storage=%q", resp.ActiveLibraryID, resp.StoragePath)
+	}
+	if len(resp.Libraries) != 2 {
+		t.Fatalf("期望 root 可查看全部资源库，得到 %d", len(resp.Libraries))
+	}
+}
+
+func TestRootConsole_ForcedSessionCanListUsers(t *testing.T) {
+	cfg := testConfig()
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "资源库 A", Path: "/tmp/library-a"},
+	}
+	cfg.Users = append(cfg.Users, config.User{
+		Username:          "guest",
+		PasswordHash:      "$2a$10$m2CWsTFrqFNGPW/bGg4UluO.WX/e.rgEkX4yxHJI.VABfOyGA8BA2",
+		Role:              config.UserRoleVisitor,
+		AllowedLibraryIDs: nil,
+	})
+	router := NewRouterWithOptions(cfg, okRegistrar(), RouterOptions{ForcedUsername: rootConsoleUsername})
+	req := httptest.NewRequest(http.MethodGet, "/api/root/users", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Users []struct {
+			Username           string `json:"username"`
+			Role               string `json:"role"`
+			CanLogin           bool   `json:"can_login"`
+			LoginBlockedReason string `json:"login_blocked_reason"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 root users 响应失败: %v", err)
+	}
+	if len(resp.Users) != 2 {
+		t.Fatalf("期望返回 2 个用户，得到 %d", len(resp.Users))
+	}
+	if resp.Users[1].Username != "guest" || resp.Users[1].Role != config.UserRoleVisitor {
+		t.Fatalf("期望 guest 为 visitor，得到 %+v", resp.Users[1])
+	}
+	if !resp.Users[1].CanLogin {
+		t.Fatalf("默认 visitor 应可登录，得到 %+v", resp.Users[1])
+	}
+	if resp.Users[1].LoginBlockedReason != "" {
+		t.Fatalf("默认 visitor 不应带授权阻塞原因，得到 %+v", resp.Users[1])
+	}
+}
+
 func TestAppPage_RequiresAuth(t *testing.T) {
 	router := NewRouter(testConfig(), okRegistrar())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -2476,6 +3928,112 @@ func TestUploadPlaceholder_RequiresAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("期望 401，得到 %d", w.Code)
+	}
+}
+
+func TestVisitor_CanOnlyUpdateHarmlessSettings(t *testing.T) {
+	cfg := visitorConfig()
+	cfg.AppDataDir = t.TempDir()
+	cfg.Port = 8080
+	cfg.StoragePath = filepath.Join(cfg.AppDataDir, "library-a")
+	cfg.Libraries = []config.Library{
+		{ID: "lib_a", Name: "A", Path: cfg.StoragePath},
+	}
+	cfg.ThumbnailDir = filepath.Join(cfg.AppDataDir, "thumbnails")
+	cfg.TrashDir = filepath.Join(cfg.AppDataDir, "Trash")
+	cfg.Preferences.Theme = "light"
+	cfg.Preferences.GridGap = 2
+	cfg.Preferences.LowResourceMode = false
+	router := NewRouter(cfg, okRegistrar())
+	body := fmt.Sprintf(`{"port":9090,"active_library_id":"lib_b","storage_path":%q,"libraries":[{"id":"lib_b","name":"B","path":%q}],"thumbnail_dir":%q,"thumbnail_size":512,"trash_dir":%q,"use_system_player":true,"theme":"dark","grid_size":196,"grid_gap":6,"thumb_radius":8,"sidebar_auto_hide":true,"slideshow_mode":"sequential","slideshow_loop":false,"slideshow_interval":7000,"lightbox_zoom":100,"experimental_autoplay_video":true,"video_autoplay_next":true,"video_section_min_minutes":12,"experimental_prefetch_neighbors":false,"experimental_restore_last_view":true,"continue_last_video_position":false,"low_resource_mode":true,"player_keymap":"SPACE pause"}`, filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "other-thumbnails"), filepath.Join(cfg.AppDataDir, "other-trash"))
+	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+
+	profile, err := config.LoadProfile(cfg, "alice")
+	if err != nil {
+		t.Fatalf("读取 visitor profile 失败: %v", err)
+	}
+	if profile.StoragePath != filepath.Join(cfg.AppDataDir, "library-a") {
+		t.Fatalf("visitor 不应改动 storage_path，得到 %q", profile.StoragePath)
+	}
+	if len(profile.Libraries) != 0 {
+		t.Fatalf("visitor profile 不应持久化共享 libraries，得到 %+v", profile.Libraries)
+	}
+	if profile.ThumbnailDir != filepath.Join(cfg.AppDataDir, "thumbnails") {
+		t.Fatalf("visitor 不应改动 thumbnail_dir，得到 %q", profile.ThumbnailDir)
+	}
+	if profile.TrashDir != filepath.Join(cfg.AppDataDir, "Trash") {
+		t.Fatalf("visitor 不应改动 trash_dir，得到 %q", profile.TrashDir)
+	}
+	if profile.Preferences.Theme != "dark" || profile.Preferences.GridGap != 6 {
+		t.Fatalf("visitor 应可保存无害偏好，得到 %+v", profile.Preferences)
+	}
+	if profile.Preferences.LowResourceMode {
+		t.Fatalf("visitor 不应改动 low_resource_mode")
+	}
+	if cfg.Port != 8080 {
+		t.Fatalf("visitor 不应改动全局端口，得到 %d", cfg.Port)
+	}
+}
+
+func TestVisitor_CannotDeleteMedia(t *testing.T) {
+	cfg := visitorConfig()
+	called := false
+	router := NewRouter(cfg, stubRegistrar{
+		deletePhoto: func(id int64, userID int64) error {
+			called = true
+			return nil
+		},
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/media/1", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("期望 403，得到 %d", w.Code)
+	}
+	if called {
+		t.Fatal("visitor 不应进入删除处理逻辑")
+	}
+}
+
+func TestVisitor_CannotStartLibraryBatchBuild(t *testing.T) {
+	cfg := visitorConfig()
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/libraries/build-all", strings.NewReader(`{"selection":[0]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("期望 403，得到 %d", w.Code)
+	}
+}
+
+func TestAdmin_CanReachLibraryBatchBuildRoutes(t *testing.T) {
+	cfg := testConfig()
+	router := NewRouter(cfg, okRegistrar())
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/libraries/build-all", strings.NewReader(`{"selection":[0]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("管理员不应被批量工作流路由拒绝，得到 %d", w.Code)
 	}
 }
 

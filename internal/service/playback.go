@@ -25,14 +25,21 @@ func (s *PhotoService) GetVideoPlaybackPreference(photoID int64, userID int64) (
 	if err != nil {
 		return nil, err
 	}
+	volume := 1.0
+	if libraryVolume, ok, err := s.repo.GetLibraryVideoVolume(); err == nil && ok {
+		volume = normalizeVideoVolume(libraryVolume)
+	} else if pref != nil {
+		volume = normalizeVideoVolume(pref.Volume)
+	}
 	if pref != nil {
+		pref.Volume = volume
 		pref.ResumeTime = normalizeVideoResumeTime(pref.ResumeTime)
 		pref.Bookmarks = normalizeVideoBookmarks(pref.Bookmarks)
 		return pref, nil
 	}
 	return &storage.VideoPlaybackPreference{
 		PhotoID:    photoID,
-		Volume:     1,
+		Volume:     volume,
 		Muted:      false,
 		ResumeTime: 0,
 		Bookmarks:  nil,
@@ -51,7 +58,11 @@ func (s *PhotoService) SaveVideoPlaybackPreference(photoID int64, userID int64, 
 	if photo.MediaKind != storage.MediaKindVideo {
 		return nil, fmt.Errorf("当前媒体不是视频")
 	}
-	return s.repo.UpsertVideoPlaybackPreference(photoID, userID, normalizeVideoVolume(volume), muted, normalizeVideoResumeTime(resumeTime), normalizeVideoBookmarks(bookmarks))
+	normalizedVolume := normalizeVideoVolume(volume)
+	if err := s.repo.SaveLibraryVideoVolume(normalizedVolume); err != nil {
+		return nil, err
+	}
+	return s.repo.UpsertVideoPlaybackPreference(photoID, userID, normalizedVolume, muted, normalizeVideoResumeTime(resumeTime), normalizeVideoBookmarks(bookmarks))
 }
 
 func normalizeVideoVolume(volume float64) float64 {

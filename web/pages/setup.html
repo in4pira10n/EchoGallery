@@ -9,12 +9,12 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>EchoGallery 设置</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/common.css">
-  <link rel="stylesheet" href="/pages/setup.css">
-  <script src="/static/pwa.js" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+  <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/setup.css?v={{ASSET_VERSION}}">
+  <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
 <script>
@@ -140,6 +140,10 @@
     });
   }
 
+  function renderButtonBusySpinner() {
+    return '<span class="button-busy-inline" aria-hidden="true"><span class="button-busy-spinner"></span></span>';
+  }
+
   function renderInit() {
     root.className = 'login-card setup-card setup-init-card';
     var libraries = (state.libraries || []).length ? state.libraries : [{name:text('init.libraryName', '资源库 {index}', { index: 1 }), path:''}];
@@ -222,7 +226,8 @@
       }
       var btn = this;
       btn.disabled = true;
-      btn.textContent = text('init.saving', '保存中…');
+      btn.innerHTML = renderButtonBusySpinner();
+      btn.setAttribute('aria-label', text('init.saving', '保存中…'));
       try {
         var resp = await fetch('/api/setup/init', {
           method: 'POST',
@@ -239,13 +244,15 @@
         });
         var data = await resp.json();
         if (!resp.ok) throw new Error(data.error || '初始化失败');
-        btn.textContent = text('init.restarting', '正在重启…');
+        btn.innerHTML = renderButtonBusySpinner();
+        btn.setAttribute('aria-label', text('init.restarting', '正在重启…'));
         errorEl.style.color = 'var(--accent)';
         errorEl.textContent = data.message || text('init.restarting', '正在重启…');
         setTimeout(function () { location.reload(); }, 2000);
       } catch (e) {
         btn.disabled = false;
         btn.textContent = text('init.save', '保存并重启');
+        btn.removeAttribute('aria-label');
         errorEl.style.color = 'var(--danger)';
         errorEl.textContent = e.message || '初始化失败';
       }
@@ -363,7 +370,8 @@
       }
       var btn = this;
       btn.disabled = true;
-      btn.textContent = text('recovery.switching', '切换中…');
+      btn.innerHTML = renderButtonBusySpinner();
+      btn.setAttribute('aria-label', text('recovery.switching', '切换中…'));
       try {
         var resp = await fetch('/api/setup/select-library', {
           method: 'POST',
@@ -372,13 +380,15 @@
         });
         var data = await resp.json();
         if (!resp.ok) throw new Error(data.error || '切换失败');
-        btn.textContent = text('recovery.restarting', '正在重启…');
+        btn.innerHTML = renderButtonBusySpinner();
+        btn.setAttribute('aria-label', text('recovery.restarting', '正在重启…'));
         errorEl.style.color = 'var(--accent)';
         errorEl.textContent = data.message || '服务正在重启';
         setTimeout(function () { location.reload(); }, 2000);
       } catch (e) {
         btn.disabled = false;
         btn.textContent = text('recovery.select', '切换资源库并重启');
+        btn.removeAttribute('aria-label');
         errorEl.style.color = 'var(--danger)';
         errorEl.textContent = e.message || '切换失败';
       }

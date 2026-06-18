@@ -16,6 +16,7 @@ type playerKeymapResponse struct {
 
 func handleGetPlayerKeymap(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		cfg := requestConfig(c, cfg)
 		if cfg != nil && cfg.Preferences.PlayerKeymap != "" {
 			c.JSON(200, playerKeymapResponse{Content: cfg.Preferences.PlayerKeymap})
 			return

@@ -98,7 +98,7 @@
 .login-card .input {
   height: 48px;
   padding: 0 16px;
-  border-radius: 16px;
+  border-radius: 20px;
   color: #eef6ff;
   background: rgba(229, 242, 255, .1);
   border-color: rgba(190, 222, 255, .2);
@@ -166,6 +166,157 @@
   transform: translateY(-1px);
 }
 
+.register-role-group {
+  margin-top: -2px;
+}
+
+.register-role-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(229, 242, 255, .08);
+  border: 1px solid rgba(190, 222, 255, .14);
+}
+
+.register-role-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.register-role-copy strong {
+  color: #f4f8ff;
+  font-size: .94rem;
+  line-height: 1.2;
+}
+
+.register-role-copy small,
+.register-admin-note {
+  color: rgba(229, 242, 255, .64);
+  font-size: .8rem;
+  line-height: 1.6;
+}
+
+.register-role-state {
+  color: #dceeff;
+  font-size: .76rem;
+  font-style: normal;
+  font-weight: 780;
+  letter-spacing: .01em;
+}
+
+.register-admin-note {
+  margin-top: 10px;
+}
+
+.register-role-switch-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.register-role-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.register-role-switch {
+  width: 52px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(229, 242, 255, .16);
+  box-shadow: inset 0 0 0 1px rgba(190, 222, 255, .18);
+  transition: background .22s ease, box-shadow .22s ease;
+}
+
+.register-role-switch::before {
+  content: "";
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #f4f8ff;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, .2);
+  transition: transform .22s cubic-bezier(.22, 1, .36, 1), background .22s ease;
+}
+
+.register-role-input:checked + .register-role-switch {
+  background: rgba(88, 166, 255, .34);
+}
+
+.register-role-input:checked + .register-role-switch::before {
+  transform: translateX(20px);
+}
+
+.register-role-input:focus-visible + .register-role-switch {
+  box-shadow:
+    inset 0 0 0 1px rgba(190, 222, 255, .18),
+    0 0 0 4px rgba(74, 145, 255, .14);
+}
+
+.auth-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(2, 8, 20, .48);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+}
+
+.auth-dialog-backdrop[hidden] {
+  display: none !important;
+}
+
+.auth-dialog-card {
+  width: min(440px, calc(100vw - 32px));
+  padding: 26px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, rgba(16, 55, 116, .84), rgba(6, 18, 38, .86));
+  border: 1px solid rgba(190, 222, 255, .18);
+  box-shadow:
+    0 28px 72px rgba(2, 10, 30, .38),
+    inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+
+.auth-dialog-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.auth-dialog-head strong {
+  color: #f4f8ff;
+  font-size: 1.12rem;
+}
+
+.auth-dialog-head p {
+  color: rgba(229, 242, 255, .68);
+  font-size: .84rem;
+  line-height: 1.7;
+}
+
+.auth-dialog-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+
+body.dialog-open {
+  overflow: hidden;
+}
+
 @media (max-width: 780px) {
   .login-wrap {
     padding: 18px;
@@ -192,5 +343,9 @@
     padding: 30px;
     border-left: 0;
     border-top: 1px solid rgba(190, 222, 255, .14);
+  }
+
+  .register-role-toggle {
+    align-items: flex-start;
   }
 }

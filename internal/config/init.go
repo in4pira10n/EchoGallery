@@ -34,7 +34,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 		params.StoragePath = libraries[0].Path
 	}
 
-	user, err := newUser(params.Username, params.Password)
+	user, err := newUser(params.Username, params.Password, UserRoleAdmin)
 	if err != nil {
 		return nil, err
 	}

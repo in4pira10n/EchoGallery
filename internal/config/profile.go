@@ -20,14 +20,14 @@ const (
 type Profile struct {
 	ActiveLibraryID string         `json:"active_library_id,omitempty"`
 	StoragePath     string         `json:"storage_path"`
-	Libraries       []Library      `json:"libraries,omitempty"`
+	Libraries       []Library      `json:"libraries,omitempty"` // legacy: migrated into global config
 	ThumbnailDir    string         `json:"thumbnail_dir"`
 	ThumbnailSize   int            `json:"thumbnail_size"`
 	TrashDir        string         `json:"trash_dir"`
 	UseSystemPlayer bool           `json:"use_system_player"`
 	Preferences     Preferences    `json:"preferences"`
-	BatchScan       BatchTaskState `json:"batch_scan,omitempty"`
-	BatchThumbnails BatchTaskState `json:"batch_thumbnails,omitempty"`
+	BatchScan       BatchTaskState `json:"batch_scan,omitempty"`       // legacy: migrated into global config
+	BatchThumbnails BatchTaskState `json:"batch_thumbnails,omitempty"` // legacy: migrated into global config
 }
 
 type BatchTaskLibraryState struct {
@@ -79,6 +79,16 @@ type profileDefaultsProbe struct {
 	} `json:"preferences"`
 }
 
+type persistedProfile struct {
+	ActiveLibraryID string      `json:"active_library_id,omitempty"`
+	StoragePath     string      `json:"storage_path"`
+	ThumbnailDir    string      `json:"thumbnail_dir"`
+	ThumbnailSize   int         `json:"thumbnail_size"`
+	TrashDir        string      `json:"trash_dir"`
+	UseSystemPlayer bool        `json:"use_system_player"`
+	Preferences     Preferences `json:"preferences"`
+}
+
 // ProfileSlug 将用户名转换为稳定且不可越权的目录名。
 func ProfileSlug(username string) string {
 	trimmed := strings.TrimSpace(username)
@@ -126,7 +136,6 @@ func DefaultProfileFromConfig(cfg *Config) *Profile {
 	profile := &Profile{
 		ActiveLibraryID: cfg.ActiveLibraryID,
 		StoragePath:     cfg.StoragePath,
-		Libraries:       append([]Library(nil), cfg.Libraries...),
 		ThumbnailDir:    cfg.ThumbnailDir,
 		ThumbnailSize:   cfg.ThumbnailSize,
 		TrashDir:        cfg.TrashDir,
@@ -177,6 +186,9 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 func EnsureProfile(cfg *Config, username string) (*Profile, error) {
 	profile, err := LoadProfile(cfg, username)
 	if err == nil {
+		if migrateErr := cfg.migrateLegacyProfileLibraries(username, profile); migrateErr != nil {
+			return nil, migrateErr
+		}
 		return profile, nil
 	}
 	if !os.IsNotExist(err) {
@@ -189,18 +201,61 @@ func EnsureProfile(cfg *Config, username string) (*Profile, error) {
 	return profile, nil
 }
 
+func (c *Config) migrateLegacyProfileLibraries(username string, profile *Profile) error {
+	if c == nil || profile == nil || len(profile.Libraries) == 0 {
+		return nil
+	}
+	changedConfig := false
+	existingByPath := make(map[string]struct{}, len(c.Libraries))
+	existingIDs := make(map[string]struct{}, len(c.Libraries))
+	for _, library := range c.Libraries {
+		existingByPath[NormalizeStoragePath(library.Path)] = struct{}{}
+		if id := strings.TrimSpace(library.ID); id != "" {
+			existingIDs[id] = struct{}{}
+		}
+	}
+	for _, library := range profile.Libraries {
+		path := strings.TrimSpace(library.Path)
+		if path == "" {
+			continue
+		}
+		key := NormalizeStoragePath(path)
+		if _, ok := existingByPath[key]; ok {
+			continue
+		}
+		id := ensureLibraryIDForPath(library.ID, path, existingIDs)
+		c.Libraries = append(c.Libraries, Library{
+			ID:            id,
+			Name:          strings.TrimSpace(library.Name),
+			Path:          path,
+			LogoAsset:     strings.TrimSpace(library.LogoAsset),
+			AccentColor:   strings.TrimSpace(library.AccentColor),
+			OwnerUsername: c.defaultLibraryOwnerUsername(),
+		})
+		existingByPath[key] = struct{}{}
+		changedConfig = true
+	}
+	profile.Libraries = nil
+	if selected, ok := c.ResolveUserLibrarySelection(username, profile.ActiveLibraryID, profile.StoragePath); ok {
+		profile.ActiveLibraryID = selected.ID
+		profile.StoragePath = selected.Path
+	}
+	if changedConfig {
+		if err := c.Save(); err != nil {
+			return err
+		}
+	}
+	return SaveProfile(c, username, profile)
+}
+
 func SaveProfile(cfg *Config, username string, profile *Profile) error {
 	if profile == nil {
 		return fmt.Errorf("profile cannot be nil")
 	}
 	next := *profile
-	next.Libraries = append([]Library(nil), profile.Libraries...)
-	next.BatchScan.SelectedLibraryIDs = append([]string(nil), profile.BatchScan.SelectedLibraryIDs...)
-	next.BatchScan.SelectedPaths = append([]string(nil), profile.BatchScan.SelectedPaths...)
-	next.BatchScan.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchScan.Libraries...)
-	next.BatchThumbnails.SelectedLibraryIDs = append([]string(nil), profile.BatchThumbnails.SelectedLibraryIDs...)
-	next.BatchThumbnails.SelectedPaths = append([]string(nil), profile.BatchThumbnails.SelectedPaths...)
-	next.BatchThumbnails.Libraries = append([]BatchTaskLibraryState(nil), profile.BatchThumbnails.Libraries...)
+	next.Libraries = nil
+	next.BatchScan = BatchTaskState{}
+	next.BatchThumbnails = BatchTaskState{}
 	if err := next.validate(cfg); err != nil {
 		return err
 	}
@@ -211,7 +266,16 @@ func SaveProfile(cfg *Config, username string, profile *Profile) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("failed to create profile directory: %w", err)
 	}
-	data, err := json.MarshalIndent(&next, "", "  ")
+	persisted := persistedProfile{
+		ActiveLibraryID: next.ActiveLibraryID,
+		StoragePath:     next.StoragePath,
+		ThumbnailDir:    next.ThumbnailDir,
+		ThumbnailSize:   next.ThumbnailSize,
+		TrashDir:        next.TrashDir,
+		UseSystemPlayer: next.UseSystemPlayer,
+		Preferences:     next.Preferences,
+	}
+	data, err := json.MarshalIndent(&persisted, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to serialize profile: %w", err)
 	}
@@ -223,18 +287,31 @@ func SaveProfile(cfg *Config, username string, profile *Profile) error {
 }
 
 func (c *Config) ApplyProfile(profile *Profile) {
+	c.ApplyProfileForUser(strings.TrimSpace(c.ActiveProfile), profile)
+}
+
+func (c *Config) ApplyProfileForUser(username string, profile *Profile) {
 	if profile == nil {
 		return
 	}
 	profile.applyDefaults(c)
-	c.ActiveLibraryID = profile.ActiveLibraryID
-	c.StoragePath = profile.StoragePath
-	c.Libraries = append([]Library(nil), profile.Libraries...)
 	c.ThumbnailDir = profile.ThumbnailDir
 	c.ThumbnailSize = profile.ThumbnailSize
 	c.TrashDir = profile.TrashDir
 	c.UseSystemPlayer = profile.UseSystemPlayer
 	c.Preferences = profile.Preferences
+	selected, ok := c.ResolveUserLibrarySelection(username, profile.ActiveLibraryID, profile.StoragePath)
+	if ok {
+		c.ActiveLibraryID = selected.ID
+		c.StoragePath = selected.Path
+		profile.ActiveLibraryID = selected.ID
+		profile.StoragePath = selected.Path
+	} else {
+		c.ActiveLibraryID = ""
+		c.StoragePath = ""
+		profile.ActiveLibraryID = ""
+		profile.StoragePath = ""
+	}
 	c.applyDefaults()
 }
 
@@ -291,19 +368,18 @@ func (p *Profile) applyDefaults(fallback *Config) {
 		p.Preferences.VideoSectionMinMinutes = 10
 	}
 	p.normalizeLibraries()
-	p.BatchScan.normalizeAgainstLibraries(p.Libraries)
-	p.BatchThumbnails.normalizeAgainstLibraries(p.Libraries)
+	var libraryScope []Library
+	if fallback != nil {
+		libraryScope = fallback.Libraries
+	}
+	if len(libraryScope) == 0 {
+		libraryScope = p.Libraries
+	}
+	p.BatchScan.normalizeAgainstLibraries(libraryScope)
+	p.BatchThumbnails.normalizeAgainstLibraries(libraryScope)
 }
 
 func (p *Profile) normalizeLibraries() {
-	if len(p.Libraries) == 0 && strings.TrimSpace(p.StoragePath) != "" {
-		usedIDs := make(map[string]struct{}, 1)
-		p.Libraries = []Library{{
-			ID:   ensureLibraryIDForPath("", p.StoragePath, usedIDs),
-			Name: defaultLibraryName(0),
-			Path: p.StoragePath,
-		}}
-	}
 	seen := make(map[string]struct{}, len(p.Libraries))
 	usedIDs := make(map[string]struct{}, len(p.Libraries))
 	normalized := make([]Library, 0, len(p.Libraries))
@@ -332,6 +408,10 @@ func (p *Profile) normalizeLibraries() {
 	}
 	p.Libraries = normalized
 	activeID := normalizeLibraryID(p.ActiveLibraryID)
+	if len(p.Libraries) == 0 {
+		p.ActiveLibraryID = activeID
+		return
+	}
 	if activeID != "" {
 		for _, lib := range p.Libraries {
 			if lib.ID == activeID {

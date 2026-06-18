@@ -1,14 +1,19 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 )
+
+const assetVersionPlaceholder = "{{ASSET_VERSION}}"
 
 const appPageFallbackHTML = `<!doctype html>
 <html lang="zh-CN" data-theme="">
@@ -21,48 +26,15 @@ const appPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>EchoGallery</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/app.css?v=eg-20260609-17">
-  <script src="/static/pwa.js?v=eg-20260609-17" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+  <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
+  <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
   <div id="app"></div>
-  <script src="/static/app.js?v=eg-20260609-17"></script>
-</body>
-</html>`
-
-const galleryChooserPageFallbackHTML = `<!doctype html>
-<html lang="zh-CN" data-theme="">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#2d6a5f">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="EchoGallery">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="mobile-web-app-capable" content="yes">
-  <title>Gallery 选择 - EchoGallery</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/common.css">
-  <link rel="stylesheet" href="/pages/setup.css">
-  <link rel="stylesheet" href="/pages/gallery-chooser.css?v=eg-20260609-17">
-  <script src="/static/pwa.js?v=eg-20260609-17" defer></script>
-  <script src="/static/gallery-chooser.js?v=eg-20260609-17" defer></script>
-</head>
-<body data-gallery-chooser="1">
-<script>
-  (function(){
-    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    document.documentElement.dataset.theme = t;
-  })();
-</script>
-<div class="login-wrap gallery-chooser-wrap">
-  <div class="login-card setup-card setup-recovery-card gallery-chooser-shell" id="gallery-chooser-root"></div>
-</div>
+  <script src="/static/app.js?v={{ASSET_VERSION}}"></script>
 </body>
 </html>`
 
@@ -77,12 +49,12 @@ const loginPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>登录 - EchoGallery</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/common.css">
-  <link rel="stylesheet" href="/pages/login.css">
-  <script src="/static/pwa.js" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+  <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+  <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
 <div class="login-wrap">
@@ -112,30 +84,81 @@ const loginPageFallbackHTML = `<!doctype html>
   document.documentElement.dataset.theme = t;
   var btn = document.getElementById('login-btn');
   var errEl = document.getElementById('login-error');
+  function ensurePageSessionID() {
+    try {
+      var key = 'echogallery_page_session_id_v1';
+      var current = sessionStorage.getItem(key) || '';
+      if (!current) {
+        current = (window.crypto && typeof window.crypto.randomUUID === 'function')
+          ? window.crypto.randomUUID()
+          : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+        sessionStorage.setItem(key, current);
+      }
+      return current;
+    } catch (_) {
+      return (window.crypto && typeof window.crypto.randomUUID === 'function')
+        ? window.crypto.randomUUID()
+        : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+    }
+  }
+  function resetPageSessionID() {
+    var next = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : ('eg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+    try {
+      sessionStorage.setItem('echogallery_page_session_id_v1', next);
+    } catch (_) {}
+    return next;
+  }
+  function markPageSessionTransfer(sessionID) {
+    try {
+      sessionStorage.setItem('echogallery_page_session_transfer_v1', sessionID);
+    } catch (_) {}
+  }
+  function loginReasonMessage(reason) {
+    switch (String(reason || '').trim()) {
+      case 'duplicate':
+        return '该账号已在新页面登录，当前页面已退出';
+      case 'expired':
+        return '页面会话已过期，请重新登录';
+      case 'no-library':
+        return '当前没有可进入的资源库，请稍后再试';
+      default:
+        return '';
+    }
+  }
   async function doLogin() {
     var u = document.getElementById('username').value.trim();
     var p = document.getElementById('password').value;
     if (!u || !p) { errEl.textContent = '请输入用户名和密码'; return; }
     btn.disabled = true; btn.textContent = '登录中…';
+    var pageSessionID = resetPageSessionID();
     try {
       var r = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-EG-Page-Session': pageSessionID
+        },
         body: JSON.stringify({username: u, password: p})
       });
       var d = await r.json().catch(function () { return {}; });
       if (r.ok) {
         errEl.style.color = 'var(--accent)';
         errEl.textContent = d.message || '';
+        markPageSessionTransfer(pageSessionID);
         var target = d.redirect || '/';
         var delay = Math.max(0, Number(d.delay_ms) || 0);
         setTimeout(function () { location.href = target; }, delay);
         return;
       }
-      errEl.textContent = d.error || '登录失败';
+      errEl.textContent = d.error || loginReasonMessage(d.reason) || '登录失败';
     } catch(e) { errEl.textContent = '网络错误'; }
     btn.disabled = false; btn.textContent = '登录';
   }
+  var initialReason = new URLSearchParams(location.search).get('reason');
+  var reasonCopy = loginReasonMessage(initialReason);
+  if (reasonCopy) errEl.textContent = reasonCopy;
   btn.addEventListener('click', doLogin);
   document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doLogin(); });
 })();
@@ -154,12 +177,12 @@ const registerPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>注册 - EchoGallery</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/common.css">
-  <link rel="stylesheet" href="/pages/login.css">
-  <script src="/static/pwa.js" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+  <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+  <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
 <div class="login-wrap">
@@ -181,6 +204,23 @@ const registerPageFallbackHTML = `<!doctype html>
         <label class="form-label" for="confirm-password">确认密码</label>
         <input class="input" id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入密码">
       </div>
+      <div class="form-group">
+        <label class="form-label" for="role">账号类型</label>
+        <select class="input" id="role">
+          <option value="visitor">访客用户</option>
+          <option value="admin">管理员账户</option>
+        </select>
+      </div>
+      <div id="register-admin-fields" hidden>
+        <div class="form-group">
+          <label class="form-label" for="admin-username">管理员用户名</label>
+          <input class="input" id="admin-username" type="text" autocomplete="username" placeholder="输入现有管理员用户名">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="admin-password">管理员密码</label>
+          <input class="input" id="admin-password" type="password" autocomplete="current-password" placeholder="输入现有管理员密码">
+        </div>
+      </div>
       <button class="btn btn-primary login-submit" id="register-btn">创建账号</button>
       <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
       <div class="login-error" id="register-error"></div>
@@ -193,18 +233,31 @@ const registerPageFallbackHTML = `<!doctype html>
   document.documentElement.dataset.theme = t;
   var btn = document.getElementById('register-btn');
   var errEl = document.getElementById('register-error');
+  var roleEl = document.getElementById('role');
+  var adminFieldsEl = document.getElementById('register-admin-fields');
+  function syncRole() {
+    var isAdmin = roleEl && roleEl.value === 'admin';
+    if (adminFieldsEl) adminFieldsEl.hidden = !isAdmin;
+    btn.textContent = isAdmin ? '创建管理员账号' : '创建访客账号';
+  }
+  syncRole();
+  if (roleEl) roleEl.addEventListener('change', syncRole);
   async function doRegister() {
     var u = document.getElementById('username').value.trim();
     var p = document.getElementById('password').value;
     var c = document.getElementById('confirm-password').value;
+    var role = roleEl && roleEl.value === 'admin' ? 'admin' : 'visitor';
+    var adminUsername = document.getElementById('admin-username') ? document.getElementById('admin-username').value.trim() : '';
+    var adminPassword = document.getElementById('admin-password') ? document.getElementById('admin-password').value : '';
     if (!u || !p || !c) { errEl.textContent = '请完整填写注册信息'; return; }
     if (p !== c) { errEl.textContent = '两次输入的密码不一致'; return; }
+    if (role === 'admin' && (!adminUsername || !adminPassword)) { errEl.textContent = '请填写管理员用户名和密码'; return; }
     btn.disabled = true; btn.textContent = '创建中…';
     try {
       var r = await fetch('/api/auth/register', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({username: u, password: p, confirm_password: c})
+        body: JSON.stringify({username: u, password: p, confirm_password: c, role: role, admin_username: adminUsername, admin_password: adminPassword})
       });
       if (r.ok) { location.href = '/'; return; }
       var d = await r.json();
@@ -223,16 +276,71 @@ func pageHTML(staticFS fs.FS, relPath string, fallback string, required []string
 	content, err := readPageAsset(staticFS, relPath)
 	if err != nil {
 		log.Printf("警告: 页面资源 %s 不可用，使用内置兜底: %v", relPath, err)
-		return fallback
+		return applyAssetVersionTemplate(staticFS, fallback)
 	}
 	html := string(content)
 	for _, marker := range required {
 		if !strings.Contains(html, marker) {
 			log.Printf("警告: 页面资源 %s 缺少关键标记 %q，使用内置兜底", relPath, marker)
-			return fallback
+			return applyAssetVersionTemplate(staticFS, fallback)
 		}
 	}
-	return html
+	return applyAssetVersionTemplate(staticFS, html)
+}
+
+func assetSourceFS(staticFS fs.FS) fs.FS {
+	if staticFS != nil {
+		return staticFS
+	}
+	return os.DirFS(".")
+}
+
+func frontendAssetVersion(staticFS fs.FS) string {
+	source := assetSourceFS(staticFS)
+	hasher := sha256.New()
+	var paths []string
+	for _, root := range []string{"web/pages", "web/static"} {
+		if err := fs.WalkDir(source, root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			paths = append(paths, path)
+			return nil
+		}); err != nil {
+			log.Printf("警告: 计算前端资源版本失败: %v", err)
+			return "eg-dev"
+		}
+	}
+	if len(paths) == 0 {
+		return "eg-dev"
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		data, err := fs.ReadFile(source, path)
+		if err != nil {
+			log.Printf("警告: 读取前端资源 %s 失败: %v", path, err)
+			return "eg-dev"
+		}
+		_, _ = hasher.Write([]byte(path))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write(data)
+		_, _ = hasher.Write([]byte{0})
+	}
+	sum := hex.EncodeToString(hasher.Sum(nil))
+	if len(sum) < 12 {
+		return "eg-dev"
+	}
+	return "eg-" + sum[:12]
+}
+
+func applyAssetVersionTemplate(staticFS fs.FS, content string) string {
+	if !strings.Contains(content, assetVersionPlaceholder) {
+		return content
+	}
+	return strings.ReplaceAll(content, assetVersionPlaceholder, frontendAssetVersion(staticFS))
 }
 
 func readPageAsset(staticFS fs.FS, relPath string) ([]byte, error) {
@@ -263,7 +371,7 @@ func handleWebManifest(staticFS fs.FS) gin.HandlerFunc {
 			return
 		}
 		c.Header("Cache-Control", "no-cache")
-		c.Data(http.StatusOK, "application/manifest+json; charset=utf-8", data)
+		c.Data(http.StatusOK, "application/manifest+json; charset=utf-8", []byte(applyAssetVersionTemplate(staticFS, string(data))))
 	}
 }
 
@@ -276,7 +384,7 @@ func handleServiceWorker(staticFS fs.FS) gin.HandlerFunc {
 		}
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Service-Worker-Allowed", "/")
-		c.Data(http.StatusOK, "application/javascript; charset=utf-8", data)
+		c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(applyAssetVersionTemplate(staticFS, string(data))))
 	}
 }
 
@@ -297,13 +405,6 @@ func handleLoginPage(staticFS fs.FS) gin.HandlerFunc {
 func handleRegisterPage(staticFS fs.FS) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "register.html", registerPageFallbackHTML, []string{`id="register-btn"`, `/api/auth/register`})
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
-	}
-}
-
-func handleGalleryChooserPage(staticFS fs.FS) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		html := pageHTML(staticFS, "gallery-chooser.html", galleryChooserPageFallbackHTML, []string{`id="gallery-chooser-root"`, `/static/gallery-chooser.js`})
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 	}
 }

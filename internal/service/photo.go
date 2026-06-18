@@ -536,6 +536,7 @@ func copyPhotoEXIF(src *imgpkg.EXIFData) *storage.PhotoEXIF {
 		Latitude:     src.Latitude,
 		Longitude:    src.Longitude,
 		HasGPS:       src.HasGPS,
+		Location:     src.Location,
 	}
 }
 

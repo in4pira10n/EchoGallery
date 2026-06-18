@@ -9,12 +9,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="mobile-web-app-capable" content="yes">
     <title id="register-page-title">注册 - EchoGallery</title>
-    <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-    <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-    <link rel="stylesheet" href="/pages/common.css">
-    <link rel="stylesheet" href="/pages/login.css">
-    <script src="/static/pwa.js" defer></script>
+    <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+    <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+    <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+    <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
   </head>
   <body>
     <script>
@@ -49,11 +49,46 @@
             <input class="input" id="confirm-password" type="password"
               autocomplete="new-password" placeholder="再次输入密码">
           </div>
+          <div class="form-group register-role-group">
+            <label class="register-role-toggle" for="register-visitor-toggle">
+              <span class="register-role-copy">
+                <strong id="register-role-title">访客用户</strong>
+                <small id="register-role-hint">默认创建只读访客账号</small>
+                <em class="register-role-state" id="register-role-state">当前：访客用户</em>
+              </span>
+              <span class="register-role-switch-wrap">
+                <input class="register-role-input" id="register-visitor-toggle" type="checkbox" checked>
+                <span class="register-role-switch" aria-hidden="true"></span>
+              </span>
+            </label>
+            <p class="register-admin-note" id="register-admin-note" hidden>将创建管理员账户，需要现有管理员授权。</p>
+          </div>
           <button class="btn btn-primary login-submit"
             id="register-btn">创建账号</button>
           <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
           <div class="login-error" id="register-error"></div>
         </section>
+      </div>
+    </div>
+    <div class="auth-dialog-backdrop" id="register-admin-modal" hidden>
+      <div class="auth-dialog-card" role="dialog" aria-modal="true" aria-labelledby="register-admin-modal-title">
+        <div class="auth-dialog-head">
+          <strong id="register-admin-modal-title">管理员授权</strong>
+          <p id="register-admin-modal-copy">创建管理员账户需要现有管理员输入用户名和密码。</p>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="register-admin-username" id="register-admin-username-label">管理员用户名</label>
+          <input class="input" id="register-admin-username" type="text" autocomplete="username" placeholder="输入现有管理员用户名">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="register-admin-password" id="register-admin-password-label">管理员密码</label>
+          <input class="input" id="register-admin-password" type="password" autocomplete="current-password" placeholder="输入现有管理员密码">
+        </div>
+        <div class="auth-dialog-actions">
+          <button class="btn" id="register-admin-cancel" type="button">取消</button>
+          <button class="btn btn-primary" id="register-admin-confirm" type="button">继续创建</button>
+        </div>
+        <div class="login-error" id="register-admin-error"></div>
       </div>
     </div>
 <script>
@@ -70,11 +105,25 @@
     passwordPlaceholder: '至少 6 位',
     confirmLabel: '确认密码',
     confirmPlaceholder: '再次输入密码',
-    submit: '创建账号',
+    visitorRoleTitle: '访客用户',
+    visitorRoleHint: '默认创建只读访客账号',
+    adminRoleTitle: '管理员账户',
+    adminRoleHint: '将创建管理员账户，需要现有管理员授权',
+    visitorSubmit: '创建访客账号',
+    adminSubmit: '创建管理员账号',
+    adminModalTitle: '管理员授权',
+    adminModalCopy: '创建管理员账户需要现有管理员输入用户名和密码。',
+    adminUsernameLabel: '管理员用户名',
+    adminUsernamePlaceholder: '输入现有管理员用户名',
+    adminPasswordLabel: '管理员密码',
+    adminPasswordPlaceholder: '输入现有管理员密码',
+    adminConfirm: '继续创建',
+    adminCancel: '取消',
     loginLink: '已有账号？返回登录',
     errors: {
       missingFields: '请完整填写注册信息',
       passwordMismatch: '两次输入的密码不一致',
+      missingAdminFields: '请填写管理员用户名和密码',
       network: '网络错误',
       failed: '注册失败'
     }
@@ -93,7 +142,14 @@
       'register-username-label': copy.usernameLabel,
       'register-password-label': copy.passwordLabel,
       'register-confirm-label': copy.confirmLabel,
-      'register-btn': copy.submit
+      'register-role-title': copy.visitorRoleTitle,
+      'register-role-hint': copy.visitorRoleHint,
+      'register-admin-modal-title': copy.adminModalTitle,
+      'register-admin-modal-copy': copy.adminModalCopy,
+      'register-admin-username-label': copy.adminUsernameLabel,
+      'register-admin-password-label': copy.adminPasswordLabel,
+      'register-admin-confirm': copy.adminConfirm,
+      'register-admin-cancel': copy.adminCancel
     };
     Object.keys(map).forEach(function(id) {
       var node = document.getElementById(id);
@@ -105,6 +161,10 @@
     if (password) password.placeholder = copy.passwordPlaceholder || copyDefaults.passwordPlaceholder;
     var confirm = document.getElementById('confirm-password');
     if (confirm) confirm.placeholder = copy.confirmPlaceholder || copyDefaults.confirmPlaceholder;
+    var adminUsername = document.getElementById('register-admin-username');
+    if (adminUsername) adminUsername.placeholder = copy.adminUsernamePlaceholder || copyDefaults.adminUsernamePlaceholder;
+    var adminPassword = document.getElementById('register-admin-password');
+    if (adminPassword) adminPassword.placeholder = copy.adminPasswordPlaceholder || copyDefaults.adminPasswordPlaceholder;
     var loginLink = document.querySelector('.login-secondary-link');
     if (loginLink) loginLink.textContent = copy.loginLink || copyDefaults.loginLink;
     return copy;
@@ -128,36 +188,139 @@
   bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
   var btn = document.getElementById('register-btn');
   var errEl = document.getElementById('register-error');
+  var visitorToggle = document.getElementById('register-visitor-toggle');
+  var roleTitle = document.getElementById('register-role-title');
+  var roleHint = document.getElementById('register-role-hint');
+  var roleState = document.getElementById('register-role-state');
+  var adminNote = document.getElementById('register-admin-note');
+  var modal = document.getElementById('register-admin-modal');
+  var adminConfirmBtn = document.getElementById('register-admin-confirm');
+  var adminCancelBtn = document.getElementById('register-admin-cancel');
+  var adminErrEl = document.getElementById('register-admin-error');
   var copy = applyCopy();
+
+  function isVisitorMode() {
+    return !!(visitorToggle && visitorToggle.checked);
+  }
+
+  function syncRoleMode() {
+    if (isVisitorMode()) {
+      if (roleTitle) roleTitle.textContent = copy.visitorRoleTitle || copyDefaults.visitorRoleTitle;
+      if (roleHint) roleHint.textContent = copy.visitorRoleHint || copyDefaults.visitorRoleHint;
+      if (roleState) roleState.textContent = '当前：' + (copy.visitorRoleTitle || copyDefaults.visitorRoleTitle);
+      if (adminNote) adminNote.hidden = true;
+      closeAdminModal();
+      btn.textContent = copy.visitorSubmit || copyDefaults.visitorSubmit;
+      return;
+    }
+    if (roleTitle) roleTitle.textContent = copy.adminRoleTitle || copyDefaults.adminRoleTitle;
+    if (roleHint) roleHint.textContent = copy.adminRoleHint || copyDefaults.adminRoleHint;
+    if (roleState) roleState.textContent = '当前：' + (copy.adminRoleTitle || copyDefaults.adminRoleTitle);
+    if (adminNote) adminNote.hidden = false;
+    btn.textContent = copy.adminSubmit || copyDefaults.adminSubmit;
+  }
+
+  function openAdminModal() {
+    if (!modal) return;
+    adminErrEl.textContent = '';
+    modal.hidden = false;
+    document.body.classList.add('dialog-open');
+  }
+
+  function closeAdminModal() {
+    if (!modal) return;
+    modal.hidden = true;
+    document.body.classList.remove('dialog-open');
+    adminErrEl.textContent = '';
+  }
+
   fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
     .then(function (response) { return response.ok ? response.json() : null; })
     .then(function (catalog) {
       if (catalog && catalog.pages && catalog.pages.register) {
         copy = applyCopy(catalog.pages.register);
+        syncRoleMode();
       }
     })
     .catch(function () {});
-  async function doRegister() {
+  async function doRegister(withAdminAuth) {
     var u = document.getElementById('username').value.trim();
     var p = document.getElementById('password').value;
     var c = document.getElementById('confirm-password').value;
+    var role = isVisitorMode() ? 'visitor' : 'admin';
     if (!u || !p || !c) { errEl.textContent = copy.errors.missingFields || copyDefaults.errors.missingFields; return; }
     if (p !== c) { errEl.textContent = copy.errors.passwordMismatch || copyDefaults.errors.passwordMismatch; return; }
-    btn.disabled = true; btn.textContent = copy.submit + '中…';
+    if (role === 'admin' && !withAdminAuth) {
+      openAdminModal();
+      return;
+    }
+    var adminUsername = document.getElementById('register-admin-username').value.trim();
+    var adminPassword = document.getElementById('register-admin-password').value;
+    if (role === 'admin' && (!adminUsername || !adminPassword)) {
+      adminErrEl.textContent = copy.errors.missingAdminFields || copyDefaults.errors.missingAdminFields;
+      return;
+    }
+    errEl.textContent = '';
+    adminErrEl.textContent = '';
+    btn.disabled = true;
+    btn.textContent = role === 'admin'
+      ? (copy.adminSubmit || copyDefaults.adminSubmit) + '中…'
+      : (copy.visitorSubmit || copyDefaults.visitorSubmit) + '中…';
+    if (adminConfirmBtn) {
+      adminConfirmBtn.disabled = true;
+      adminConfirmBtn.textContent = (copy.adminConfirm || copyDefaults.adminConfirm) + '中…';
+    }
     try {
       var r = await fetch('/api/auth/register', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({username: u, password: p, confirm_password: c})
+        body: JSON.stringify({
+          username: u,
+          password: p,
+          confirm_password: c,
+          role: role,
+          admin_username: adminUsername,
+          admin_password: adminPassword
+        })
       });
       if (r.ok) { location.href = '/login'; return; }
       var d = await r.json();
-      errEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
-    } catch(e) { errEl.textContent = copy.errors.network || copyDefaults.errors.network; }
-    btn.disabled = false; btn.textContent = copy.submit || copyDefaults.submit;
+      if (role === 'admin') adminErrEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
+      else errEl.textContent = d.error || copy.errors.failed || copyDefaults.errors.failed;
+    } catch(e) {
+      if (role === 'admin') adminErrEl.textContent = copy.errors.network || copyDefaults.errors.network;
+      else errEl.textContent = copy.errors.network || copyDefaults.errors.network;
+    }
+    btn.disabled = false;
+    if (adminConfirmBtn) {
+      adminConfirmBtn.disabled = false;
+      adminConfirmBtn.textContent = copy.adminConfirm || copyDefaults.adminConfirm;
+    }
+    syncRoleMode();
   }
-  btn.addEventListener('click', doRegister);
-  document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doRegister(); });
+  if (visitorToggle) visitorToggle.addEventListener('change', syncRoleMode);
+  if (modal) {
+    modal.addEventListener('click', function (event) {
+      if (event.target === modal) closeAdminModal();
+    });
+  }
+  if (adminCancelBtn) adminCancelBtn.addEventListener('click', closeAdminModal);
+  if (adminConfirmBtn) adminConfirmBtn.addEventListener('click', function () { doRegister(true); });
+  btn.addEventListener('click', function () { doRegister(false); });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && modal && !modal.hidden) {
+      e.preventDefault();
+      closeAdminModal();
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    if (modal && !modal.hidden) {
+      doRegister(true);
+      return;
+    }
+    doRegister(false);
+  });
+  syncRoleMode();
 })();
 </script>
   </body>

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,10 +54,12 @@ func TestLoadFromPath_AppliesActiveProfile(t *testing.T) {
 	cfg := validConfig()
 	cfg.AppDataDir = appDataDir
 	cfg.ActiveProfile = "alice"
-	cfg.Libraries = []Library{{Name: "默认", Path: "/tmp/photos"}}
+	cfg.Libraries = []Library{
+		{Name: "默认", Path: "/tmp/photos"},
+		{Name: "Alice", Path: "/tmp/alice-photos"},
+	}
 	if err := SaveProfile(cfg, "alice", &Profile{
 		StoragePath:   "/tmp/alice-photos",
-		Libraries:     []Library{{Name: "Alice", Path: "/tmp/alice-photos"}},
 		ThumbnailDir:  filepath.Join(appDataDir, "alice-thumbs"),
 		ThumbnailSize: 640,
 		TrashDir:      filepath.Join(appDataDir, "alice-trash"),
@@ -138,21 +141,15 @@ func TestProfileNormalizeLibraries_LegacyLibraryIDIsDeterministic(t *testing.T) 
 	}
 }
 
-func TestProfileNormalizeLibraries_StoragePathOnlyLibraryIDIsDeterministic(t *testing.T) {
+func TestProfileNormalizeLibraries_StoragePathOnlyDoesNotRebuildLegacyLibraries(t *testing.T) {
 	profileA := &Profile{StoragePath: "/tmp/library-a"}
 	profileB := &Profile{StoragePath: "/tmp/library-a"}
 
 	profileA.normalizeLibraries()
 	profileB.normalizeLibraries()
 
-	if len(profileA.Libraries) != 1 || len(profileB.Libraries) != 1 {
-		t.Fatalf("期望从 storage_path 补齐单个资源库，得到 %d 和 %d", len(profileA.Libraries), len(profileB.Libraries))
-	}
-	if profileA.Libraries[0].ID == "" {
-		t.Fatal("期望 storage_path-only 旧 Profile 补齐稳定 library_id")
-	}
-	if profileA.Libraries[0].ID != profileB.Libraries[0].ID {
-		t.Fatalf("期望 storage_path-only 旧 Profile 反复规范化得到同一个 library_id，得到 %q 和 %q", profileA.Libraries[0].ID, profileB.Libraries[0].ID)
+	if len(profileA.Libraries) != 0 || len(profileB.Libraries) != 0 {
+		t.Fatalf("Profile 不应再仅凭 storage_path 自动重建共享资源库，得到 %d 和 %d", len(profileA.Libraries), len(profileB.Libraries))
 	}
 }
 
@@ -185,5 +182,49 @@ func TestBatchTaskStateNormalizeAgainstLibraries_PrefersLibraryIDs(t *testing.T)
 	}
 	if len(state.Libraries) != 1 || state.Libraries[0].Path != "/tmp/library-a-new" {
 		t.Fatalf("期望批量任务行按 library_id 更新路径，得到 %#v", state.Libraries)
+	}
+}
+
+func TestSaveProfile_StripsLegacyBatchWorkflowState(t *testing.T) {
+	dir := t.TempDir()
+	cfg := validConfig()
+	cfg.AppDataDir = dir
+
+	profile := &Profile{
+		StoragePath: "/tmp/photos",
+		BatchScan: BatchTaskState{
+			Status:              "running",
+			SelectedLibraryIDs:  []string{"lib_a"},
+			SelectedPaths:       []string{"/tmp/photos"},
+			SelectionConfigured: true,
+		},
+		BatchThumbnails: BatchTaskState{
+			Status:              "completed",
+			SelectedLibraryIDs:  []string{"lib_b"},
+			SelectedPaths:       []string{"/tmp/thumbs"},
+			SelectionConfigured: true,
+		},
+	}
+
+	if err := SaveProfile(cfg, "alice", profile); err != nil {
+		t.Fatalf("保存 Profile 失败: %v", err)
+	}
+
+	path, err := cfg.ProfilePath("alice")
+	if err != nil {
+		t.Fatalf("获取 Profile 路径失败: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 Profile 失败: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("解析 Profile 失败: %v", err)
+	}
+	for _, key := range []string{"batch_scan", "batch_thumbnails", "libraries"} {
+		if _, ok := decoded[key]; ok {
+			t.Fatalf("profile.json 不应再保存旧批量字段 %q", key)
+		}
 	}
 }

@@ -121,6 +121,12 @@ func (s *DB) migrate() error {
 		return err
 	}
 	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_source_taken
+		ON photos(uploaded_by, source_rel_path, taken_at DESC, id DESC)
+		WHERE deleted_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_random_sort_key
 		ON photos(uploaded_by, random_sort_key, id)
 		WHERE deleted_at IS NULL`); err != nil {
@@ -129,6 +135,11 @@ func (s *DB) migrate() error {
 	if _, err := s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_albums_created_by_source
 		ON albums(created_by, source_kind, source_rel_path)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_album_photos_album_photo
+		ON album_photos(album_id, photo_id)`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`

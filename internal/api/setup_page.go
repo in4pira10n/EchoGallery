@@ -11,12 +11,12 @@ const setupPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>EchoGallery 设置</title>
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="icon" href="/static/pwa-icon.png" type="image/png">
-  <link rel="apple-touch-icon" href="/static/pwa-icon.png">
-  <link rel="stylesheet" href="/pages/common.css">
-  <link rel="stylesheet" href="/pages/setup.css">
-  <script src="/static/pwa.js" defer></script>
+  <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
+  <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
+  <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/setup.css?v={{ASSET_VERSION}}">
+  <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
 <script>

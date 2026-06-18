@@ -23,6 +23,7 @@ type playbackCacheDeleteRequest struct {
 
 func handleListPlaybackCaches(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
 		manager, ok := registrar.(playbackCacheManager)
 		if !ok {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持播放缓存管理"})
@@ -44,6 +45,7 @@ func handleListPlaybackCaches(cfg *config.Config, registrar videoRegistrar) gin.
 
 func handleDeletePlaybackCaches(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
 		manager, ok := registrar.(playbackCacheManager)
 		if !ok {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持播放缓存管理"})
@@ -70,6 +72,7 @@ func handleDeletePlaybackCaches(cfg *config.Config, registrar videoRegistrar) gi
 
 func handleGetPlaybackCacheBuildStatus(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
 		manager, ok := registrar.(playbackCacheManager)
 		if !ok {
 			c.JSON(http.StatusOK, service.PlaybackCacheBuildStatus{Status: "idle", Message: "当前没有播放兼容缓存任务"})
@@ -86,6 +89,7 @@ func handleGetPlaybackCacheBuildStatus(cfg *config.Config, registrar videoRegist
 
 func handleStartPlaybackCacheBuild(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
 		manager, ok := registrar.(playbackCacheManager)
 		if !ok {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持播放缓存构建"})
@@ -102,6 +106,7 @@ func handleStartPlaybackCacheBuild(cfg *config.Config, registrar videoRegistrar)
 
 func handleCancelPlaybackCacheBuild(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
 		manager, ok := registrar.(playbackCacheManager)
 		if !ok {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消播放缓存构建"})

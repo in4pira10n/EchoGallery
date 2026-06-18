@@ -15,6 +15,11 @@ type Photo struct {
 	DurationMS      int64      `json:"duration_ms"`
 	IsFavorite      bool       `json:"is_favorite"`
 	IsSuperFavorite bool       `json:"is_super_favorite"`
+	ThumbnailURL    string     `json:"thumbnail_url,omitempty"`
+	PosterURL       string     `json:"poster_url,omitempty"`
+	ThumbnailReady  bool       `json:"thumbnail_ready,omitempty"`
+	PosterReady     bool       `json:"poster_ready,omitempty"`
+	DominantColor   string     `json:"dominant_color,omitempty"`
 	StorageRelPath  string     `json:"-"` // 应用内部实际存储的相对路径
 	SourceRelPath   string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
 	EXIF            *PhotoEXIF `json:"exif,omitempty"`
@@ -42,6 +47,7 @@ type PhotoEXIF struct {
 	Latitude       float64   `json:"latitude,omitempty"`
 	Longitude      float64   `json:"longitude,omitempty"`
 	HasGPS         bool      `json:"has_gps,omitempty"`
+	Location       string    `json:"location_address,omitempty"`
 	VideoCodec     string    `json:"video_codec,omitempty"`
 	VideoFrameRate float64   `json:"video_frame_rate,omitempty"`
 }
@@ -111,6 +117,17 @@ type PhotoPage struct {
 	NextCursor string   `json:"next_cursor"` // 空字符串表示没有更多
 	HasMore    bool     `json:"has_more"`
 	Total      int      `json:"total,omitempty"`
+}
+
+// LibraryScanSnapshot 保存一次成功扫描后的轻量状态，用于资源库目录树未变化时快速跳过全量扫描。
+type LibraryScanSnapshot struct {
+	RootPath         string    `json:"root_path"`
+	RootModUnixNano  int64     `json:"root_mod_unix_nano"`
+	DirectoryCount   int       `json:"directory_count,omitempty"`
+	DirectoryModHash string    `json:"directory_mod_hash,omitempty"`
+	MediaFileHash    string    `json:"media_file_hash,omitempty"`
+	FileCount        int       `json:"file_count"`
+	CompletedAt      time.Time `json:"completed_at"`
 }
 
 // ListPhotosParams 查询图片参数
