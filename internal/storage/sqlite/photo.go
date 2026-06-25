@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"time"
 
@@ -164,6 +165,59 @@ func scanPhotoWithExtraInt64(row interface {
 	return &p, nil
 }
 
+func (s *DB) attachSharedPlaybackMetadata(photos []*storage.Photo) error {
+	if len(photos) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(photos))
+	index := make(map[int64]*storage.Photo, len(photos))
+	for _, photo := range photos {
+		if photo == nil || photo.ID <= 0 || photo.MediaKind != storage.MediaKindVideo {
+			continue
+		}
+		if _, exists := index[photo.ID]; exists {
+			continue
+		}
+		index[photo.ID] = photo
+		ids = append(ids, photo.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, 0, len(ids))
+	args := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	rows, err := s.db.Query(`
+		SELECT photo_id, resume_time, bookmarks_json
+		FROM video_playback_preferences
+		WHERE photo_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("加载共享播放偏好失败: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			photoID      int64
+			resumeTime   int64
+			bookmarksRaw string
+		)
+		if err := rows.Scan(&photoID, &resumeTime, &bookmarksRaw); err != nil {
+			return err
+		}
+		photo := index[photoID]
+		if photo == nil {
+			continue
+		}
+		photo.VideoResumeTime = resumeTime
+		photo.VideoBookmarkCount = len(decodePlaybackBookmarks(bookmarksRaw))
+	}
+	return rows.Err()
+}
+
 func applyPhotoEXIFJSON(photo *storage.Photo, raw string) {
 	if photo == nil || strings.TrimSpace(raw) == "" {
 		return
@@ -277,6 +331,11 @@ func (s *DB) GetPhotoByID(id int64, userID int64) (*storage.Photo, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err == nil && p != nil {
+		if attachErr := s.attachSharedPlaybackMetadata([]*storage.Photo{p}); attachErr != nil {
+			return nil, attachErr
+		}
+	}
 	return p, err
 }
 
@@ -291,6 +350,11 @@ func (s *DB) GetPhotoByIDAny(id int64, userID int64) (*storage.Photo, error) {
 	p, err := scanPhoto(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
+	}
+	if err == nil && p != nil {
+		if attachErr := s.attachSharedPlaybackMetadata([]*storage.Photo{p}); attachErr != nil {
+			return nil, attachErr
+		}
 	}
 	return p, err
 }
@@ -307,6 +371,11 @@ func (s *DB) GetPhotoByUUID(uuid string, userID int64) (*storage.Photo, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err == nil && p != nil {
+		if attachErr := s.attachSharedPlaybackMetadata([]*storage.Photo{p}); attachErr != nil {
+			return nil, attachErr
+		}
+	}
 	return p, err
 }
 
@@ -321,6 +390,11 @@ func (s *DB) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Photo, error
 	p, err := scanPhoto(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
+	}
+	if err == nil && p != nil {
+		if attachErr := s.attachSharedPlaybackMetadata([]*storage.Photo{p}); attachErr != nil {
+			return nil, attachErr
+		}
 	}
 	return p, err
 }
@@ -461,8 +535,218 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	if err != nil {
 		return nil, err
 	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+		return nil, err
+	}
 	page.Total = total
 	return page, nil
+}
+
+func (s *DB) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	row := s.db.QueryRow(`
+		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+		FROM photos
+		WHERE id = ? AND uploaded_by = ? AND deleted_at IS NULL`,
+		params.PhotoID, params.UserID,
+	)
+	target, err := scanPhoto(row)
+	if err == sql.ErrNoRows || target == nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询目标媒体失败: %w", err)
+	}
+
+	where := "uploaded_by = ? AND deleted_at IS NULL"
+	baseArgs := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		baseArgs = append(baseArgs, params.MediaKind)
+	}
+	missingBeforeCount, err := s.countTimelineBefore(where, baseArgs, target, params.Reverse)
+	if err != nil {
+		return nil, err
+	}
+	beforePage, afterPage, err := s.locateTimelinePages(where, baseArgs, target, limit, params.Reverse)
+	if err != nil {
+		return nil, err
+	}
+
+	photos := make([]*storage.Photo, 0, len(beforePage.Photos)+1+len(afterPage.Photos))
+	photos = append(photos, beforePage.Photos...)
+	targetIndex := len(photos)
+	photos = append(photos, target)
+	photos = append(photos, afterPage.Photos...)
+	if err := s.attachSharedPlaybackMetadata(photos); err != nil {
+		return nil, err
+	}
+
+	result := &storage.TimelineLocateResult{
+		Photos:             photos,
+		TargetIndex:        targetIndex,
+		HasBefore:          beforePage.HasMore,
+		HasAfter:           afterPage.HasMore,
+		MissingBeforeCount: missingBeforeCount,
+	}
+	if len(beforePage.Photos) > 0 {
+		first := beforePage.Photos[0]
+		result.PrevCursor = encodeCursor(first.TakenAt, first.ID)
+	} else {
+		result.PrevCursor = encodeCursor(target.TakenAt, target.ID)
+	}
+	if len(afterPage.Photos) > 0 {
+		last := afterPage.Photos[len(afterPage.Photos)-1]
+		result.NextCursor = encodeCursor(last.TakenAt, last.ID)
+	} else {
+		result.NextCursor = encodeCursor(target.TakenAt, target.ID)
+	}
+	return result, nil
+}
+
+func (s *DB) countTimelineBefore(where string, baseArgs []interface{}, target *storage.Photo, reverse bool) (int, error) {
+	queryArgs := append([]interface{}{}, baseArgs...)
+	var condition string
+	if reverse {
+		condition = " AND (taken_at < ? OR (taken_at = ? AND id < ?))"
+	} else {
+		condition = " AND (taken_at > ? OR (taken_at = ? AND id > ?))"
+	}
+	queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos WHERE `+where+condition, queryArgs...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("统计目标之前媒体失败: %w", err)
+	}
+	return count, nil
+}
+
+func (s *DB) ListPhotosBefore(params storage.LocateTimelineParams) (*storage.PhotoPage, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	row := s.db.QueryRow(`
+		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+		FROM photos
+		WHERE id = ? AND uploaded_by = ? AND deleted_at IS NULL`,
+		params.PhotoID, params.UserID,
+	)
+	target, err := scanPhoto(row)
+	if err == sql.ErrNoRows || target == nil {
+		return &storage.PhotoPage{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询目标媒体失败: %w", err)
+	}
+
+	where := "uploaded_by = ? AND deleted_at IS NULL"
+	baseArgs := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		where += " AND media_kind = ?"
+		baseArgs = append(baseArgs, params.MediaKind)
+	}
+	beforePage, _, err := s.locateTimelinePages(where, baseArgs, target, limit, params.Reverse)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(beforePage.Photos); err != nil {
+		return nil, err
+	}
+	return beforePage, nil
+}
+
+func normalizeTimelineBeforePage(page *storage.PhotoPage) *storage.PhotoPage {
+	if page == nil || len(page.Photos) <= 1 {
+		return page
+	}
+	slices.Reverse(page.Photos)
+	return page
+}
+
+func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *storage.Photo, limit int, reverse bool) (*storage.PhotoPage, *storage.PhotoPage, error) {
+	var beforeQuery string
+	var afterQuery string
+	var beforeArgs []interface{}
+	var afterArgs []interface{}
+
+	beforeArgs = append([]interface{}{}, baseArgs...)
+	afterArgs = append([]interface{}{}, baseArgs...)
+
+	if reverse {
+		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeQuery = `
+			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+			FROM photos
+			WHERE ` + where + `
+			  AND (taken_at < ? OR (taken_at = ? AND id < ?))
+			ORDER BY taken_at DESC, id DESC
+			LIMIT ?`
+
+		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterQuery = `
+			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+			FROM photos
+			WHERE ` + where + `
+			  AND (taken_at > ? OR (taken_at = ? AND id > ?))
+			ORDER BY taken_at ASC, id ASC
+			LIMIT ?`
+	} else {
+		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeQuery = `
+			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+			FROM photos
+			WHERE ` + where + `
+			  AND (taken_at > ? OR (taken_at = ? AND id > ?))
+			ORDER BY taken_at ASC, id ASC
+			LIMIT ?`
+
+		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterQuery = `
+			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+			FROM photos
+			WHERE ` + where + `
+			  AND (taken_at < ? OR (taken_at = ? AND id < ?))
+			ORDER BY taken_at DESC, id DESC
+			LIMIT ?`
+	}
+
+	beforeRows, err := s.db.Query(beforeQuery, beforeArgs...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("查询目标之前媒体失败: %w", err)
+	}
+	beforePage, err := collectPhotoPage(beforeRows, limit, func(p *storage.Photo) time.Time { return p.TakenAt })
+	beforeRows.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	beforePage = normalizeTimelineBeforePage(beforePage)
+
+	afterRows, err := s.db.Query(afterQuery, afterArgs...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("查询目标之后媒体失败: %w", err)
+	}
+	afterPage, err := collectPhotoPage(afterRows, limit, func(p *storage.Photo) time.Time { return p.TakenAt })
+	afterRows.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return beforePage, afterPage, nil
 }
 
 // SearchPhotos 搜索用户媒体（时间倒序，游标分页）。
@@ -527,6 +811,9 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 		return p.TakenAt
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
 		return nil, err
 	}
 	if params.IncludeTotal {
@@ -633,6 +920,9 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 	for _, item := range items {
 		page.Photos = append(page.Photos, item.photo)
 	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+		return nil, err
+	}
 	return page, nil
 }
 
@@ -685,12 +975,19 @@ func (s *DB) ListTrashedPhotos(params storage.ListPhotosParams) (*storage.PhotoP
 	}
 	defer rows.Close()
 
-	return collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
+	page, err := collectPhotoPage(rows, limit, func(p *storage.Photo) time.Time {
 		if p.DeletedAt != nil {
 			return *p.DeletedAt
 		}
 		return time.Time{}
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+		return nil, err
+	}
+	return page, nil
 }
 
 // ListFavoritePhotos 查询个人收藏
@@ -757,6 +1054,9 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 
 	page, err := collectFavoritePhotoPage(rows, limit)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
 		return nil, err
 	}
 	page.Total = total

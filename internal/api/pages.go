@@ -34,6 +34,7 @@ const appPageFallbackHTML = `<!doctype html>
 </head>
 <body>
   <div id="app"></div>
+  <script src="/static/lightbox.js?v={{ASSET_VERSION}}"></script>
   <script src="/static/app.js?v={{ASSET_VERSION}}"></script>
 </body>
 </html>`

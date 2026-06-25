@@ -22,6 +22,8 @@ type VideoMeta struct {
 	CodecName  string    `json:"codec_name"`
 	FrameRate  float64   `json:"frame_rate,omitempty"`
 	TakenAt    time.Time `json:"taken_at,omitempty"`
+	Make       string    `json:"make,omitempty"`
+	Model      string    `json:"model,omitempty"`
 }
 
 type commandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -93,9 +95,18 @@ func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error)
 	}
 
 	meta.TakenAt = parseVideoTakenAtTags(data.Format.Tags, wallClockCreationTime)
+	meta.Make, meta.Model = parseVideoCameraTags(data.Format.Tags)
 	if meta.TakenAt.IsZero() {
 		for _, stream := range data.Streams {
 			if meta.TakenAt = parseVideoTakenAtTags(stream.Tags, wallClockCreationTime); !meta.TakenAt.IsZero() {
+				break
+			}
+		}
+	}
+	if meta.Make == "" && meta.Model == "" {
+		for _, stream := range data.Streams {
+			meta.Make, meta.Model = parseVideoCameraTags(stream.Tags)
+			if meta.Make != "" || meta.Model != "" {
 				break
 			}
 		}
@@ -186,6 +197,40 @@ func parseVideoTakenAtTags(tags map[string]string, wallClockCreationTime bool) t
 		}
 	}
 	return time.Time{}
+}
+
+func parseVideoCameraTags(tags map[string]string) (string, string) {
+	if len(tags) == 0 {
+		return "", ""
+	}
+	make := firstVideoTag(tags,
+		"com.apple.quicktime.make",
+		"com.apple.quicktime.camera.make",
+		"make",
+		"manufacturer",
+		"vendor",
+	)
+	model := firstVideoTag(tags,
+		"com.apple.quicktime.model",
+		"com.apple.quicktime.camera.model",
+		"model",
+		"device_model",
+		"camera_model",
+	)
+	return make, model
+}
+
+func firstVideoTag(tags map[string]string, keys ...string) string {
+	for _, key := range keys {
+		for actual, value := range tags {
+			if strings.EqualFold(strings.TrimSpace(actual), key) {
+				if text := strings.TrimSpace(value); text != "" {
+					return text
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func isWallClockVideoCreationTime(tags map[string]string) bool {

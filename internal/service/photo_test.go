@@ -34,6 +34,22 @@ func newTestPhotoService(t *testing.T) (*PhotoService, string) {
 	return svc, dataDir
 }
 
+func readTrashLinks(t *testing.T, svc *PhotoService) []string {
+	t.Helper()
+	data, err := os.ReadFile(svc.trashLinksPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("读取 trash-links.txt 失败: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return nil
+	}
+	return strings.Split(content, "\n")
+}
+
 // --- Upload 测试 ---
 
 func TestUpload_Success(t *testing.T) {
@@ -533,6 +549,13 @@ func TestDeleteAndRestorePhoto(t *testing.T) {
 	if len(trash.Photos) != 1 {
 		t.Error("删除后回收站应该有 1 张")
 	}
+	links := readTrashLinks(t, svc)
+	if len(links) != 1 {
+		t.Fatalf("删除后 trash-links 应有 1 条，got=%d", len(links))
+	}
+	if links[0] != filepath.Clean(svc.MediaPath(result.Photo)) {
+		t.Fatalf("trash-links 记录不正确: got=%q want=%q", links[0], filepath.Clean(svc.MediaPath(result.Photo)))
+	}
 
 	// 恢复
 	if err := svc.RestorePhoto(result.Photo.ID, 1); err != nil {
@@ -541,6 +564,9 @@ func TestDeleteAndRestorePhoto(t *testing.T) {
 	page, _ = svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
 	if len(page.Photos) != 1 {
 		t.Error("恢复后时间线应该有 1 张")
+	}
+	if links := readTrashLinks(t, svc); len(links) != 0 {
+		t.Fatalf("恢复后 trash-links 应为空，got=%v", links)
 	}
 }
 
@@ -565,6 +591,9 @@ func TestPermanentlyDeletePhoto_MovesManagedFilesToTrashDir(t *testing.T) {
 	if err := svc.DeletePhoto(result.Photo.ID, 1); err != nil {
 		t.Fatalf("软删除失败: %v", err)
 	}
+	if links := readTrashLinks(t, svc); len(links) != 1 {
+		t.Fatalf("软删除后 trash-links 应有 1 条，got=%v", links)
+	}
 
 	mediaPath := svc.MediaPath(result.Photo)
 	thumbPath := svc.ThumbnailPath(result.Photo)
@@ -585,6 +614,9 @@ func TestPermanentlyDeletePhoto_MovesManagedFilesToTrashDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(trashDir, thumbRel)); err != nil {
 		t.Fatalf("缩略图文件应移动到回收站目录: %v", err)
+	}
+	if links := readTrashLinks(t, svc); len(links) != 0 {
+		t.Fatalf("永久删除后 trash-links 应为空，got=%v", links)
 	}
 }
 
@@ -635,6 +667,9 @@ func TestEmptyTrash(t *testing.T) {
 		FileModTime:  time.Now(),
 	})
 	svc.DeletePhoto(result.Photo.ID, 1)
+	if links := readTrashLinks(t, svc); len(links) != 1 {
+		t.Fatalf("清空前 trash-links 应有 1 条，got=%v", links)
+	}
 
 	if err := svc.EmptyTrash(1); err != nil {
 		t.Fatalf("清空回收站失败: %v", err)
@@ -643,5 +678,8 @@ func TestEmptyTrash(t *testing.T) {
 	trash, _ := svc.GetTrash(storage.ListPhotosParams{UserID: 1, Limit: 10})
 	if len(trash.Photos) != 0 {
 		t.Error("清空后回收站应该为空")
+	}
+	if links := readTrashLinks(t, svc); len(links) != 0 {
+		t.Fatalf("清空后 trash-links 应为空，got=%v", links)
 	}
 }

@@ -38,6 +38,314 @@ func normalizeAlbumPhotoSort(sort string) string {
 	}
 }
 
+func reverseAlbumPhotos(photos []*storage.Photo) {
+	for i, j := 0, len(photos)-1; i < j; i, j = i+1, j-1 {
+		photos[i], photos[j] = photos[j], photos[i]
+	}
+}
+
+func normalizeAlbumBeforePage(page *storage.PhotoPage, sort string) *storage.PhotoPage {
+	if page == nil || len(page.Photos) <= 1 {
+		return page
+	}
+	switch normalizeAlbumPhotoSort(sort) {
+	case "timeline_desc", "timeline_asc", "size":
+		reverseAlbumPhotos(page.Photos)
+	}
+	return page
+}
+
+func albumLocateCursorForPhoto(photo *storage.Photo, sort string) string {
+	if photo == nil {
+		return ""
+	}
+	sort = normalizeAlbumPhotoSort(sort)
+	cursor := albumPhotoCursor{
+		Sort: sort,
+		Time: photo.TakenAt,
+		Name: photo.OriginalName,
+		Size: photo.Size,
+		ID:   photo.ID,
+	}
+	return encodeAlbumPhotoCursor(cursor)
+}
+
+func (s *DB) buildAlbumPhotoScope(albumID int64, userID int64, mediaKind string) (string, string, []interface{}, error) {
+	var sourceKind string
+	var description string
+	var sourceRelPath string
+	var name string
+	if err := s.db.QueryRow(`
+		SELECT name, source_kind, description, source_rel_path
+		FROM albums
+		WHERE id = ? AND created_by = ?`, albumID, userID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", nil, nil
+		}
+		return "", "", nil, fmt.Errorf("查询相册失败: %w", err)
+	}
+	isFolderAlbum := sourceKind == "folder" || (sourceKind == "" && description == legacyFolderAlbumDescription)
+	sourceRelPath = normalizeAlbumSourcePath(sourceRelPath)
+	if isFolderAlbum && sourceRelPath == "" {
+		sourceRelPath = normalizeAlbumSourcePath(name)
+	}
+	where := "p.uploaded_by = ? AND p.deleted_at IS NULL"
+	args := []interface{}{userID}
+	joinClause := ""
+	if isFolderAlbum && sourceRelPath != "" {
+		where += ` AND (
+			(p.source_rel_path LIKE ? AND instr(substr(p.source_rel_path, ?), '/') = 0)
+			OR (
+				p.source_rel_path = ''
+				AND EXISTS (
+					SELECT 1 FROM album_photos legacy_ap
+					WHERE legacy_ap.album_id = ? AND legacy_ap.photo_id = p.id
+				)
+			)
+		)`
+		args = append(args, sourceRelPath+"/%", len(sourceRelPath)+2, albumID)
+	} else {
+		joinClause = "JOIN album_photos ap ON ap.photo_id = p.id"
+		where += " AND ap.album_id = ?"
+		args = append(args, albumID)
+	}
+	if mediaKind != "" {
+		where += " AND p.media_kind = ?"
+		args = append(args, mediaKind)
+	}
+	return where, joinClause, args, nil
+}
+
+func (s *DB) queryAlbumTarget(where string, joinClause string, args []interface{}, photoID int64) (*storage.Photo, error) {
+	queryArgs := append([]interface{}{}, args...)
+	queryArgs = append(queryArgs, photoID)
+	row := s.db.QueryRow(`
+		SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+		       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+		       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+		FROM photos p
+		`+joinClause+`
+		WHERE `+where+` AND p.id = ?
+		LIMIT 1`, queryArgs...)
+	target, err := scanPhoto(row)
+	if err == sql.ErrNoRows || target == nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询目标媒体失败: %w", err)
+	}
+	return target, nil
+}
+
+func (s *DB) listAlbumNaturalScope(where string, joinClause string, args []interface{}) ([]*storage.Photo, error) {
+	queryArgs := append([]interface{}{}, args...)
+	rows, err := s.db.Query(`
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			`+joinClause+`
+			WHERE `+where+`
+			ORDER BY lower(p.original_name) ASC, p.id ASC`, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("查询相册图片失败: %w", err)
+	}
+	defer rows.Close()
+
+	var photos []*storage.Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows)
+		if err != nil {
+			return nil, err
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortPhotosByNaturalName(photos)
+	return photos, nil
+}
+
+func findAlbumNaturalCursorStart(photos []*storage.Photo, cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	c, err := decodeAlbumPhotoCursor(cursor, "name")
+	if err != nil {
+		return 0, err
+	}
+	start := 0
+	for start < len(photos) {
+		cmp := compareNaturalStrings(photos[start].OriginalName, c.Name)
+		if cmp > 0 || (cmp == 0 && photos[start].ID > c.ID) {
+			break
+		}
+		start++
+	}
+	return start, nil
+}
+
+func trimAlbumPagePhotos(photos []*storage.Photo, limit int, sort string) *storage.PhotoPage {
+	page := &storage.PhotoPage{}
+	if len(photos) > limit {
+		page.HasMore = true
+		photos = photos[:limit]
+	}
+	page.Photos = photos
+	if len(photos) > 0 {
+		page.NextCursor = albumLocateCursorForPhoto(photos[len(photos)-1], sort)
+	}
+	return page
+}
+
+func (s *DB) queryAlbumLocatePage(query string, args []interface{}, limit int, sort string, reverse bool) (*storage.PhotoPage, error) {
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询相册定位页面失败: %w", err)
+	}
+	defer rows.Close()
+
+	var photos []*storage.Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows)
+		if err != nil {
+			return nil, err
+		}
+		photos = append(photos, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(photos) > limit
+	if hasMore {
+		photos = photos[:limit]
+	}
+	if reverse {
+		reverseAlbumPhotos(photos)
+	}
+	page := &storage.PhotoPage{
+		Photos:  photos,
+		HasMore: hasMore,
+	}
+	if len(photos) > 0 {
+		page.NextCursor = albumLocateCursorForPhoto(photos[len(photos)-1], sort)
+	}
+	return page, nil
+}
+
+func (s *DB) countAlbumBefore(where string, joinClause string, args []interface{}, target *storage.Photo, sort string) (int, error) {
+	queryArgs := append([]interface{}{}, args...)
+	var condition string
+	switch normalizeAlbumPhotoSort(sort) {
+	case "timeline_asc":
+		condition = " AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))"
+		queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+	case "size":
+		condition = " AND (p.size > ? OR (p.size = ? AND p.id > ?))"
+		queryArgs = append(queryArgs, target.Size, target.Size, target.ID)
+	default:
+		condition = " AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))"
+		queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos p `+joinClause+` WHERE `+where+condition, queryArgs...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("统计相册目标前媒体失败: %w", err)
+	}
+	return count, nil
+}
+
+func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{}, target *storage.Photo, limit int, sort string) (*storage.PhotoPage, *storage.PhotoPage, error) {
+	baseArgs := append([]interface{}{}, args...)
+	var beforeQuery string
+	var afterQuery string
+	var beforeArgs []interface{}
+	var afterArgs []interface{}
+	beforeArgs = append([]interface{}{}, baseArgs...)
+	afterArgs = append([]interface{}{}, baseArgs...)
+	switch normalizeAlbumPhotoSort(sort) {
+	case "timeline_asc":
+		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))
+			ORDER BY p.taken_at DESC, p.id DESC
+			LIMIT ?`
+		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))
+			ORDER BY p.taken_at ASC, p.id ASC
+			LIMIT ?`
+	case "size":
+		beforeArgs = append(beforeArgs, target.Size, target.Size, target.ID, limit+1)
+		beforeQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.size > ? OR (p.size = ? AND p.id > ?))
+			ORDER BY p.size ASC, p.id ASC
+			LIMIT ?`
+		afterArgs = append(afterArgs, target.Size, target.Size, target.ID, limit+1)
+		afterQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.size < ? OR (p.size = ? AND p.id < ?))
+			ORDER BY p.size DESC, p.id DESC
+			LIMIT ?`
+	default:
+		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))
+			ORDER BY p.taken_at ASC, p.id ASC
+			LIMIT ?`
+		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterQuery = `
+			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
+			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
+			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
+			FROM photos p
+			` + joinClause + `
+			WHERE ` + where + `
+			  AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))
+			ORDER BY p.taken_at DESC, p.id DESC
+			LIMIT ?`
+	}
+
+	beforePage, err := s.queryAlbumLocatePage(beforeQuery, beforeArgs, limit, sort, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	afterPage, err := s.queryAlbumLocatePage(afterQuery, afterArgs, limit, sort, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return beforePage, afterPage, nil
+}
+
 func encodeAlbumPhotoCursor(c albumPhotoCursor) string {
 	b, _ := json.Marshal(c)
 	return base64.URLEncoding.EncodeToString(b)
@@ -398,61 +706,192 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	}
 	defer rows.Close()
 
-	return collectAlbumPhotoPage(rows, limit, sort)
+	page, err := collectAlbumPhotoPage(rows, limit, sort)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
+func (s *DB) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	sort := normalizeAlbumPhotoSort(params.Sort)
+	where, joinClause, args, err := s.buildAlbumPhotoScope(params.AlbumID, params.UserID, params.MediaKind)
+	if err != nil {
+		return nil, err
+	}
+	if where == "" {
+		return nil, nil
+	}
+	if sort == "name" {
+		photos, err := s.listAlbumNaturalScope(where, joinClause, args)
+		if err != nil {
+			return nil, err
+		}
+		targetIndex := -1
+		for i, photo := range photos {
+			if photo != nil && photo.ID == params.PhotoID {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex < 0 {
+			return nil, nil
+		}
+		start := targetIndex - limit
+		if start < 0 {
+			start = 0
+		}
+		end := targetIndex + limit + 1
+		if end > len(photos) {
+			end = len(photos)
+		}
+		windowPhotos := append([]*storage.Photo(nil), photos[start:end]...)
+		if err := s.attachSharedPlaybackMetadata(windowPhotos); err != nil {
+			return nil, err
+		}
+		result := &storage.TimelineLocateResult{
+			Photos:             windowPhotos,
+			TargetIndex:        targetIndex - start,
+			HasBefore:          start > 0,
+			HasAfter:           end < len(photos),
+			MissingBeforeCount: start,
+		}
+		if len(windowPhotos) > 0 {
+			result.PrevCursor = albumLocateCursorForPhoto(windowPhotos[0], sort)
+			result.NextCursor = albumLocateCursorForPhoto(windowPhotos[len(windowPhotos)-1], sort)
+		}
+		return result, nil
+	}
+
+	target, err := s.queryAlbumTarget(where, joinClause, args, params.PhotoID)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return nil, nil
+	}
+	missingBeforeCount, err := s.countAlbumBefore(where, joinClause, args, target, sort)
+	if err != nil {
+		return nil, err
+	}
+	beforePage, afterPage, err := s.locateAlbumPages(where, joinClause, args, target, limit, sort)
+	if err != nil {
+		return nil, err
+	}
+	photos := make([]*storage.Photo, 0, len(beforePage.Photos)+1+len(afterPage.Photos))
+	photos = append(photos, beforePage.Photos...)
+	targetIndex := len(photos)
+	photos = append(photos, target)
+	photos = append(photos, afterPage.Photos...)
+	if err := s.attachSharedPlaybackMetadata(photos); err != nil {
+		return nil, err
+	}
+	result := &storage.TimelineLocateResult{
+		Photos:             photos,
+		TargetIndex:        targetIndex,
+		HasBefore:          beforePage.HasMore,
+		HasAfter:           afterPage.HasMore,
+		MissingBeforeCount: missingBeforeCount,
+	}
+	if len(beforePage.Photos) > 0 {
+		result.PrevCursor = albumLocateCursorForPhoto(beforePage.Photos[0], sort)
+	} else {
+		result.PrevCursor = albumLocateCursorForPhoto(target, sort)
+	}
+	if len(afterPage.Photos) > 0 {
+		result.NextCursor = albumLocateCursorForPhoto(afterPage.Photos[len(afterPage.Photos)-1], sort)
+	} else {
+		result.NextCursor = albumLocateCursorForPhoto(target, sort)
+	}
+	return result, nil
+}
+
+func (s *DB) ListAlbumPhotosBefore(params storage.LocateAlbumParams) (*storage.PhotoPage, error) {
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	sort := normalizeAlbumPhotoSort(params.Sort)
+	where, joinClause, args, err := s.buildAlbumPhotoScope(params.AlbumID, params.UserID, params.MediaKind)
+	if err != nil {
+		return nil, err
+	}
+	if where == "" {
+		return &storage.PhotoPage{}, nil
+	}
+	if sort == "name" {
+		photos, err := s.listAlbumNaturalScope(where, joinClause, args)
+		if err != nil {
+			return nil, err
+		}
+		targetIndex := -1
+		for i, photo := range photos {
+			if photo != nil && photo.ID == params.PhotoID {
+				targetIndex = i
+				break
+			}
+		}
+		if targetIndex <= 0 {
+			return &storage.PhotoPage{}, nil
+		}
+		start := targetIndex - limit
+		if start < 0 {
+			start = 0
+		}
+		page := &storage.PhotoPage{
+			Photos:     append([]*storage.Photo(nil), photos[start:targetIndex]...),
+			HasMore:    start > 0,
+			NextCursor: "",
+		}
+		if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+			return nil, err
+		}
+		return page, nil
+	}
+	target, err := s.queryAlbumTarget(where, joinClause, args, params.PhotoID)
+	if err != nil {
+		return nil, err
+	}
+	if target == nil {
+		return &storage.PhotoPage{}, nil
+	}
+	beforePage, _, err := s.locateAlbumPages(where, joinClause, args, target, limit, sort)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachSharedPlaybackMetadata(beforePage.Photos); err != nil {
+		return nil, err
+	}
+	return beforePage, nil
 }
 
 func (s *DB) listAlbumPhotosByNaturalName(where string, joinClause string, args []interface{}, cursor string, limit int) (*storage.PhotoPage, error) {
-	queryArgs := append([]interface{}{}, args...)
-	rows, err := s.db.Query(`
-			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
-			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
-			       p.taken_at, p.uploaded_at, p.uploaded_by, p.deleted_at, p.deleted_by
-			FROM photos p
-			`+joinClause+`
-			WHERE `+where+`
-			ORDER BY lower(p.original_name) ASC, p.id ASC`, queryArgs...)
+	photos, err := s.listAlbumNaturalScope(where, joinClause, args)
 	if err != nil {
-		return nil, fmt.Errorf("查询相册图片失败: %w", err)
-	}
-	defer rows.Close()
-
-	var photos []*storage.Photo
-	for rows.Next() {
-		p, err := scanPhoto(rows)
-		if err != nil {
-			return nil, err
-		}
-		photos = append(photos, p)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sortPhotosByNaturalName(photos)
-	start := 0
-	if cursor != "" {
-		c, err := decodeAlbumPhotoCursor(cursor, "name")
-		if err != nil {
-			return nil, err
-		}
-		for start < len(photos) {
-			cmp := compareNaturalStrings(photos[start].OriginalName, c.Name)
-			if cmp > 0 || (cmp == 0 && photos[start].ID > c.ID) {
-				break
-			}
-			start++
-		}
+	start, err := findAlbumNaturalCursorStart(photos, cursor)
+	if err != nil {
+		return nil, err
 	}
 	end := start + limit
-	page := &storage.PhotoPage{}
-	if end < len(photos) {
-		page.HasMore = true
-		last := photos[end-1]
-		page.NextCursor = encodeAlbumPhotoCursor(albumPhotoCursor{Sort: "name", Name: last.OriginalName, ID: last.ID})
-	} else {
+	if end > len(photos) {
 		end = len(photos)
 	}
-	if start < len(photos) {
-		page.Photos = photos[start:end]
+	page := trimAlbumPagePhotos(append([]*storage.Photo(nil), photos[start:end]...), limit, "name")
+	if start+limit < len(photos) && len(page.Photos) > 0 {
+		page.HasMore = true
+		page.NextCursor = albumLocateCursorForPhoto(page.Photos[len(page.Photos)-1], "name")
+	}
+	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+		return nil, err
 	}
 	return page, nil
 }

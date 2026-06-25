@@ -2,6 +2,8 @@
 build.sh
 .build
 .DS_Store
+.gamepad-button-assets
+GAMEPAD-CONTROLS.md
 echogallery-data
 EchoGallery
 config.json
@@ -19,3 +21,6 @@ release notes
 web/static/.DS_Store
 web/.DS_Store
 TO-DOs.md
+TO-DOs
+local-update.toml
+EchoGalleryUpdater

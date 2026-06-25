@@ -123,7 +123,11 @@ func TestRevealInFileManager_WindowsExitCodeOneIsIgnored(t *testing.T) {
 		cmdArgs := []string{"-test.run=TestRevealInFileManagerHelper", "--", name}
 		cmdArgs = append(cmdArgs, args...)
 		cmd := exec.Command(os.Args[0], cmdArgs...)
-		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_EXIT_CODE=1")
+		exitCode := "1"
+		if name == "powershell" {
+			exitCode = "0"
+		}
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "HELPER_EXIT_CODE="+exitCode)
 		return cmd
 	}
 
@@ -151,6 +155,19 @@ func TestRevealInFileManager_PropagatesOtherErrors(t *testing.T) {
 
 	if err := revealInFileManager(filepath.Join("demo", "photo.jpg")); err == nil {
 		t.Fatal("期望返回非 1 的错误退出码")
+	}
+}
+
+func TestWindowsFileManagerFocusCommand(t *testing.T) {
+	name, args := windowsFileManagerFocusCommand()
+	if name != "powershell" {
+		t.Fatalf("command = %q, want powershell", name)
+	}
+	if len(args) < 4 {
+		t.Fatalf("args len = %d, want >= 4", len(args))
+	}
+	if args[0] != "-NoProfile" || args[1] != "-WindowStyle" || args[2] != "Hidden" || args[3] != "-Command" {
+		t.Fatalf("unexpected args prefix: %v", args[:4])
 	}
 }
 

@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	configFileName     = "config.json"
-	appDataDirName     = "echogallery-data"
-	databaseFilePrefix = "echogallery-"
+	configFileName      = "config.json"
+	localUpdateFileName = "local-update.toml"
+	appDataDirName      = "echogallery-data"
+	databaseFilePrefix  = "echogallery-"
 )
 
 // configPathOverride 用于测试时覆盖配置文件路径
@@ -61,6 +62,12 @@ type Preferences struct {
 	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
+	WarmEnabled                   bool   `json:"warm_enabled"`
+	ThrottledVideoSeek            bool   `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int    `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int    `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int    `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int    `json:"video_volume_max_percent"`
 	LowResourceMode               bool   `json:"low_resource_mode"`
 	PlayerKeymap                  string `json:"player_keymap"`
 }
@@ -82,6 +89,12 @@ type configDefaultsProbe struct {
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
+		WarmEnabled                   *bool   `json:"warm_enabled"`
+		ThrottledVideoSeek            *bool   `json:"throttled_video_seek"`
+		VideoSeekThrottleMS           *int    `json:"video_seek_throttle_ms"`
+		VideoVolumeSwipeSensitivity   *int    `json:"video_volume_swipe_sensitivity"`
+		VideoVolumeMinPercent         *int    `json:"video_volume_min_percent"`
+		VideoVolumeMaxPercent         *int    `json:"video_volume_max_percent"`
 		LowResourceMode               *bool   `json:"low_resource_mode"`
 		PlayerKeymap                  *string `json:"player_keymap"`
 	} `json:"preferences"`
@@ -147,6 +160,17 @@ func configPath() (string, error) {
 	return filepath.Join(filepath.Dir(exe), configFileName), nil
 }
 
+func localUpdatePath() (string, error) {
+	if configPathOverride != "" {
+		return filepath.Join(filepath.Dir(configPathOverride), localUpdateFileName), nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("failed to get executable path: %w", err)
+	}
+	return filepath.Join(filepath.Dir(exe), localUpdateFileName), nil
+}
+
 // Load 加载配置文件，文件不存在时返回错误
 func Load() (*Config, error) {
 	path, err := configPath()
@@ -154,6 +178,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return loadFromPath(path)
+}
+
+func LocalUpdatePath() (string, error) {
+	return localUpdatePath()
 }
 
 // loadFromPath 从指定路径加载配置文件
@@ -420,6 +448,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Preferences.VideoSectionMinMinutes == 0 {
 		c.Preferences.VideoSectionMinMinutes = 10
+	}
+	if c.Preferences.VideoVolumeSwipeSensitivity < 40 || c.Preferences.VideoVolumeSwipeSensitivity > 220 {
+		c.Preferences.VideoVolumeSwipeSensitivity = 100
+	}
+	if c.Preferences.VideoVolumeMinPercent < 0 || c.Preferences.VideoVolumeMinPercent > 100 {
+		c.Preferences.VideoVolumeMinPercent = 0
+	}
+	if c.Preferences.VideoVolumeMaxPercent < 0 || c.Preferences.VideoVolumeMaxPercent > 100 {
+		c.Preferences.VideoVolumeMaxPercent = 100
+	}
+	if c.Preferences.VideoVolumeMaxPercent < c.Preferences.VideoVolumeMinPercent {
+		c.Preferences.VideoVolumeMaxPercent = c.Preferences.VideoVolumeMinPercent
 	}
 }
 
@@ -770,6 +810,24 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	}
 	if probe.Preferences.ContinueLastVideoPosition == nil {
 		c.Preferences.ContinueLastVideoPosition = true
+	}
+	if probe.Preferences.WarmEnabled == nil {
+		c.Preferences.WarmEnabled = true
+	}
+	if probe.Preferences.ThrottledVideoSeek == nil {
+		c.Preferences.ThrottledVideoSeek = false
+	}
+	if probe.Preferences.VideoSeekThrottleMS == nil {
+		c.Preferences.VideoSeekThrottleMS = 240
+	}
+	if probe.Preferences.VideoVolumeSwipeSensitivity == nil {
+		c.Preferences.VideoVolumeSwipeSensitivity = 100
+	}
+	if probe.Preferences.VideoVolumeMinPercent == nil {
+		c.Preferences.VideoVolumeMinPercent = 0
+	}
+	if probe.Preferences.VideoVolumeMaxPercent == nil {
+		c.Preferences.VideoVolumeMaxPercent = 100
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		c.Preferences.LowResourceMode = false

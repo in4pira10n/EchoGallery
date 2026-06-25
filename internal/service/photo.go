@@ -53,6 +53,9 @@ type PhotoService struct {
 	playbackBuildMu    sync.Mutex
 	playbackBuild      *playbackCacheBuildTask
 	videoThumbRefresh  *videoThumbnailRefreshTask
+	exifBackfillMu     sync.Mutex
+	exifBackfill       *exifBackfillTask
+	trashLinksMu       sync.Mutex
 }
 
 // NewPhotoService 创建图片服务

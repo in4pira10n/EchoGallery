@@ -67,6 +67,9 @@ func TestLoadFromPath_Success(t *testing.T) {
 	if !cfg.Preferences.ExperimentalPrefetchNeighbors {
 		t.Errorf("期望旧配置默认开启 experimental_prefetch_neighbors")
 	}
+	if !cfg.Preferences.WarmEnabled {
+		t.Errorf("期望旧配置默认开启 warm_enabled")
+	}
 }
 
 func TestLoadFromPath_LegacyUsersDefaultToAdminRole(t *testing.T) {

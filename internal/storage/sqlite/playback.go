@@ -11,12 +11,13 @@ import (
 	"echogallery/internal/storage"
 )
 
-// GetVideoPlaybackPreference 获取指定用户在单个视频上的播放偏好。
+// GetVideoPlaybackPreference 获取单个视频的共享播放偏好。
 func (s *DB) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
+	_ = userID
 	row := s.db.QueryRow(`
 		SELECT photo_id, volume, muted, resume_time, bookmarks_json, updated_at
 		FROM video_playback_preferences
-		WHERE photo_id = ? AND user_id = ?`, photoID, userID)
+		WHERE photo_id = ?`, photoID)
 
 	var pref storage.VideoPlaybackPreference
 	var muted int
@@ -32,8 +33,9 @@ func (s *DB) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.V
 	return &pref, nil
 }
 
-// UpsertVideoPlaybackPreference 保存指定用户在单个视频上的播放偏好。
+// UpsertVideoPlaybackPreference 保存单个视频的共享播放偏好。
 func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+	_ = userID
 	updatedAt := time.Now()
 	mutedValue := 0
 	if muted {
@@ -42,15 +44,15 @@ func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume f
 	normalizedBookmarks := normalizePlaybackBookmarks(bookmarks)
 	bookmarksJSON := encodePlaybackBookmarks(normalizedBookmarks)
 	if _, err := s.db.Exec(`
-		INSERT INTO video_playback_preferences (photo_id, user_id, volume, muted, resume_time, bookmarks_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(photo_id, user_id) DO UPDATE SET
+		INSERT INTO video_playback_preferences (photo_id, volume, muted, resume_time, bookmarks_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(photo_id) DO UPDATE SET
 		    volume = excluded.volume,
 		    muted = excluded.muted,
 		    resume_time = excluded.resume_time,
 		    bookmarks_json = excluded.bookmarks_json,
 		    updated_at = excluded.updated_at`,
-		photoID, userID, volume, mutedValue, resumeTime, bookmarksJSON, updatedAt,
+		photoID, volume, mutedValue, resumeTime, bookmarksJSON, updatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("保存视频播放偏好失败: %w", err)
 	}

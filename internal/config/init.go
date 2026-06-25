@@ -64,6 +64,8 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 			SlideshowInterval:             5000,
 			LightboxZoom:                  100,
 			ExperimentalPrefetchNeighbors: true,
+			ThrottledVideoSeek:            false,
+			VideoSeekThrottleMS:           240,
 			LowResourceMode:               false,
 		},
 	}

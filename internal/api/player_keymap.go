@@ -17,12 +17,12 @@ type playerKeymapResponse struct {
 func handleGetPlayerKeymap(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := requestConfig(c, cfg)
-		if cfg != nil && cfg.Preferences.PlayerKeymap != "" {
-			c.JSON(200, playerKeymapResponse{Content: cfg.Preferences.PlayerKeymap})
-			return
-		}
 		content, err := loadPlayerKeymapContent()
 		if err != nil {
+			if cfg != nil && cfg.Preferences.PlayerKeymap != "" {
+				c.JSON(200, playerKeymapResponse{Content: cfg.Preferences.PlayerKeymap})
+				return
+			}
 			c.JSON(200, playerKeymapResponse{Content: ""})
 			return
 		}
@@ -30,16 +30,42 @@ func handleGetPlayerKeymap(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-func loadPlayerKeymapContent() (string, error) {
+func playerKeymapFileCandidates() []string {
 	candidates := []string{"ZXCWASD.conf"}
 	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "ZXCWASD.conf"))
+		exePath := filepath.Join(filepath.Dir(exe), "ZXCWASD.conf")
+		if exePath != candidates[0] {
+			candidates = append(candidates, exePath)
+		}
 	}
-	for _, path := range candidates {
+	return candidates
+}
+
+func loadPlayerKeymapContent() (string, error) {
+	for _, path := range playerKeymapFileCandidates() {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			return strings.ReplaceAll(string(data), "\r\n", "\n"), nil
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+func savePlayerKeymapContent(content string) error {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	target := ""
+	for _, path := range playerKeymapFileCandidates() {
+		if _, err := os.Stat(path); err == nil {
+			target = path
+			break
+		}
+	}
+	if target == "" {
+		candidates := playerKeymapFileCandidates()
+		target = candidates[len(candidates)-1]
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, []byte(normalized), 0644)
 }

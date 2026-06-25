@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -172,6 +173,80 @@ func parseEXIF(rs io.ReadSeeker) (*EXIFData, time.Time, error) {
 }
 
 func reverseGeocodeLocation(lat, lon float64) string {
+	if location := reverseGeocodeViaAmap(lat, lon); location != "" {
+		return location
+	}
+	if location := reverseGeocodeViaNominatim(lat, lon); location != "" {
+		return location
+	}
+	return ""
+}
+
+func reverseGeocodeViaAmap(lat, lon float64) string {
+	key := strings.TrimSpace(os.Getenv("ECHO_GALLERY_AMAP_KEY"))
+	if key == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	defer cancel()
+	endpoint := "https://restapi.amap.com/v3/geocode/regeo"
+	params := url.Values{}
+	params.Set("location", fmt.Sprintf("%.7f,%.7f", lon, lat))
+	params.Set("key", key)
+	params.Set("radius", "1000")
+	params.Set("extensions", "base")
+	params.Set("batch", "false")
+	params.Set("roadlevel", "0")
+	params.Set("homeorcorp", "0")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+params.Encode(), nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "EchoGallery/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var payload struct {
+		Status    string `json:"status"`
+		Regeocode struct {
+			FormattedAddress string `json:"formatted_address"`
+			AddressComponent struct {
+				Province string `json:"province"`
+				City     string `json:"city"`
+				District string `json:"district"`
+				Township string `json:"township"`
+				Street   string `json:"street"`
+				Number   string `json:"number"`
+			} `json:"addressComponent"`
+		} `json:"regeocode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(payload.Status) != "1" {
+		return ""
+	}
+	if text := strings.TrimSpace(payload.Regeocode.FormattedAddress); text != "" {
+		return text
+	}
+	ac := payload.Regeocode.AddressComponent
+	return strings.TrimSpace(strings.Join([]string{
+		ac.Province,
+		ac.City,
+		ac.District,
+		ac.Township,
+		ac.Street,
+		ac.Number,
+	}, ""))
+}
+
+func reverseGeocodeViaNominatim(lat, lon float64) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
 	defer cancel()
 

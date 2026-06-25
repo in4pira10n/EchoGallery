@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +22,7 @@ import (
 	imgpkg "echogallery/internal/image"
 	"echogallery/internal/service"
 	"echogallery/internal/storage"
+	"echogallery/internal/update"
 )
 
 type settingsResponse struct {
@@ -53,8 +56,16 @@ type settingsResponse struct {
 	ExperimentalPrefetchNeighbors bool              `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
+	WarmEnabled                   bool              `json:"warm_enabled"`
+	ThrottledVideoSeek            bool              `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int               `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int               `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int               `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int               `json:"video_volume_max_percent"`
 	LowResourceMode               bool              `json:"low_resource_mode"`
 	PlayerKeymap                  string            `json:"player_keymap"`
+	PWAIconURL                    string            `json:"pwa_icon_url,omitempty"`
+	LocalUpdateConfigText         string            `json:"local_update_config_text,omitempty"`
 }
 
 type settingsUpdateRequest struct {
@@ -81,6 +92,12 @@ type settingsUpdateRequest struct {
 	ExperimentalPrefetchNeighbors bool             `json:"experimental_prefetch_neighbors"`
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
+	WarmEnabled                   bool             `json:"warm_enabled"`
+	ThrottledVideoSeek            bool             `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int              `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int              `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int              `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int              `json:"video_volume_max_percent"`
 	LowResourceMode               bool             `json:"low_resource_mode"`
 	PlayerKeymap                  string           `json:"player_keymap"`
 }
@@ -147,6 +164,15 @@ type LibraryAvailabilityHooks struct {
 	ValidateLibrarySelection    func(cfg *config.Config, username string, libraryID string) error
 }
 
+type cachedLibraryStats struct {
+	DBSize    int64
+	DBModTime time.Time
+	ExpiresAt time.Time
+	Response  libraryResponse
+}
+
+var libraryStatsCache sync.Map
+
 type RequestError struct {
 	Status  int
 	Reason  string
@@ -194,6 +220,16 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 			masked = cfg.JWTSecret[:4] + "..." + cfg.JWTSecret[len(cfg.JWTSecret)-4:]
 		}
 	}
+	localUpdateText := ""
+	if path, err := config.LocalUpdatePath(); err == nil {
+		if _, text, err := update.LoadOrCreateLocalUpdateConfig(path); err == nil {
+			localUpdateText = text
+		}
+	}
+	playerKeymap := profile.Preferences.PlayerKeymap
+	if content, err := loadPlayerKeymapContent(); err == nil {
+		playerKeymap = content
+	}
 	return settingsResponse{
 		CurrentUsername:               map[bool]string{true: "root", false: username}[isRootConsoleSession(username)],
 		Role:                          role,
@@ -225,8 +261,105 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		ExperimentalPrefetchNeighbors: profile.Preferences.ExperimentalPrefetchNeighbors,
 		ExperimentalRestoreLastView:   profile.Preferences.ExperimentalRestoreLastView,
 		ContinueLastVideoPosition:     profile.Preferences.ContinueLastVideoPosition,
+		WarmEnabled:                   profile.Preferences.WarmEnabled,
+		ThrottledVideoSeek:            profile.Preferences.ThrottledVideoSeek,
+		VideoSeekThrottleMS:           profile.Preferences.VideoSeekThrottleMS,
+		VideoVolumeSwipeSensitivity:   profile.Preferences.VideoVolumeSwipeSensitivity,
+		VideoVolumeMinPercent:         profile.Preferences.VideoVolumeMinPercent,
+		VideoVolumeMaxPercent:         profile.Preferences.VideoVolumeMaxPercent,
 		LowResourceMode:               profile.Preferences.LowResourceMode,
-		PlayerKeymap:                  profile.Preferences.PlayerKeymap,
+		PlayerKeymap:                  playerKeymap,
+		PWAIconURL:                    pwaIconURL(cfg.Workshop.FaviconAsset),
+		LocalUpdateConfigText:         localUpdateText,
+	}
+}
+
+type localUpdateConfigRequest struct {
+	Text string `json:"text"`
+}
+
+func handleSaveLocalUpdateConfig(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req localUpdateConfigRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+			return
+		}
+		path, err := config.LocalUpdatePath()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		_, text, err := update.SaveLocalUpdateConfig(path, req.Text)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"text": text})
+	}
+}
+
+func handleCheckLocalUpdate(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path, err := config.LocalUpdatePath()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		conf, _, err := update.LoadOrCreateLocalUpdateConfig(path)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result, err := update.CheckLocalPackage(conf)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+func handleApplyLocalUpdate(cfg *config.Config, shutdown func() error) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if shutdown == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持网页更新重启"})
+			return
+		}
+		path, err := config.LocalUpdatePath()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		conf, _, err := update.LoadOrCreateLocalUpdateConfig(path)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		wd, _ := os.Getwd()
+		result, err := update.StartLocalUpdate(conf, update.StartOptions{
+			CurrentPID:        os.Getpid(),
+			CurrentExecutable: exe,
+			RestartArgs:       append([]string(nil), os.Args[1:]...),
+			WorkingDir:        wd,
+			Environment:       append([]string(nil), os.Environ()...),
+		})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
+		if result.Restarting {
+			go func() {
+				time.Sleep(220 * time.Millisecond)
+				_ = shutdown()
+			}()
+		}
 	}
 }
 
@@ -237,7 +370,12 @@ func buildLibraryStats(cfg *config.Config, library config.Library) libraryRespon
 		return stats
 	}
 	if info, err := os.Stat(dbPath); err == nil {
+		if cached, ok := loadCachedLibraryStats(dbPath, info); ok {
+			return cached
+		}
 		stats.CreatedAt = formatLibraryStatTime(info.ModTime())
+	} else {
+		return stats
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -260,7 +398,36 @@ func buildLibraryStats(cfg *config.Config, library config.Library) libraryRespon
 		stats.VideoCount = videoCount
 		stats.UnsupportedMediaCount = unsupportedCount
 	}
+	if info, err := os.Stat(dbPath); err == nil {
+		storeCachedLibraryStats(dbPath, info, stats)
+	}
 	return stats
+}
+
+func loadCachedLibraryStats(dbPath string, info os.FileInfo) (libraryResponse, bool) {
+	value, ok := libraryStatsCache.Load(dbPath)
+	if !ok {
+		return libraryResponse{}, false
+	}
+	cached, ok := value.(cachedLibraryStats)
+	if !ok {
+		libraryStatsCache.Delete(dbPath)
+		return libraryResponse{}, false
+	}
+	if time.Now().After(cached.ExpiresAt) || cached.DBSize != info.Size() || !cached.DBModTime.Equal(info.ModTime()) {
+		libraryStatsCache.Delete(dbPath)
+		return libraryResponse{}, false
+	}
+	return cached.Response, true
+}
+
+func storeCachedLibraryStats(dbPath string, info os.FileInfo, stats libraryResponse) {
+	libraryStatsCache.Store(dbPath, cachedLibraryStats{
+		DBSize:    info.Size(),
+		DBModTime: info.ModTime(),
+		ExpiresAt: time.Now().Add(12 * time.Second),
+		Response:  stats,
+	})
 }
 
 func readLibraryCreatedAt(db *sql.DB) (time.Time, bool) {
@@ -730,6 +897,12 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 				ExperimentalPrefetchNeighbors: req.ExperimentalPrefetchNeighbors,
 				ExperimentalRestoreLastView:   req.ExperimentalRestoreLastView,
 				ContinueLastVideoPosition:     req.ContinueLastVideoPosition,
+				WarmEnabled:                   req.WarmEnabled,
+				ThrottledVideoSeek:            req.ThrottledVideoSeek,
+				VideoSeekThrottleMS:           req.VideoSeekThrottleMS,
+				VideoVolumeSwipeSensitivity:   req.VideoVolumeSwipeSensitivity,
+				VideoVolumeMinPercent:         req.VideoVolumeMinPercent,
+				VideoVolumeMaxPercent:         req.VideoVolumeMaxPercent,
 				LowResourceMode:               req.LowResourceMode,
 				PlayerKeymap:                  req.PlayerKeymap,
 			},
@@ -743,6 +916,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			nextProfile.TrashDir = prevProfile.TrashDir
 			nextProfile.UseSystemPlayer = prevProfile.UseSystemPlayer
 			nextProfile.Preferences.LowResourceMode = prevProfile.Preferences.LowResourceMode
+			nextProfile.Preferences.PlayerKeymap = prevProfile.Preferences.PlayerKeymap
 			if err := config.SaveProfile(cfg, username, nextProfile); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
@@ -787,6 +961,10 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		} else {
 			nextProfile.ActiveLibraryID = ""
 			nextProfile.StoragePath = ""
+		}
+		if err := savePlayerKeymapContent(nextProfile.Preferences.PlayerKeymap); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
 		}
 		if err := config.SaveProfile(&nextGlobal, username, nextProfile); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -982,6 +1160,83 @@ func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			"data":    buildSettingsResponse(cfg, profile, username, LibraryAvailabilityHooks{}),
 		})
 	}
+}
+
+func handleUploadPWAIcon(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "缺少上传文件"})
+			return
+		}
+		ext := strings.ToLower(filepath.Ext(file.Filename))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 png/jpg/jpeg/gif/webp"})
+			return
+		}
+		assetDir, err := cfg.WorkshopAssetsDir()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if err := os.MkdirAll(assetDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		fileName := fmt.Sprintf("pwa-icon-%d.png", time.Now().UnixNano())
+		destPath := filepath.Join(assetDir, fileName)
+		src, err := file.Open()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取上传文件失败"})
+			return
+		}
+		defer src.Close()
+		if err := imgpkg.SaveSquareLibraryLogo(src, imgpkg.DetectMimeType(file.Filename), destPath, imgpkg.DefaultLibraryLogoEdge); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		nextCfg := *cfg
+		previous := strings.TrimSpace(nextCfg.Workshop.FaviconAsset)
+		nextCfg.Workshop.FaviconAsset = fileName
+		if err := nextCfg.Save(); err != nil {
+			_ = os.Remove(destPath)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		cfg.Workshop = nextCfg.Workshop
+		if previous != "" && previous != fileName {
+			_ = os.Remove(filepath.Join(assetDir, filepath.Base(previous)))
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message":  "PWA 图标已上传",
+			"icon_url": pwaIconURL(fileName),
+		})
+	}
+}
+
+func handleServePWAIcon(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		fileName := strings.TrimSpace(cfg.Workshop.FaviconAsset)
+		if fileName == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "PWA 图标尚未上传"})
+			return
+		}
+		assetDir, err := cfg.WorkshopAssetsDir()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.File(filepath.Join(assetDir, filepath.Base(fileName)))
+	}
+}
+
+func pwaIconURL(fileName string) string {
+	if strings.TrimSpace(fileName) == "" {
+		return ""
+	}
+	return "/api/settings/pwa/icon?v=" + url.QueryEscape(filepath.Base(fileName))
 }
 
 func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
@@ -1345,7 +1600,7 @@ func handleRefreshVideoThumbnails(cfg *config.Config, registrar interface {
 func handleBackfillPhotoEXIF(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		backfiller, ok := registrar.(interface {
-			BackfillPhotoEXIF(userID int64) (*service.EXIFBackfillResult, error)
+			StartEXIFBackfill(userID int64) (service.EXIFBackfillStatus, error)
 		})
 		if !ok || backfiller == nil {
 			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持媒体元数据修正"})
@@ -1356,14 +1611,99 @@ func handleBackfillPhotoEXIF(cfg *config.Config, registrar interface{}) gin.Hand
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
-		result, err := backfiller.BackfillPhotoEXIF(userID)
+		status, err := backfiller.StartEXIFBackfill(userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"message": "EXIF 信息修正完成",
-			"result":  result,
-		})
+		c.JSON(http.StatusOK, buildEXIFBackfillStatusResponse(status))
 	}
+}
+
+func handleGetBackfillPhotoEXIFStatus(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		backfiller, ok := registrar.(interface {
+			GetEXIFBackfillStatus(userID int64) service.EXIFBackfillStatus
+		})
+		if !ok || backfiller == nil {
+			c.JSON(http.StatusOK, exifBackfillStatusResponse{Status: "idle", Message: "当前没有 EXIF 修正任务"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, buildEXIFBackfillStatusResponse(backfiller.GetEXIFBackfillStatus(userID)))
+	}
+}
+
+func handleCancelBackfillPhotoEXIF(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		backfiller, ok := registrar.(interface {
+			CancelEXIFBackfill(userID int64) (service.EXIFBackfillStatus, error)
+		})
+		if !ok || backfiller == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "当前实例不支持取消媒体元数据修正"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		status, err := backfiller.CancelEXIFBackfill(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, buildEXIFBackfillStatusResponse(status))
+	}
+}
+
+type exifBackfillStatusResponse struct {
+	Status         string   `json:"status"`
+	Message        string   `json:"message"`
+	Done           int      `json:"done"`
+	Total          int      `json:"total"`
+	Scanned        int      `json:"scanned"`
+	Updated        int      `json:"updated"`
+	Skipped        int      `json:"skipped"`
+	Failed         int      `json:"failed"`
+	Errors         []string `json:"errors,omitempty"`
+	StartedAt      string   `json:"started_at,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
+	FinishedAt     string   `json:"finished_at,omitempty"`
+	ElapsedSeconds int64    `json:"elapsed_seconds"`
+	ETASeconds     int64    `json:"eta_seconds"`
+	Percent        float64  `json:"percent"`
+	Error          string   `json:"error,omitempty"`
+}
+
+func buildEXIFBackfillStatusResponse(status service.EXIFBackfillStatus) exifBackfillStatusResponse {
+	return exifBackfillStatusResponse{
+		Status:         status.Status,
+		Message:        status.Message,
+		Done:           status.Done,
+		Total:          status.Total,
+		Scanned:        status.Scanned,
+		Updated:        status.Updated,
+		Skipped:        status.Skipped,
+		Failed:         status.Failed,
+		Errors:         append([]string(nil), status.Errors...),
+		StartedAt:      formatEXIFBackfillTime(status.StartedAt),
+		UpdatedAt:      formatEXIFBackfillTime(status.UpdatedAt),
+		FinishedAt:     formatEXIFBackfillTime(status.FinishedAt),
+		ElapsedSeconds: status.ElapsedSeconds,
+		ETASeconds:     status.ETASeconds,
+		Percent:        status.Percent,
+		Error:          status.Error,
+	}
+}
+
+func formatEXIFBackfillTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339)
 }

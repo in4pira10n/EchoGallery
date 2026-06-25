@@ -49,6 +49,18 @@ type Repository interface {
 	// ListPhotos 查询用户图片（时间线，游标分页，不包含已删除）
 	ListPhotos(params ListPhotosParams) (*PhotoPage, error)
 
+	// LocateTimelineWindow 按媒体 ID 返回时间线中的目标窗口，避免前端逐页查找。
+	LocateTimelineWindow(params LocateTimelineParams) (*TimelineLocateResult, error)
+
+	// ListPhotosBefore 按当前时间线顺序返回指定媒体之前的一页内容。
+	ListPhotosBefore(params LocateTimelineParams) (*PhotoPage, error)
+
+	// LocateAlbumWindow 按媒体 ID 返回相册中的目标窗口，避免前端逐页查找。
+	LocateAlbumWindow(params LocateAlbumParams) (*TimelineLocateResult, error)
+
+	// ListAlbumPhotosBefore 按当前相册排序返回指定媒体之前的一页内容。
+	ListAlbumPhotosBefore(params LocateAlbumParams) (*PhotoPage, error)
+
 	// ListTrashedPhotos 查询回收站图片（游标分页）
 	ListTrashedPhotos(params ListPhotosParams) (*PhotoPage, error)
 

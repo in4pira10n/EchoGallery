@@ -8,7 +8,8 @@
     themeMode: 'accent',
     themeColor: '#2d6a5f',
     startPage: '/',
-    cacheStrategy: 'static-only'
+    cacheStrategy: 'static-only',
+    uploadedIconURL: ''
   };
 
   function normalizeHexColor(value) {
@@ -26,11 +27,12 @@
       if (!parsed || typeof parsed !== 'object') parsed = {};
       return {
         name: String(parsed.name || '').trim() || DEFAULTS.name,
-        iconSource: parsed.iconSource === 'svg' ? 'png' : (['favicon', 'library', 'png'].indexOf(parsed.iconSource) >= 0 ? parsed.iconSource : DEFAULTS.iconSource),
+        iconSource: parsed.iconSource === 'svg' ? 'png' : (['favicon', 'library', 'png', 'upload'].indexOf(parsed.iconSource) >= 0 ? parsed.iconSource : DEFAULTS.iconSource),
         themeMode: ['accent', 'fixed'].indexOf(parsed.themeMode) >= 0 ? parsed.themeMode : DEFAULTS.themeMode,
         themeColor: normalizeHexColor(parsed.themeColor),
         startPage: ['/', '/login', 'auto'].indexOf(parsed.startPage) >= 0 ? parsed.startPage : DEFAULTS.startPage,
-        cacheStrategy: ['static-only', 'app-shell', 'disabled'].indexOf(parsed.cacheStrategy) >= 0 ? parsed.cacheStrategy : DEFAULTS.cacheStrategy
+        cacheStrategy: ['static-only', 'app-shell', 'disabled'].indexOf(parsed.cacheStrategy) >= 0 ? parsed.cacheStrategy : DEFAULTS.cacheStrategy,
+        uploadedIconURL: String(parsed.uploadedIconURL || parsed.uploaded_icon_url || '').trim()
       };
     } catch (_) {
       return DEFAULTS;
@@ -78,10 +80,17 @@
   }
 
   function manifestIcon(settings) {
+    if (settings.iconSource === 'upload' && settings.uploadedIconURL) return settings.uploadedIconURL;
     if (settings.iconSource === 'png') return currentDocumentIcon() || '/static/pwa-icon.png';
     var favicon = document.querySelector('link[rel="icon"]');
     if (favicon && favicon.href && !favicon.href.startsWith('data:')) return favicon.href;
     return currentDocumentIcon() || '/static/pwa-icon.png';
+  }
+
+  function applyDocumentIcons(iconHref) {
+    var icon = iconHref || '/static/pwa-icon.png';
+    ensureLink('icon', icon, { type: icon.endsWith('.svg') ? 'image/svg+xml' : 'image/png' });
+    ensureLink('apple-touch-icon', icon);
   }
 
   var dynamicManifestURL = '';
@@ -111,6 +120,7 @@
     if (dynamicManifestURL) URL.revokeObjectURL(dynamicManifestURL);
     dynamicManifestURL = url;
     ensureLink('manifest', url);
+    applyDocumentIcons(icon);
   }
 
   function registerServiceWorker(settings) {
@@ -128,8 +138,6 @@
   var settings = loadSettings();
   var defaultIconHref = currentDocumentIcon();
   ensureLink('manifest', currentManifestURL());
-  ensureLink('icon', defaultIconHref, { type: 'image/png' });
-  ensureLink('apple-touch-icon', defaultIconHref);
   installDynamicManifest(settings);
   registerServiceWorker(settings);
   window.addEventListener('eg:pwa-settings-change', function () {

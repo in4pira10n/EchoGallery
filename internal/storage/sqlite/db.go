@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -144,16 +145,17 @@ func (s *DB) migrate() error {
 	}
 	if _, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS video_playback_preferences (
-		    photo_id   INTEGER NOT NULL,
-		    user_id    INTEGER NOT NULL,
+		    photo_id   INTEGER NOT NULL PRIMARY KEY,
 		    volume     REAL    NOT NULL DEFAULT 1,
 		    muted      INTEGER NOT NULL DEFAULT 0,
 		    resume_time INTEGER NOT NULL DEFAULT 0,
 		    bookmarks_json TEXT NOT NULL DEFAULT '',
 		    updated_at DATETIME NOT NULL,
-		    PRIMARY KEY (photo_id, user_id),
 		    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
 		)`); err != nil {
+		return err
+	}
+	if err := s.migrateVideoPlaybackPreferencesToShared(); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("video_playback_preferences", "resume_time", `ALTER TABLE video_playback_preferences ADD COLUMN resume_time INTEGER NOT NULL DEFAULT 0`); err != nil {
@@ -163,6 +165,81 @@ func (s *DB) migrate() error {
 		return err
 	}
 	return nil
+}
+
+func (s *DB) migrateVideoPlaybackPreferencesToShared() error {
+	rows, err := s.db.Query(`PRAGMA table_info(video_playback_preferences)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasUserID := false
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			dataType   string
+			notNull    int
+			defaultV   any
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultV, &primaryKey); err != nil {
+			return err
+		}
+		if strings.EqualFold(name, "user_id") {
+			hasUserID = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasUserID {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`ALTER TABLE video_playback_preferences RENAME TO video_playback_preferences_legacy`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		CREATE TABLE video_playback_preferences (
+		    photo_id   INTEGER NOT NULL PRIMARY KEY,
+		    volume     REAL    NOT NULL DEFAULT 1,
+		    muted      INTEGER NOT NULL DEFAULT 0,
+		    resume_time INTEGER NOT NULL DEFAULT 0,
+		    bookmarks_json TEXT NOT NULL DEFAULT '',
+		    updated_at DATETIME NOT NULL,
+		    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+		)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO video_playback_preferences (photo_id, volume, muted, resume_time, bookmarks_json, updated_at)
+		SELECT legacy.photo_id, legacy.volume, legacy.muted, legacy.resume_time, legacy.bookmarks_json, legacy.updated_at
+		FROM video_playback_preferences_legacy legacy
+		WHERE legacy.rowid = (
+			SELECT newer.rowid
+			FROM video_playback_preferences_legacy newer
+			WHERE newer.photo_id = legacy.photo_id
+			ORDER BY newer.updated_at DESC, newer.rowid DESC
+			LIMIT 1
+		)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE video_playback_preferences_legacy`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // schema 数据库建表 SQL
@@ -243,12 +320,12 @@ CREATE INDEX IF NOT EXISTS idx_share_links_created_by
     ON share_links(created_by);
 
 CREATE TABLE IF NOT EXISTS video_playback_preferences (
-    photo_id   INTEGER NOT NULL,
-    user_id    INTEGER NOT NULL,
+    photo_id   INTEGER NOT NULL PRIMARY KEY,
     volume     REAL    NOT NULL DEFAULT 1,
     muted      INTEGER NOT NULL DEFAULT 0,
+    resume_time INTEGER NOT NULL DEFAULT 0,
+    bookmarks_json TEXT NOT NULL DEFAULT '',
     updated_at DATETIME NOT NULL,
-    PRIMARY KEY (photo_id, user_id),
     FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
 );
 `

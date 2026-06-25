@@ -171,6 +171,10 @@ type videoRegistrar interface {
 	CancelPlaybackCacheBuild(userID int64) service.PlaybackCacheBuildStatus
 	SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error
 	GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error)
+	GetTimelineBefore(params storage.LocateTimelineParams) (*storage.PhotoPage, error)
+	LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error)
+	GetAlbumBefore(params storage.LocateAlbumParams) (*storage.PhotoPage, error)
 	Upload(input service.UploadInput) (*service.UploadResult, error)
 	MediaPath(photo *storage.Photo) string
 	BrowserPlaybackPath(photo *storage.Photo) (string, string, error)
@@ -222,9 +226,8 @@ type albumRequest struct {
 }
 
 type shareRequest struct {
-	Type      string `json:"type"`
-	TargetID  int64  `json:"target_id"`
-	ExpiresIn *int64 `json:"expires_in_days,omitempty"`
+	Type     string `json:"type"`
+	TargetID int64  `json:"target_id"`
 }
 
 type shareDetailResponse struct {
@@ -233,6 +236,11 @@ type shareDetailResponse struct {
 	TargetOriginalName string `json:"target_original_name,omitempty"`
 	TargetMediaKind    string `json:"target_media_kind,omitempty"`
 	TargetMimeType     string `json:"target_mime_type,omitempty"`
+	TargetSize         int64  `json:"target_size,omitempty"`
+	TargetWidth        int    `json:"target_width,omitempty"`
+	TargetHeight       int    `json:"target_height,omitempty"`
+	TargetDurationMS   int64  `json:"target_duration_ms,omitempty"`
+	TargetTakenAt      string `json:"target_taken_at,omitempty"`
 }
 
 type thumbnailWarmer interface {
@@ -358,6 +366,11 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authRequired, handleServeLibraryLogo(cfg))
+	r.POST("/api/settings/pwa/icon", authRequired, adminRequired, handleUploadPWAIcon(cfg))
+	r.GET("/api/settings/pwa/icon", handleServePWAIcon(cfg))
+	r.PUT("/api/settings/local-update-config", authRequired, adminOrRootRequired, handleSaveLocalUpdateConfig(cfg))
+	r.GET("/api/settings/local-update/check", authRequired, adminOrRootRequired, handleCheckLocalUpdate(cfg))
+	r.POST("/api/settings/local-update/apply", authRequired, adminOrRootRequired, handleApplyLocalUpdate(cfg, shutdown))
 	r.GET("/api/settings/thumbnails/build", authRequired, libraryRuntimeRequired, adminRequired, handleGetThumbnailBuildStatus(cfg, registrar))
 	r.POST("/api/settings/thumbnails/build", authRequired, libraryRuntimeRequired, adminRequired, handleStartThumbnailBuild(cfg, registrar))
 	r.DELETE("/api/settings/thumbnails/build", authRequired, libraryRuntimeRequired, adminRequired, handleCancelThumbnailBuild(cfg, registrar))
@@ -369,7 +382,9 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/settings/playback-cache/build", authRequired, libraryRuntimeRequired, adminRequired, handleGetPlaybackCacheBuildStatus(cfg, registrar))
 	r.POST("/api/settings/playback-cache/build", authRequired, libraryRuntimeRequired, adminRequired, handleStartPlaybackCacheBuild(cfg, registrar))
 	r.DELETE("/api/settings/playback-cache/build", authRequired, libraryRuntimeRequired, adminRequired, handleCancelPlaybackCacheBuild(cfg, registrar))
-	r.POST("/api/settings/exif/backfill", authRequired, adminRequired, handleBackfillPhotoEXIF(cfg, registrar))
+	r.GET("/api/settings/exif/backfill", authRequired, libraryRuntimeRequired, adminRequired, handleGetBackfillPhotoEXIFStatus(cfg, registrar))
+	r.POST("/api/settings/exif/backfill", authRequired, libraryRuntimeRequired, adminRequired, handleBackfillPhotoEXIF(cfg, registrar))
+	r.DELETE("/api/settings/exif/backfill", authRequired, libraryRuntimeRequired, adminRequired, handleCancelBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authRequired, libraryRuntimeRequired, handleGetPlayerKeymap(cfg))
 
 	media := r.Group("/api/media", authRequired, libraryRuntimeRequired)
@@ -378,6 +393,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.POST("/albums", writableRequired, handleCreateAlbumMedia(cfg, registrar))
 		media.GET("/albums/:id/detail", handleGetAlbumDetail(cfg, registrar))
 		media.GET("/albums/:id/download", handleDownloadAlbumMedia(cfg, registrar))
+		media.GET("/albums/:id/locate", handleLocateAlbumMedia(cfg, registrar))
+		media.GET("/albums/:id/before", handleListAlbumMediaBefore(cfg, registrar))
 		media.GET("/albums/:id", handleListAlbumMedia(cfg, registrar))
 		media.POST("/albums/:id/reveal", adminRequired, handleRevealAlbumInFinder(cfg, registrar))
 		media.POST("/albums/:id", writableRequired, handleAddMediaToAlbum(cfg, registrar))
@@ -388,6 +405,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.POST("/shares", writableRequired, handleCreateShareMedia(cfg, registrar))
 		media.DELETE("/shares/:id", writableRequired, handleDeleteShareMedia(cfg, registrar))
 		media.GET("", handleListMedia(cfg, registrar))
+		media.GET("/timeline/before", handleListTimelineMediaBefore(cfg, registrar))
+		media.GET("/timeline/locate", handleLocateTimelineMedia(cfg, registrar))
 		media.GET("/search", handleSearchMedia(cfg, registrar))
 		media.GET("/random", handleListRandomMedia(cfg, registrar))
 		media.POST("/thumbnails/warm", handleWarmVisibleThumbnails(cfg, registrar))
@@ -419,7 +438,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/s/:token", handleGetShareByToken(cfg, registrar))
 	r.GET("/api/s/:token/photos", handleGetSharedAlbumMedia(cfg, registrar))
 	r.GET("/s/:token/download", handleDownloadSharedMedia(cfg, registrar))
-	r.GET("/s/:token", handleSharePage())
+	r.GET("/s/:token", handleSharePage(staticFS))
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "接口不存在"})
@@ -1120,7 +1139,13 @@ func handleGetVideoPlaybackPreference(cfg *config.Config, registrar interface{})
 		GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
 	}
 	return func(c *gin.Context) {
-		getter, ok := registrar.(playbackGetter)
+		scopedRegistrar := requestRegistrar(c, nil)
+		if scopedRegistrar == nil {
+			if fallback, ok := registrar.(videoRegistrar); ok {
+				scopedRegistrar = fallback
+			}
+		}
+		getter, ok := any(scopedRegistrar).(playbackGetter)
 		if !ok {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "视频播放偏好服务未配置"})
 			return
@@ -1156,7 +1181,13 @@ func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}
 		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error)
 	}
 	return func(c *gin.Context) {
-		saver, ok := registrar.(playbackSaver)
+		scopedRegistrar := requestRegistrar(c, nil)
+		if scopedRegistrar == nil {
+			if fallback, ok := registrar.(videoRegistrar); ok {
+				scopedRegistrar = fallback
+			}
+		}
+		saver, ok := any(scopedRegistrar).(playbackSaver)
 		if !ok {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "视频播放偏好服务未配置"})
 			return
@@ -1243,6 +1274,93 @@ func handleListAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, enrichPhotoPageThumbnailFields(registrar, page))
+	}
+}
+
+func handleLocateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, cfg)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || albumID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "相册ID 无效"})
+			return
+		}
+		photoID, err := strconv.ParseInt(strings.TrimSpace(c.Query("id")), 10, 64)
+		if err != nil || photoID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "媒体ID 无效"})
+			return
+		}
+		limit := mediaPageLimit(c)
+		if limit <= 0 {
+			limit = 30
+		}
+		result, err := registrar.LocateAlbumWindow(storage.LocateAlbumParams{
+			AlbumID:   albumID,
+			UserID:    userID,
+			PhotoID:   photoID,
+			Limit:     limit,
+			MediaKind: mediaSearchKind(c),
+			Sort:      albumMediaSort(c),
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if result == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
+			return
+		}
+		page := &storage.PhotoPage{Photos: result.Photos}
+		page = enrichPhotoPageThumbnailFields(registrar, page)
+		result.Photos = page.Photos
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+func handleListAlbumMediaBefore(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, cfg)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || albumID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "相册ID 无效"})
+			return
+		}
+		photoID, err := strconv.ParseInt(strings.TrimSpace(c.Query("id")), 10, 64)
+		if err != nil || photoID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "媒体ID 无效"})
+			return
+		}
+		page, err := registrar.GetAlbumBefore(storage.LocateAlbumParams{
+			AlbumID:   albumID,
+			UserID:    userID,
+			PhotoID:   photoID,
+			Limit:     mediaPageLimit(c),
+			MediaKind: mediaSearchKind(c),
+			Sort:      albumMediaSort(c),
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, enrichPhotoPageThumbnailFields(registrar, page))
@@ -1531,16 +1649,10 @@ func handleCreateShareMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
-		var expiresAt *time.Time
-		if req.ExpiresIn != nil && *req.ExpiresIn > 0 {
-			t := time.Now().Add(time.Duration(*req.ExpiresIn) * 24 * time.Hour)
-			expiresAt = &t
-		}
 		link, err := registrar.CreateShare(service.CreateShareInput{
-			Type:      req.Type,
-			TargetID:  req.TargetID,
-			UserID:    userID,
-			ExpiresAt: expiresAt,
+			Type:     req.Type,
+			TargetID: req.TargetID,
+			UserID:   userID,
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1574,6 +1686,13 @@ func handleGetShareByToken(cfg *config.Config, registrar videoRegistrar) gin.Han
 				resp.TargetOriginalName = photo.OriginalName
 				resp.TargetMediaKind = photo.MediaKind
 				resp.TargetMimeType = photo.MimeType
+				resp.TargetSize = photo.Size
+				resp.TargetWidth = photo.Width
+				resp.TargetHeight = photo.Height
+				resp.TargetDurationMS = photo.DurationMS
+				if !photo.TakenAt.IsZero() {
+					resp.TargetTakenAt = photo.TakenAt.Format(time.RFC3339)
+				}
 			}
 		}
 		c.JSON(http.StatusOK, resp)
@@ -1739,6 +1858,14 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 
 func handleWarmVisibleThumbnails(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		profile, ok := requestProfile(c, cfg)
+		if !ok {
+			return
+		}
+		if !profile.Preferences.WarmEnabled {
+			c.JSON(http.StatusOK, gin.H{"queued": 0, "disabled": true})
+			return
+		}
 		registrar := requestRegistrar(c, registrar)
 		warmer, ok := registrar.(thumbnailWarmer)
 		if !ok {
@@ -1789,8 +1916,11 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 				return generateThumbnailOnDemand(cfg, registrar, photo)
 			})
 		}
-		if warmer, ok := registrar.(thumbnailWarmer); ok {
-			_, _ = warmer.WarmThumbnailsByUUIDs([]string{photo.UUID}, userID)
+		profile, ok := requestProfile(c, cfg)
+		if ok && profile.Preferences.WarmEnabled {
+			if warmer, ok := registrar.(thumbnailWarmer); ok {
+				_, _ = warmer.WarmThumbnailsByUUIDs([]string{photo.UUID}, userID)
+			}
 		}
 		if thumbPath == "" {
 			if photo.MediaKind == storage.MediaKindImage {
@@ -2046,6 +2176,81 @@ func handleListMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 			Limit:     mediaPageLimit(c),
 			Reverse:   mediaPageReverse(c),
 			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
+			MediaKind: mediaSearchKind(c),
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, enrichPhotoPageThumbnailFields(registrar, page))
+	}
+}
+
+func handleLocateTimelineMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, cfg)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		photoID, err := strconv.ParseInt(strings.TrimSpace(c.Query("id")), 10, 64)
+		if err != nil || photoID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "媒体ID 无效"})
+			return
+		}
+		limit := mediaPageLimit(c)
+		if limit <= 0 {
+			limit = 30
+		}
+		result, err := registrar.LocateTimelineWindow(storage.LocateTimelineParams{
+			UserID:    userID,
+			PhotoID:   photoID,
+			Limit:     limit,
+			Reverse:   mediaPageReverse(c),
+			MediaKind: mediaSearchKind(c),
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if result == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
+			return
+		}
+		page := &storage.PhotoPage{Photos: result.Photos}
+		page = enrichPhotoPageThumbnailFields(registrar, page)
+		result.Photos = page.Photos
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+func handleListTimelineMediaBefore(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, cfg)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		photoID, err := strconv.ParseInt(strings.TrimSpace(c.Query("id")), 10, 64)
+		if err != nil || photoID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "媒体ID 无效"})
+			return
+		}
+		page, err := registrar.GetTimelineBefore(storage.LocateTimelineParams{
+			UserID:    userID,
+			PhotoID:   photoID,
+			Limit:     mediaPageLimit(c),
+			Reverse:   mediaPageReverse(c),
 			MediaKind: mediaSearchKind(c),
 		})
 		if err != nil {

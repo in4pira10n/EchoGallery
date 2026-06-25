@@ -138,11 +138,13 @@ func videoMetaEXIF(meta *media.VideoMeta) *storage.PhotoEXIF {
 		return nil
 	}
 	exif := &storage.PhotoEXIF{
+		Make:           strings.TrimSpace(meta.Make),
+		Model:          strings.TrimSpace(meta.Model),
 		VideoCodec:     strings.TrimSpace(meta.CodecName),
 		VideoFrameRate: meta.FrameRate,
 		TakenAt:        meta.TakenAt,
 	}
-	if exif.VideoCodec == "" && exif.VideoFrameRate <= 0 && exif.TakenAt.IsZero() {
+	if exif.Make == "" && exif.Model == "" && exif.VideoCodec == "" && exif.VideoFrameRate <= 0 && exif.TakenAt.IsZero() {
 		return nil
 	}
 	return exif

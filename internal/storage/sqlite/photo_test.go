@@ -135,6 +135,115 @@ func TestNew_MigratesLegacyPhotoColumns(t *testing.T) {
 	}
 }
 
+func TestNew_MigratesLegacyVideoPlaybackPreferencesToShared(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy-playback.db")
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("创建旧数据库失败: %v", err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE photos (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uuid TEXT NOT NULL UNIQUE,
+			original_name TEXT NOT NULL,
+			media_kind TEXT NOT NULL DEFAULT 'video',
+			mime_type TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			storage_rel_path TEXT NOT NULL DEFAULT '',
+			source_rel_path TEXT NOT NULL DEFAULT '',
+			exif_json TEXT NOT NULL DEFAULT '',
+			source_mod_unix INTEGER NOT NULL DEFAULT 0,
+			random_sort_key INTEGER NOT NULL DEFAULT 0,
+			is_favorite INTEGER NOT NULL DEFAULT 0,
+			is_super_favorite INTEGER NOT NULL DEFAULT 0,
+			taken_at DATETIME NOT NULL,
+			uploaded_at DATETIME NOT NULL,
+			uploaded_by INTEGER NOT NULL,
+			deleted_at DATETIME,
+			deleted_by INTEGER
+		);
+		CREATE TABLE albums (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', cover_photo_id INTEGER, source_kind TEXT NOT NULL DEFAULT '', source_rel_path TEXT NOT NULL DEFAULT '', created_by INTEGER NOT NULL, created_at DATETIME NOT NULL);
+		CREATE TABLE album_photos (album_id INTEGER NOT NULL, photo_id INTEGER NOT NULL, added_at DATETIME NOT NULL, PRIMARY KEY (album_id, photo_id));
+		CREATE TABLE share_links (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, type TEXT NOT NULL, target_id INTEGER NOT NULL, created_by INTEGER NOT NULL, expires_at DATETIME, created_at DATETIME NOT NULL);
+		CREATE TABLE video_playback_preferences (
+			photo_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			volume REAL NOT NULL DEFAULT 1,
+			muted INTEGER NOT NULL DEFAULT 0,
+			resume_time INTEGER NOT NULL DEFAULT 0,
+			bookmarks_json TEXT NOT NULL DEFAULT '',
+			updated_at DATETIME NOT NULL,
+			PRIMARY KEY (photo_id, user_id)
+		);
+		INSERT INTO photos (id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms, taken_at, uploaded_at, uploaded_by)
+		VALUES (1, 'video-legacy', 'clip.mp4', 'video', 'video/mp4', 1024, 1920, 1080, 60000, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1);
+		INSERT INTO video_playback_preferences (photo_id, user_id, volume, muted, resume_time, bookmarks_json, updated_at)
+		VALUES
+			(1, 1, 0.4, 0, 12, '[{"slot":1,"time":12}]', '2026-01-01T00:00:00Z'),
+			(1, 2, 0.7, 1, 34, '[{"slot":1,"time":12},{"slot":2,"time":34}]', '2026-01-02T00:00:00Z');
+	`)
+	if err != nil {
+		raw.Close()
+		t.Fatalf("初始化旧播放偏好 schema 失败: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("关闭旧数据库失败: %v", err)
+	}
+
+	db, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("迁移旧播放偏好数据库失败: %v", err)
+	}
+	defer db.Close()
+
+	pref, err := db.GetVideoPlaybackPreference(1, 1)
+	if err != nil {
+		t.Fatalf("读取迁移后的播放偏好失败: %v", err)
+	}
+	if pref == nil || pref.ResumeTime != 34 || !pref.Muted || len(pref.Bookmarks) != 2 {
+		t.Fatalf("期望保留最新共享播放偏好，得到 %+v", pref)
+	}
+}
+
+func TestListPhotos_AttachesSharedVideoPlaybackMetadata(t *testing.T) {
+	db := newTestDB(t)
+	photo := &storage.Photo{
+		UUID:         "video-grid-1",
+		OriginalName: "clip.mp4",
+		MediaKind:    storage.MediaKindVideo,
+		MimeType:     "video/mp4",
+		Size:         1024,
+		Width:        1920,
+		Height:       1080,
+		DurationMS:   60000,
+		TakenAt:      time.Now(),
+		UploadedAt:   time.Now(),
+		UploadedBy:   1,
+	}
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatalf("保存视频失败: %v", err)
+	}
+	if _, err := db.UpsertVideoPlaybackPreference(photo.ID, 99, 0.6, true, 45, []storage.VideoPlaybackBookmark{{Slot: 1, Time: 12}, {Slot: 2, Time: 34}}); err != nil {
+		t.Fatalf("保存共享播放偏好失败: %v", err)
+	}
+
+	page, err := db.ListPhotos(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("读取时间线失败: %v", err)
+	}
+	if len(page.Photos) != 1 {
+		t.Fatalf("期望 1 条媒体，得到 %d", len(page.Photos))
+	}
+	got := page.Photos[0]
+	if got.VideoBookmarkCount != 2 || got.VideoResumeTime != 45 {
+		t.Fatalf("期望列表附带共享书签与续播信息，得到 count=%d resume=%d", got.VideoBookmarkCount, got.VideoResumeTime)
+	}
+}
+
 // --- Photo 测试 ---
 
 func TestSavePhoto_Success(t *testing.T) {

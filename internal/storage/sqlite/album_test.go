@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -411,6 +412,183 @@ func TestListAlbumPhotos_SortByNameAndSize(t *testing.T) {
 	if got := []string{bySize.Photos[0].OriginalName, bySize.Photos[1].OriginalName, bySize.Photos[2].OriginalName}; got[0] != "B.jpg" || got[1] != "C.jpg" || got[2] != "a.jpg" {
 		t.Fatalf("按大小排序不正确: %+v", got)
 	}
+}
+
+func makeAlbumWithPhotos(t *testing.T, db *DB, names []string, sizes []int64) (*storage.Album, []*storage.Photo) {
+	t.Helper()
+	album := &storage.Album{
+		Name:      "定位测试相册",
+		CreatedBy: 1,
+		CreatedAt: time.Now(),
+	}
+	if err := db.CreateAlbum(album); err != nil {
+		t.Fatalf("创建测试相册失败: %v", err)
+	}
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	photos := make([]*storage.Photo, 0, len(names))
+	for i, name := range names {
+		p := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		p.UUID = fmt.Sprintf("album-locate-%02d", i)
+		p.OriginalName = name
+		if i < len(sizes) && sizes[i] > 0 {
+			p.Size = sizes[i]
+		}
+		if err := db.SavePhoto(p); err != nil {
+			t.Fatalf("保存测试媒体失败: %v", err)
+		}
+		if err := db.AddPhotoToAlbum(album.ID, p.ID, 1); err != nil {
+			t.Fatalf("添加测试媒体到相册失败: %v", err)
+		}
+		photos = append(photos, p)
+	}
+	return album, photos
+}
+
+func TestLocateAlbumWindow_NameSortProvidesStableNextCursor(t *testing.T) {
+	db := newTestDB(t)
+	album, photos := makeAlbumWithPhotos(t, db,
+		[]string{"1.png", "2.png", "9.png", "10.png", "11.png", "90.png", "100.png", "101.png"},
+		nil,
+	)
+
+	located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: photos[6].ID,
+		Limit:   2,
+		Sort:    "name",
+	})
+	if err != nil {
+		t.Fatalf("name 排序定位相册失败: %v", err)
+	}
+	if located == nil {
+		t.Fatal("应返回定位结果")
+	}
+	assertPhotoIDs(t, located.Photos, []int64{
+		photos[4].ID, photos[5].ID, photos[6].ID, photos[7].ID,
+	})
+	if located.TargetIndex != 2 {
+		t.Fatalf("目标索引错误，得到 %d，期望 2", located.TargetIndex)
+	}
+	if located.MissingBeforeCount != 4 {
+		t.Fatalf("前缺口数量错误，得到 %d，期望 4", located.MissingBeforeCount)
+	}
+	if located.NextCursor == "" {
+		t.Fatal("定位结果应返回 next_cursor")
+	}
+
+	page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		Limit:   30,
+		Sort:    "name",
+		Cursor:  located.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("使用定位 next_cursor 查询后续页面失败: %v", err)
+	}
+	if len(page.Photos) != 0 {
+		t.Fatalf("定位窗口之后不应从头重复分页，得到 %d 条", len(page.Photos))
+	}
+}
+
+func TestLocateAlbumWindow_AndBefore_ForTimelineDesc(t *testing.T) {
+	db := newTestDB(t)
+	album, photos := makeAlbumWithPhotos(t, db,
+		[]string{"a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg", "h.jpg"},
+		nil,
+	)
+
+	located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: photos[4].ID,
+		Limit:   2,
+		Sort:    "timeline_desc",
+	})
+	if err != nil {
+		t.Fatalf("倒序定位相册失败: %v", err)
+	}
+	assertPhotoIDs(t, located.Photos, []int64{
+		photos[6].ID, photos[5].ID, photos[4].ID, photos[3].ID, photos[2].ID,
+	})
+	before, err := db.ListAlbumPhotosBefore(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: located.Photos[0].ID,
+		Limit:   2,
+		Sort:    "timeline_desc",
+	})
+	if err != nil {
+		t.Fatalf("倒序前置页面失败: %v", err)
+	}
+	assertPhotoIDs(t, before.Photos, []int64{photos[7].ID})
+}
+
+func TestLocateAlbumWindow_AndBefore_ForTimelineAsc(t *testing.T) {
+	db := newTestDB(t)
+	album, photos := makeAlbumWithPhotos(t, db,
+		[]string{"a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg", "h.jpg"},
+		nil,
+	)
+
+	located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: photos[4].ID,
+		Limit:   2,
+		Sort:    "timeline_asc",
+	})
+	if err != nil {
+		t.Fatalf("正序定位相册失败: %v", err)
+	}
+	assertPhotoIDs(t, located.Photos, []int64{
+		photos[2].ID, photos[3].ID, photos[4].ID, photos[5].ID, photos[6].ID,
+	})
+	before, err := db.ListAlbumPhotosBefore(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: located.Photos[0].ID,
+		Limit:   2,
+		Sort:    "timeline_asc",
+	})
+	if err != nil {
+		t.Fatalf("正序前置页面失败: %v", err)
+	}
+	assertPhotoIDs(t, before.Photos, []int64{photos[0].ID, photos[1].ID})
+}
+
+func TestLocateAlbumWindow_AndBefore_ForSizeSort(t *testing.T) {
+	db := newTestDB(t)
+	album, photos := makeAlbumWithPhotos(t, db,
+		[]string{"a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"},
+		[]int64{100, 200, 300, 400, 500, 600},
+	)
+
+	located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: photos[2].ID,
+		Limit:   2,
+		Sort:    "size",
+	})
+	if err != nil {
+		t.Fatalf("按大小定位相册失败: %v", err)
+	}
+	assertPhotoIDs(t, located.Photos, []int64{
+		photos[4].ID, photos[3].ID, photos[2].ID, photos[1].ID, photos[0].ID,
+	})
+	before, err := db.ListAlbumPhotosBefore(storage.LocateAlbumParams{
+		AlbumID: album.ID,
+		UserID:  1,
+		PhotoID: located.Photos[0].ID,
+		Limit:   2,
+		Sort:    "size",
+	})
+	if err != nil {
+		t.Fatalf("按大小前置页面失败: %v", err)
+	}
+	assertPhotoIDs(t, before.Photos, []int64{photos[5].ID})
 }
 
 func TestAlbumPhotoCount(t *testing.T) {

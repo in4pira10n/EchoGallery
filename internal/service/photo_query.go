@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,54 @@ var (
 // GetTimeline 获取时间线图片（游标分页）
 func (s *PhotoService) GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	page, err := s.repo.ListPhotos(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
+}
+
+func (s *PhotoService) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error) {
+	result, err := s.repo.LocateTimelineWindow(params)
+	if err != nil || result == nil {
+		return result, err
+	}
+	page := s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos})
+	result.Photos = page.Photos
+	if result.TargetIndex >= len(result.Photos) {
+		result.TargetIndex = len(result.Photos) - 1
+	}
+	if result.TargetIndex < 0 {
+		result.TargetIndex = 0
+	}
+	return result, nil
+}
+
+func (s *PhotoService) GetTimelineBefore(params storage.LocateTimelineParams) (*storage.PhotoPage, error) {
+	page, err := s.repo.ListPhotosBefore(params)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterExistingMediaPage(page), nil
+}
+
+func (s *PhotoService) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error) {
+	result, err := s.repo.LocateAlbumWindow(params)
+	if err != nil || result == nil {
+		return result, err
+	}
+	page := s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos})
+	result.Photos = page.Photos
+	if result.TargetIndex >= len(result.Photos) {
+		result.TargetIndex = len(result.Photos) - 1
+	}
+	if result.TargetIndex < 0 {
+		result.TargetIndex = 0
+	}
+	return result, nil
+}
+
+func (s *PhotoService) GetAlbumBefore(params storage.LocateAlbumParams) (*storage.PhotoPage, error) {
+	page, err := s.repo.ListAlbumPhotosBefore(params)
 	if err != nil {
 		return nil, err
 	}
@@ -271,12 +320,26 @@ func (s *PhotoService) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Ph
 
 // DeletePhoto 软删除图片（移入回收站）
 func (s *PhotoService) DeletePhoto(id int64, userID int64) error {
-	return s.repo.SoftDeletePhoto(id, userID, userID)
+	if err := s.repo.SoftDeletePhoto(id, userID, userID); err != nil {
+		return err
+	}
+	if err := s.syncTrashLinks(userID); err != nil {
+		_ = s.repo.RestorePhoto(id, userID)
+		return fmt.Errorf("更新回收站链接失败: %w", err)
+	}
+	return nil
 }
 
 // RestorePhoto 从回收站恢复图片
 func (s *PhotoService) RestorePhoto(id int64, userID int64) error {
-	return s.repo.RestorePhoto(id, userID)
+	if err := s.repo.RestorePhoto(id, userID); err != nil {
+		return err
+	}
+	if err := s.syncTrashLinks(userID); err != nil {
+		_ = s.repo.SoftDeletePhoto(id, userID, userID)
+		return fmt.Errorf("更新回收站链接失败: %w", err)
+	}
+	return nil
 }
 
 // SetPhotoFavorite 设置收藏状态
@@ -301,6 +364,9 @@ func (s *PhotoService) PermanentlyDeletePhoto(id int64, userID int64) error {
 	for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
 		s.moveManagedFileToTrash(thumbPath)
 	}
+	if err := s.syncTrashLinks(userID); err != nil {
+		return fmt.Errorf("更新回收站链接失败: %w", err)
+	}
 	return nil
 }
 
@@ -316,6 +382,9 @@ func (s *PhotoService) EmptyTrash(userID int64) error {
 		for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
 			s.moveManagedFileToTrash(thumbPath)
 		}
+	}
+	if err := s.syncTrashLinks(userID); err != nil {
+		return fmt.Errorf("更新回收站链接失败: %w", err)
 	}
 	return nil
 }
@@ -393,17 +462,16 @@ func (s *PhotoService) PlayWithSystemPlayer(id int64, userID int64) error {
 
 func revealInFileManager(target string) error {
 	name, args := fileManagerRevealCommand(target)
-	err := execCommand(name, args...).Run()
-	if err == nil {
-		return nil
+	if err := runFileManagerCommand(name, args...); err != nil {
+		return err
 	}
 	if currentOS == "windows" {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return nil
+		name, args = windowsFileManagerFocusCommand()
+		if err := execCommand(name, args...).Run(); err != nil {
+			return fmt.Errorf("激活资源管理器窗口失败: %w", err)
 		}
 	}
-	return err
+	return nil
 }
 
 func openWithSystemDefault(target string) error {
@@ -425,6 +493,33 @@ func fileManagerRevealCommand(target string) (string, []string) {
 		}
 		return "xdg-open", []string{dir}
 	}
+}
+
+func windowsFileManagerFocusCommand() (string, []string) {
+	script := `$ErrorActionPreference = 'Stop'; ` +
+		`Start-Sleep -Milliseconds 300; ` +
+		`$explorer = Get-Process explorer -ErrorAction SilentlyContinue | ` +
+		`Where-Object { $_.MainWindowHandle -ne 0 } | ` +
+		`Sort-Object StartTime -Descending | ` +
+		`Select-Object -First 1; ` +
+		`if (-not $explorer) { exit 0 }; ` +
+		`$shell = New-Object -ComObject WScript.Shell; ` +
+		`if (-not $shell.AppActivate($explorer.Id)) { exit 1 }`
+	return "powershell", []string{"-NoProfile", "-WindowStyle", "Hidden", "-Command", script}
+}
+
+func runFileManagerCommand(name string, args ...string) error {
+	err := execCommand(name, args...).Run()
+	if err == nil {
+		return nil
+	}
+	if currentOS == "windows" {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil
+		}
+	}
+	return err
 }
 
 func systemOpenCommand(target string) (string, []string) {
@@ -510,6 +605,94 @@ func (s *PhotoService) filterExistingMediaPage(page *storage.PhotoPage) *storage
 	return page
 }
 
+func (s *PhotoService) syncTrashLinks(userID int64) error {
+	s.trashLinksMu.Lock()
+	defer s.trashLinksMu.Unlock()
+
+	links, err := s.collectTrashLinks(userID)
+	if err != nil {
+		return err
+	}
+
+	path := s.trashLinksPath()
+	if len(links) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	content := strings.Join(links, "\n") + "\n"
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func (s *PhotoService) collectTrashLinks(userID int64) ([]string, error) {
+	seen := make(map[string]struct{})
+	links := make([]string, 0)
+	cursor := ""
+	for {
+		page, err := s.repo.ListTrashedPhotos(storage.ListPhotosParams{
+			UserID: userID,
+			Cursor: cursor,
+			Limit:  500,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, photo := range page.Photos {
+			target := s.trashLinkTarget(photo)
+			if target == "" {
+				continue
+			}
+			if _, ok := seen[target]; ok {
+				continue
+			}
+			seen[target] = struct{}{}
+			links = append(links, target)
+		}
+		if !page.HasMore || page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	sort.Strings(links)
+	return links, nil
+}
+
+func (s *PhotoService) trashBaseDir() string {
+	baseDir := s.trashPath
+	if baseDir == "" {
+		baseDir = filepath.Join(s.dataPath, "Trash")
+	}
+	return filepath.Clean(baseDir)
+}
+
+func (s *PhotoService) trashLinksPath() string {
+	return filepath.Join(s.trashBaseDir(), "trash-links.txt")
+}
+
+func (s *PhotoService) trashLinkTarget(photo *storage.Photo) string {
+	if photo == nil {
+		return ""
+	}
+	target := s.resolveFinderPath(photo)
+	if target == "" && photo.SourceRelPath != "" {
+		target = filepath.Join(s.sourcePath, photo.SourceRelPath)
+	}
+	if target == "" && photo.StorageRelPath != "" {
+		target = filepath.Join(s.dataPath, photo.StorageRelPath)
+	}
+	if target == "" && photo.UUID != "" && photo.OriginalName != "" {
+		target = filepath.Join(s.dataPath, photo.UUID+filepath.Ext(photo.OriginalName))
+	}
+	if target == "" {
+		return ""
+	}
+	return filepath.Clean(target)
+}
+
 func (s *PhotoService) moveManagedFileToTrash(path string) {
 	if path == "" {
 		return
@@ -520,10 +703,7 @@ func (s *PhotoService) moveManagedFileToTrash(path string) {
 	}
 
 	rel := s.trashRelPath(path)
-	baseDir := s.trashPath
-	if baseDir == "" {
-		baseDir = filepath.Join(s.dataPath, "Trash")
-	}
+	baseDir := s.trashBaseDir()
 	dest := filepath.Join(baseDir, rel)
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return

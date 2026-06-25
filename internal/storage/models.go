@@ -30,6 +30,8 @@ type Photo struct {
 	UploadedBy      int64      `json:"uploaded_by"` // 关联 users.id
 	DeletedAt       *time.Time `json:"deleted_at"`  // nil 表示未删除
 	DeletedBy       *int64     `json:"deleted_by"`  // nil 表示未删除
+	VideoBookmarkCount int     `json:"video_bookmark_count,omitempty"`
+	VideoResumeTime    int64   `json:"video_resume_time,omitempty"`
 }
 
 // PhotoEXIF 保存可展示的 EXIF 字段。
@@ -119,6 +121,16 @@ type PhotoPage struct {
 	Total      int      `json:"total,omitempty"`
 }
 
+type TimelineLocateResult struct {
+	Photos             []*Photo `json:"photos"`
+	TargetIndex        int      `json:"target_index"`
+	HasBefore          bool     `json:"has_before"`
+	HasAfter           bool     `json:"has_after"`
+	MissingBeforeCount int      `json:"missing_before_count,omitempty"`
+	PrevCursor         string   `json:"prev_cursor,omitempty"`
+	NextCursor         string   `json:"next_cursor,omitempty"`
+}
+
 // LibraryScanSnapshot 保存一次成功扫描后的轻量状态，用于资源库目录树未变化时快速跳过全量扫描。
 type LibraryScanSnapshot struct {
 	RootPath         string    `json:"root_path"`
@@ -140,6 +152,23 @@ type ListPhotosParams struct {
 	OnlyFavorite bool   // true 时仅查询个人收藏
 	SkipTotal    bool   // true 时跳过 COUNT(*)，用于后续分页降低大库滚动成本
 	MediaKind    string // image / video，空表示全部
+}
+
+type LocateTimelineParams struct {
+	UserID    int64
+	PhotoID   int64
+	Limit     int
+	Reverse   bool
+	MediaKind string
+}
+
+type LocateAlbumParams struct {
+	AlbumID   int64
+	UserID    int64
+	PhotoID   int64
+	Limit     int
+	MediaKind string
+	Sort      string
 }
 
 // SearchPhotosParams 查询媒体搜索结果参数。

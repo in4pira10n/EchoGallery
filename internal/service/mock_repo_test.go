@@ -163,6 +163,148 @@ func (m *mockRepo) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPa
 	return &storage.PhotoPage{Photos: photos}, nil
 }
 
+func (m *mockRepo) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error) {
+	page, err := m.ListPhotos(storage.ListPhotosParams{UserID: params.UserID, MediaKind: params.MediaKind})
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := -1
+	for i, photo := range page.Photos {
+		if photo != nil && photo.ID == params.PhotoID {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex < 0 {
+		return nil, nil
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	start := targetIndex - limit
+	if start < 0 {
+		start = 0
+	}
+	end := targetIndex + limit + 1
+	if end > len(page.Photos) {
+		end = len(page.Photos)
+	}
+	return &storage.TimelineLocateResult{
+		Photos:             append([]*storage.Photo(nil), page.Photos[start:end]...),
+		TargetIndex:        targetIndex - start,
+		HasBefore:          start > 0,
+		HasAfter:           end < len(page.Photos),
+		MissingBeforeCount: start,
+	}, nil
+}
+
+func (m *mockRepo) ListPhotosBefore(params storage.LocateTimelineParams) (*storage.PhotoPage, error) {
+	page, err := m.ListPhotos(storage.ListPhotosParams{UserID: params.UserID, MediaKind: params.MediaKind})
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := -1
+	for i, photo := range page.Photos {
+		if photo != nil && photo.ID == params.PhotoID {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex <= 0 {
+		return &storage.PhotoPage{}, nil
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	start := targetIndex - limit
+	if start < 0 {
+		start = 0
+	}
+	return &storage.PhotoPage{
+		Photos:     append([]*storage.Photo(nil), page.Photos[start:targetIndex]...),
+		HasMore:    start > 0,
+		NextCursor: "",
+	}, nil
+}
+
+func (m *mockRepo) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error) {
+	page, err := m.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID:   params.AlbumID,
+		UserID:    params.UserID,
+		MediaKind: params.MediaKind,
+		Sort:      params.Sort,
+	})
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := -1
+	for i, photo := range page.Photos {
+		if photo != nil && photo.ID == params.PhotoID {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex < 0 {
+		return nil, nil
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	start := targetIndex - limit
+	if start < 0 {
+		start = 0
+	}
+	end := targetIndex + limit + 1
+	if end > len(page.Photos) {
+		end = len(page.Photos)
+	}
+	return &storage.TimelineLocateResult{
+		Photos:             append([]*storage.Photo(nil), page.Photos[start:end]...),
+		TargetIndex:        targetIndex - start,
+		HasBefore:          start > 0,
+		HasAfter:           end < len(page.Photos),
+		MissingBeforeCount: start,
+	}, nil
+}
+
+func (m *mockRepo) ListAlbumPhotosBefore(params storage.LocateAlbumParams) (*storage.PhotoPage, error) {
+	page, err := m.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+		AlbumID:   params.AlbumID,
+		UserID:    params.UserID,
+		MediaKind: params.MediaKind,
+		Sort:      params.Sort,
+	})
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := -1
+	for i, photo := range page.Photos {
+		if photo != nil && photo.ID == params.PhotoID {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex <= 0 {
+		return &storage.PhotoPage{}, nil
+	}
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
+	}
+	start := targetIndex - limit
+	if start < 0 {
+		start = 0
+	}
+	return &storage.PhotoPage{
+		Photos:     append([]*storage.Photo(nil), page.Photos[start:targetIndex]...),
+		HasMore:    start > 0,
+		NextCursor: "",
+	}, nil
+}
+
 func (m *mockRepo) ListTrashedPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	var photos []*storage.Photo
 	for _, p := range m.photos {

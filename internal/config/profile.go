@@ -75,7 +75,13 @@ type BatchTaskState struct {
 
 type profileDefaultsProbe struct {
 	Preferences struct {
-		LowResourceMode *bool `json:"low_resource_mode"`
+		WarmEnabled                 *bool `json:"warm_enabled"`
+		LowResourceMode             *bool `json:"low_resource_mode"`
+		ThrottledVideoSeek          *bool `json:"throttled_video_seek"`
+		VideoSeekThrottleMS         *int  `json:"video_seek_throttle_ms"`
+		VideoVolumeSwipeSensitivity *int  `json:"video_volume_swipe_sensitivity"`
+		VideoVolumeMinPercent       *int  `json:"video_volume_min_percent"`
+		VideoVolumeMaxPercent       *int  `json:"video_volume_max_percent"`
 	} `json:"preferences"`
 }
 
@@ -176,6 +182,24 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		profile.Preferences.LowResourceMode = false
+	}
+	if probe.Preferences.WarmEnabled == nil {
+		profile.Preferences.WarmEnabled = true
+	}
+	if probe.Preferences.ThrottledVideoSeek == nil {
+		profile.Preferences.ThrottledVideoSeek = false
+	}
+	if probe.Preferences.VideoSeekThrottleMS == nil {
+		profile.Preferences.VideoSeekThrottleMS = 240
+	}
+	if probe.Preferences.VideoVolumeSwipeSensitivity == nil {
+		profile.Preferences.VideoVolumeSwipeSensitivity = 100
+	}
+	if probe.Preferences.VideoVolumeMinPercent == nil {
+		profile.Preferences.VideoVolumeMinPercent = 0
+	}
+	if probe.Preferences.VideoVolumeMaxPercent == nil {
+		profile.Preferences.VideoVolumeMaxPercent = 100
 	}
 	if err := profile.validate(cfg); err != nil {
 		return nil, err
@@ -366,6 +390,21 @@ func (p *Profile) applyDefaults(fallback *Config) {
 	}
 	if p.Preferences.VideoSectionMinMinutes == 0 {
 		p.Preferences.VideoSectionMinMinutes = 10
+	}
+	if p.Preferences.VideoSeekThrottleMS < 120 || p.Preferences.VideoSeekThrottleMS > 1000 {
+		p.Preferences.VideoSeekThrottleMS = 240
+	}
+	if p.Preferences.VideoVolumeSwipeSensitivity < 40 || p.Preferences.VideoVolumeSwipeSensitivity > 220 {
+		p.Preferences.VideoVolumeSwipeSensitivity = 100
+	}
+	if p.Preferences.VideoVolumeMinPercent < 0 || p.Preferences.VideoVolumeMinPercent > 100 {
+		p.Preferences.VideoVolumeMinPercent = 0
+	}
+	if p.Preferences.VideoVolumeMaxPercent < 0 || p.Preferences.VideoVolumeMaxPercent > 100 {
+		p.Preferences.VideoVolumeMaxPercent = 100
+	}
+	if p.Preferences.VideoVolumeMaxPercent < p.Preferences.VideoVolumeMinPercent {
+		p.Preferences.VideoVolumeMaxPercent = p.Preferences.VideoVolumeMinPercent
 	}
 	p.normalizeLibraries()
 	var libraryScope []Library

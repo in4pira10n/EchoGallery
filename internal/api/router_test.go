@@ -55,6 +55,10 @@ type stubRegistrar struct {
 	getFavorites                   func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTrash                       func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTimeline                    func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	locateTimelineWindow           func(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error)
+	getTimelineBefore              func(params storage.LocateTimelineParams) (*storage.PhotoPage, error)
+	locateAlbumWindow              func(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error)
+	getAlbumBefore                 func(params storage.LocateAlbumParams) (*storage.PhotoPage, error)
 	searchMedia                    func(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	getRandomMedia                 func(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
 	mediaPath                      func(photo *storage.Photo) string
@@ -178,6 +182,34 @@ func (s stubRegistrar) GetPhotoByUUIDAny(uuid string, userID int64) (*storage.Ph
 
 func (s stubRegistrar) GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	return s.getTimeline(params)
+}
+
+func (s stubRegistrar) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error) {
+	if s.locateTimelineWindow == nil {
+		return nil, nil
+	}
+	return s.locateTimelineWindow(params)
+}
+
+func (s stubRegistrar) GetTimelineBefore(params storage.LocateTimelineParams) (*storage.PhotoPage, error) {
+	if s.getTimelineBefore == nil {
+		return &storage.PhotoPage{}, nil
+	}
+	return s.getTimelineBefore(params)
+}
+
+func (s stubRegistrar) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.TimelineLocateResult, error) {
+	if s.locateAlbumWindow == nil {
+		return nil, nil
+	}
+	return s.locateAlbumWindow(params)
+}
+
+func (s stubRegistrar) GetAlbumBefore(params storage.LocateAlbumParams) (*storage.PhotoPage, error) {
+	if s.getAlbumBefore == nil {
+		return &storage.PhotoPage{}, nil
+	}
+	return s.getAlbumBefore(params)
 }
 
 func (s stubRegistrar) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
@@ -1101,6 +1133,7 @@ func TestSettingsUpdate_VisitorOnlySavesOwnPreferences(t *testing.T) {
 		"experimental_prefetch_neighbors":true,
 		"experimental_restore_last_view":true,
 		"continue_last_video_position":true,
+		"warm_enabled":false,
 		"low_resource_mode":true,
 		"player_keymap":"custom"
 	}`
@@ -1181,7 +1214,8 @@ func TestSettingsUpdate_ReturnsRequiresRestartWhenSwitchingLibrary(t *testing.T)
 		"lightbox_zoom":100,
 		"video_section_min_minutes":10,
 		"experimental_prefetch_neighbors":true,
-		"continue_last_video_position":true
+		"continue_last_video_position":true,
+		"warm_enabled":true
 	}`, libB, libA, libB, cfg.ThumbnailDir, cfg.TrashDir)
 	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1247,7 +1281,8 @@ func TestSettingsUpdate_PreservesLibraryOwnerUsername(t *testing.T) {
 		"lightbox_zoom":100,
 		"video_section_min_minutes":10,
 		"experimental_prefetch_neighbors":true,
-		"continue_last_video_position":true
+		"continue_last_video_position":true,
+		"warm_enabled":true
 	}`, "/libraries/a", "/libraries/a", cfg.ThumbnailDir, cfg.TrashDir)
 	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -2007,7 +2042,7 @@ func TestCreateShareMedia_Success(t *testing.T) {
 		posterPath:              okRegistrar().posterPath,
 		restorePhoto:            okRegistrar().restorePhoto,
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/media/shares", strings.NewReader(`{"type":"photo","target_id":11,"expires_in_days":7}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/media/shares", strings.NewReader(`{"type":"photo","target_id":11}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, testConfig().JWTSecret, "alice")})
 	w := httptest.NewRecorder()
@@ -2020,7 +2055,7 @@ func TestCreateShareMedia_Success(t *testing.T) {
 	if !called {
 		t.Fatal("应调用创建分享逻辑")
 	}
-	if gotInput.Type != storage.ShareTypePhoto || gotInput.TargetID != 11 || gotInput.ExpiresAt == nil {
+	if gotInput.Type != storage.ShareTypePhoto || gotInput.TargetID != 11 || gotInput.ExpiresAt != nil {
 		t.Fatalf("创建分享参数不正确: %+v", gotInput)
 	}
 	var link struct {
@@ -2484,8 +2519,8 @@ func TestHandleSharePage_Success(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "分享 - EchoGallery") {
 		t.Fatalf("分享页内容不正确")
 	}
-	if !strings.Contains(w.Body.String(), "link.target_media_kind === 'video'") {
-		t.Fatalf("分享页未包含视频展示逻辑")
+	if !strings.Contains(w.Body.String(), `/static/lightbox.js`) || !strings.Contains(w.Body.String(), `createShareController`) {
+		t.Fatalf("分享页未接入共享灯箱")
 	}
 }
 
@@ -3945,7 +3980,7 @@ func TestVisitor_CanOnlyUpdateHarmlessSettings(t *testing.T) {
 	cfg.Preferences.GridGap = 2
 	cfg.Preferences.LowResourceMode = false
 	router := NewRouter(cfg, okRegistrar())
-	body := fmt.Sprintf(`{"port":9090,"active_library_id":"lib_b","storage_path":%q,"libraries":[{"id":"lib_b","name":"B","path":%q}],"thumbnail_dir":%q,"thumbnail_size":512,"trash_dir":%q,"use_system_player":true,"theme":"dark","grid_size":196,"grid_gap":6,"thumb_radius":8,"sidebar_auto_hide":true,"slideshow_mode":"sequential","slideshow_loop":false,"slideshow_interval":7000,"lightbox_zoom":100,"experimental_autoplay_video":true,"video_autoplay_next":true,"video_section_min_minutes":12,"experimental_prefetch_neighbors":false,"experimental_restore_last_view":true,"continue_last_video_position":false,"low_resource_mode":true,"player_keymap":"SPACE pause"}`, filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "other-thumbnails"), filepath.Join(cfg.AppDataDir, "other-trash"))
+	body := fmt.Sprintf(`{"port":9090,"active_library_id":"lib_b","storage_path":%q,"libraries":[{"id":"lib_b","name":"B","path":%q}],"thumbnail_dir":%q,"thumbnail_size":512,"trash_dir":%q,"use_system_player":true,"theme":"dark","grid_size":196,"grid_gap":6,"thumb_radius":8,"sidebar_auto_hide":true,"slideshow_mode":"sequential","slideshow_loop":false,"slideshow_interval":7000,"lightbox_zoom":100,"experimental_autoplay_video":true,"video_autoplay_next":true,"video_section_min_minutes":12,"experimental_prefetch_neighbors":false,"experimental_restore_last_view":true,"continue_last_video_position":false,"warm_enabled":false,"low_resource_mode":true,"player_keymap":"SPACE pause"}`, filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "library-b"), filepath.Join(cfg.AppDataDir, "other-thumbnails"), filepath.Join(cfg.AppDataDir, "other-trash"))
 	req := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
