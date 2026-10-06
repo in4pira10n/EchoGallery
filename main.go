@@ -21,7 +21,9 @@ import (
 	"echogallery/internal/config"
 	"echogallery/internal/service"
 	"echogallery/internal/sessionlock"
+	"echogallery/internal/storage"
 	"echogallery/internal/storage/sqlite"
+
 	"github.com/google/uuid"
 )
 
@@ -339,8 +341,8 @@ func batchProgressCounts(status api.LibraryBatchBuildStatus) (int, int) {
 	if done > total {
 		done = total
 	}
-	if status.CurrentLibraryIndex > done && !isBatchTerminalStatus(status.Status) {
-		done = status.CurrentLibraryIndex
+	if status.CurrentLibraryIndex-1 > done && !isBatchTerminalStatus(status.Status) {
+		done = status.CurrentLibraryIndex - 1
 	}
 	if done > total {
 		done = total
@@ -410,6 +412,8 @@ func batchPhaseLabel(phase string) string {
 		return "thumbnails"
 	case "migrate":
 		return "migrate legacy"
+	case "repair":
+		return "repair thumbnails"
 	case "cleanup":
 		return "cleanup"
 	case "maintenance":
@@ -707,16 +711,21 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 			row = rowsByPath[strings.TrimSpace(library.Path)]
 		}
 		item := api.LibraryBatchBuildLibraryStatus{
-			ID:        library.ID,
-			Name:      library.Name,
-			Path:      library.Path,
-			Status:    row.Status,
-			Message:   row.Message,
-			Imported:  row.Imported,
-			Skipped:   row.Skipped,
-			Pruned:    row.Pruned,
-			Generated: row.Generated,
-			Failed:    row.Failed,
+			ID:             library.ID,
+			Name:           library.Name,
+			Path:           library.Path,
+			Status:         row.Status,
+			Message:        row.Message,
+			Imported:       row.Imported,
+			Skipped:        row.Skipped,
+			Pruned:         row.Pruned,
+			Generated:      row.Generated,
+			Failed:         row.Failed,
+			Matched:        row.Matched,
+			Resumed:        row.Resumed,
+			Existing:       row.Existing,
+			MissingOld:     row.MissingOld,
+			DuplicatePaths: append([]string(nil), row.DuplicatePaths...),
 		}
 		if strings.TrimSpace(item.Status) == "" {
 			item.Status = "pending"
@@ -769,16 +778,21 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 	rows := make([]config.BatchTaskLibraryState, 0, len(status.Libraries))
 	for _, row := range status.Libraries {
 		rows = append(rows, config.BatchTaskLibraryState{
-			ID:        row.ID,
-			Name:      row.Name,
-			Path:      row.Path,
-			Status:    row.Status,
-			Message:   row.Message,
-			Imported:  row.Imported,
-			Skipped:   row.Skipped,
-			Pruned:    row.Pruned,
-			Generated: row.Generated,
-			Failed:    row.Failed,
+			ID:             row.ID,
+			Name:           row.Name,
+			Path:           row.Path,
+			Status:         row.Status,
+			Message:        row.Message,
+			Imported:       row.Imported,
+			Skipped:        row.Skipped,
+			Pruned:         row.Pruned,
+			Generated:      row.Generated,
+			Failed:         row.Failed,
+			Matched:        row.Matched,
+			Resumed:        row.Resumed,
+			Existing:       row.Existing,
+			MissingOld:     row.MissingOld,
+			DuplicatePaths: append([]string(nil), row.DuplicatePaths...),
 		})
 	}
 	return config.BatchTaskState{
@@ -994,6 +1008,11 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 			rows[index].Pruned = 0
 			rows[index].Generated = 0
 			rows[index].Failed = 0
+			rows[index].Matched = 0
+			rows[index].Resumed = 0
+			rows[index].Existing = 0
+			rows[index].MissingOld = 0
+			rows[index].DuplicatePaths = nil
 			continue
 		}
 		if rows[index].Status == "completed" {
@@ -1032,6 +1051,9 @@ func (m *libraryBatchBuildManager) Status(cfg *config.Config, profile *config.Pr
 func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch scan parameters")
+	}
+	if moveLegacyThumbnails || cleanThumbnailFiles || buildPlaybackCaches {
+		return api.LibraryBatchBuildStatus{}, fmt.Errorf("批量工作流的迁移、旧文件清理和播放缓存阶段已暂停")
 	}
 	availableLibraries := batchLibrariesForWorkflow(cfg)
 	selectedStatus := loadPersistedBatchStatus(cfg, availableLibraries, batchTaskKindScan, m.defaultExitAfter, m.idleMessage)
@@ -1151,6 +1173,9 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch thumbnail parameters")
 	}
+	if moveLegacyThumbnails || cleanThumbnailFiles || buildPlaybackCaches {
+		return api.LibraryBatchBuildStatus{}, fmt.Errorf("批量工作流的迁移、旧文件清理和播放缓存阶段已暂停")
+	}
 	availableLibraries := batchLibrariesForWorkflow(cfg)
 	selectedStatus := loadPersistedBatchStatus(cfg, availableLibraries, batchTaskKindThumbnails, m.defaultExitAfter, m.idleMessage)
 	libraries := selectedLibrariesFromBatchStatus(availableLibraries, selectedStatus)
@@ -1164,6 +1189,34 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 		if current.Status == "running" || current.Status == "cancelling" {
 			m.mu.Unlock()
 			return current, nil
+		}
+	}
+	if (moveLegacyThumbnails || cleanThumbnailFiles) && !buildPlaybackCaches &&
+		selectedStatus.Status == "completed" && selectedStatus.FailedLibraries == 0 &&
+		selectedStatus.MoveLegacyThumbnails == moveLegacyThumbnails &&
+		selectedStatus.CleanThumbnailFiles == cleanThumbnailFiles &&
+		len(libraries) == selectedStatus.CompletedLibraries {
+		upToDate := true
+		for _, library := range libraries {
+			dbPath, pathErr := cfg.DatabasePathForStorage(library.Path)
+			if pathErr != nil {
+				upToDate = false
+				break
+			}
+			complete, checkErr := sqlite.LegacyThumbnailRunCompleteAtPath(context.Background(), dbPath, cfg.LegacyDatabasePathForStorage(library.Path), cleanThumbnailFiles)
+			if checkErr != nil || !complete {
+				upToDate = false
+				break
+			}
+		}
+		if upToDate {
+			m.mu.Unlock()
+			selectedStatus.Message = "已核对全部资源库，无需重复迁移"
+			selectedStatus.CurrentPhase = ""
+			selectedStatus.CurrentDone = 0
+			selectedStatus.CurrentTotal = 0
+			selectedStatus.CurrentPercent = 100
+			return selectedStatus, nil
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1277,12 +1330,6 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		defer sleepGuard.Stop()
 	}
 
-	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
-	if err != nil {
-		m.failTask(task, err)
-		return
-	}
-
 	snapshot := task.snapshot()
 	if snapshot.CleanThumbnailFiles {
 		if err := runLegacyCleanup(cfg, m.lockStore); err != nil {
@@ -1318,6 +1365,14 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
 			continue
 		}
+		managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg, library)
+		if err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
+			m.failLibrary(task, index, err)
+			continue
+		}
 		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
 		if err != nil {
 			if m.lockStore != nil {
@@ -1327,7 +1382,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			continue
 		}
 
-		libraryUserID := batchLibraryOwnerUserID(cfg, library, userID)
+		libraryUserID := svc.LibraryUserID(batchLibraryOwnerUserID(cfg, library, userID))
 		summary, err := svc.ImportExistingPhotosContext(ctx, libraryUserID, func(done, total int) {
 			task.mutate(func(status *api.LibraryBatchBuildStatus) {
 				status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
@@ -1486,12 +1541,6 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		defer sleepGuard.Stop()
 	}
 
-	managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg)
-	if err != nil {
-		m.failTask(task, err)
-		return
-	}
-
 	snapshot := task.snapshot()
 	if snapshot.CleanThumbnailFiles {
 		if err := runLegacyCleanup(cfg, m.lockStore); err != nil {
@@ -1527,6 +1576,14 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			m.failLibrary(task, index, fmt.Errorf("创建资源库目录失败: %w", err))
 			continue
 		}
+		managedDataDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg, library)
+		if err != nil {
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
+			m.failLibrary(task, index, err)
+			continue
+		}
 		repo, svc, err := openBatchLibraryService(cfg, library, managedDataDir, trashDir, thumbDir)
 		if err != nil {
 			if m.lockStore != nil {
@@ -1536,55 +1593,101 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			continue
 		}
 
-		options := service.ThumbnailMaintenanceOptions{
-			MoveLegacyThumbnails: snapshot.MoveLegacyThumbnails,
-			CleanThumbnailFiles:  snapshot.CleanThumbnailFiles,
-		}
-		if options.Enabled() {
-			summary, err := svc.MaintainThumbnailsContext(ctx, userID, options, func(progress service.ThumbnailMaintenanceProgress) {
-				task.mutate(func(status *api.LibraryBatchBuildStatus) {
-					status.Message = progress.Message
-					status.CurrentLibraryID = library.ID
-					status.CurrentLibraryIndex = index + 1
-					status.CurrentLibraryName = library.Name
-					status.CurrentLibraryPath = library.Path
-					status.CurrentPhase = thumbnailMaintenancePhase(options)
-					status.CurrentDone = progress.Done
-					status.CurrentTotal = progress.Total
-					if progress.Total > 0 {
-						status.CurrentPercent = float64(progress.Done) / float64(progress.Total) * 100
-					} else {
-						status.CurrentPercent = 0
-					}
-					status.Libraries[index].Status = "building"
-					status.Libraries[index].Imported = progress.Moved
-					status.Libraries[index].Pruned = progress.Cleaned
-					status.Libraries[index].Failed = progress.Failed
-					status.Libraries[index].Message = progress.Message
-				})
-				task.persist(false)
-			})
+		var legacyMatches []storage.LegacyUUIDMatch
+		var duplicatePaths []string
+		legacyResult := service.LegacyThumbnailResult{}
+		if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+			legacyPath := cfg.LegacyDatabasePathForStorage(library.Path)
+			legacyRoot := strings.TrimSpace(cfg.ThumbnailDir)
+			if info, statErr := os.Stat(legacyRoot); statErr != nil || !info.IsDir() {
+				err = fmt.Errorf("旧版缩略图目录不存在: %s", legacyRoot)
+			} else {
+				svc.SetLegacyThumbnailRoot(legacyRoot)
+				report, restoreErr := repo.RestoreLegacyUUIDsWithReport(ctx, legacyPath)
+				legacyMatches, duplicatePaths, err = report.Matches, report.SkippedPaths, restoreErr
+			}
 			if err != nil {
 				_ = repo.Close()
 				if m.lockStore != nil {
 					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
 				}
-				if ctx.Err() != nil {
-					m.cancelTask(task, index)
-					return
-				}
-				m.failLibrary(task, index, fmt.Errorf("整理缩略图目录失败: %w", err))
+				m.failLibrary(task, index, fmt.Errorf("旧版 UUID 映射失败: %w", err))
 				continue
 			}
 			task.mutate(func(status *api.LibraryBatchBuildStatus) {
-				status.Libraries[index].Imported = summary.Moved
-				status.Libraries[index].Pruned = summary.Cleaned
-				status.Libraries[index].Failed = summary.Failed
+				status.Libraries[index].Matched = len(legacyMatches)
+				status.Libraries[index].DuplicatePaths = append([]string(nil), duplicatePaths...)
 			})
-			task.persist(false)
+			if snapshot.MoveLegacyThumbnails {
+				completed, loadErr := repo.LegacyThumbnailCompleted(ctx)
+				if loadErr != nil {
+					err = fmt.Errorf("读取迁移进度失败: %w", loadErr)
+				} else {
+					legacyResult, err = svc.MigrateLegacyThumbnailFiles(ctx, legacyMatches, completed, func(progress service.LegacyThumbnailProgress) error {
+						if err := repo.RecordLegacyThumbnailProgress(ctx, progress.Verified); err != nil {
+							return fmt.Errorf("保存迁移进度失败: %w", err)
+						}
+						task.mutate(func(status *api.LibraryBatchBuildStatus) {
+							status.Message = fmt.Sprintf("正在复制旧版缩略图：%d / %d", progress.Done, progress.Total)
+							status.CurrentLibraryID = library.ID
+							status.CurrentLibraryIndex = index + 1
+							status.CurrentLibraryName = library.Name
+							status.CurrentLibraryPath = library.Path
+							status.CurrentPhase = "migrate"
+							status.CurrentDone = progress.Done
+							status.CurrentTotal = progress.Total
+							if progress.Total > 0 {
+								status.CurrentPercent = float64(progress.Done) / float64(progress.Total) * 50
+							} else {
+								status.CurrentPercent = 50
+							}
+							status.Libraries[index].Status = "building"
+							status.Libraries[index].Imported = progress.Result.Copied
+							status.Libraries[index].Resumed = progress.Result.Resumed
+							status.Libraries[index].Existing = progress.Result.Existing
+							status.Libraries[index].MissingOld = progress.Result.Missing
+							status.Libraries[index].Message = status.Message
+						})
+						task.persist(false)
+						return nil
+					})
+				}
+				if err != nil {
+					_ = repo.Close()
+					if m.lockStore != nil {
+						_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+					}
+					if ctx.Err() != nil {
+						m.cancelTask(task, index)
+						return
+					}
+					m.failLibrary(task, index, fmt.Errorf("复制旧版缩略图失败: %w", err))
+					continue
+				}
+				task.mutate(func(status *api.LibraryBatchBuildStatus) {
+					status.Libraries[index].Imported = legacyResult.Copied
+				})
+				task.persist(false)
+			}
 		}
 
-		libraryUserID := batchLibraryOwnerUserID(cfg, library, userID)
+		libraryUserID := svc.LibraryUserID(batchLibraryOwnerUserID(cfg, library, userID))
+		if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+			verified := make(map[string]struct{}, len(legacyMatches))
+			if snapshot.MoveLegacyThumbnails {
+				for _, match := range legacyMatches {
+					verified[match.OldUUID] = struct{}{}
+				}
+			}
+			if _, err := svc.RemoveCorruptNewThumbnails(ctx, libraryUserID, verified); err != nil {
+				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+				}
+				m.failLibrary(task, index, fmt.Errorf("核对新版缩略图失败: %w", err))
+				continue
+			}
+		}
 		if _, err := svc.StartThumbnailBuild(libraryUserID); err != nil {
 			_ = repo.Close()
 			if m.lockStore != nil {
@@ -1615,6 +1718,72 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			m.failLibrary(task, index, fmt.Errorf("%s", failureMessage))
 			continue
 		}
+		repairResult := service.ThumbnailRepairResult{}
+		remainingMissing := 0
+		if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+			auditProgress := func(done, total int) {
+				task.mutate(func(status *api.LibraryBatchBuildStatus) {
+					status.CurrentPhase = "audit"
+					status.CurrentDone = done
+					status.CurrentTotal = total
+					status.CurrentPercent = max(status.CurrentPercent, 85+7*float64(done)/float64(max(total, 1)))
+					status.Message = fmt.Sprintf("正在核对新版缩略图：%d / %d", done, total)
+				})
+				task.persist(false)
+			}
+			missingPhotos, auditErr := svc.MissingNewThumbnailsWithProgress(ctx, libraryUserID, auditProgress)
+			if auditErr == nil && len(missingPhotos) > 0 {
+				repairResult, auditErr = svc.RebuildMissingThumbnails(ctx, missingPhotos, func(done, total int) {
+					task.mutate(func(status *api.LibraryBatchBuildStatus) {
+						status.CurrentPhase = "repair"
+						status.CurrentDone = done
+						status.CurrentTotal = total
+						status.CurrentPercent = max(status.CurrentPercent, 92+3*float64(done)/float64(max(total, 1)))
+						status.Message = fmt.Sprintf("正在补建缺失缩略图：%d / %d", done, total)
+						status.Libraries[index].Generated = thumbStatus.Generated + repairResult.Generated
+					})
+					task.persist(false)
+				})
+				if auditErr == nil {
+					missingPhotos, auditErr = svc.MissingNewThumbnailsWithProgress(ctx, libraryUserID, auditProgress)
+				}
+			}
+			remainingMissing = len(missingPhotos)
+			if auditErr == nil && remainingMissing == 0 && snapshot.CleanThumbnailFiles {
+				legacyResult.Cleaned, auditErr = svc.CleanCopiedLegacyThumbnailsWithProgress(ctx, legacyMatches, func(done, total int) {
+					task.mutate(func(status *api.LibraryBatchBuildStatus) {
+						status.CurrentPhase = "cleanup"
+						status.CurrentDone = done
+						status.CurrentTotal = total
+						end := 100.0
+						if snapshot.BuildPlaybackCaches {
+							end = 98
+						}
+						status.CurrentPercent = max(status.CurrentPercent, 95+(end-95)*float64(done)/float64(max(total, 1)))
+						status.Message = fmt.Sprintf("正在清理已核对旧文件：%d / %d", done, total)
+					})
+					task.persist(false)
+				})
+			}
+			if auditErr != nil {
+				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+				}
+				m.failLibrary(task, index, fmt.Errorf("旧版缩略图核对失败: %w", auditErr))
+				continue
+			}
+			if remainingMissing == 0 {
+				if saveErr := repo.SaveLegacyThumbnailRun(ctx, cfg.LegacyDatabasePathForStorage(library.Path), snapshot.CleanThumbnailFiles); saveErr != nil {
+					_ = repo.Close()
+					if m.lockStore != nil {
+						_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+					}
+					m.failLibrary(task, index, fmt.Errorf("保存迁移完成状态失败: %w", saveErr))
+					continue
+				}
+			}
+		}
 		playbackStatus := service.PlaybackCacheBuildStatus{}
 		if snapshot.BuildPlaybackCaches {
 			playbackStatus = svc.BuildPlaybackCachesSyncContext(ctx, libraryUserID, func(progress service.PlaybackCacheBuildStatus) bool {
@@ -1628,13 +1797,22 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 					status.CurrentDone = progress.Done
 					status.CurrentTotal = progress.Total
 					if progress.Total > 0 {
-						status.CurrentPercent = float64(progress.Done) / float64(progress.Total) * 100
+						start := 90.0
+						if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+							start = 92
+							if snapshot.CleanThumbnailFiles {
+								start = 98
+							} else if len(repairResult.Errors) > 0 || repairResult.Generated > 0 {
+								start = 95
+							}
+						}
+						status.CurrentPercent = start + (100-start)*float64(progress.Done)/float64(progress.Total)
 					} else {
-						status.CurrentPercent = 0
+						status.CurrentPercent = 100
 					}
 					status.Libraries[index].Status = "building"
 					status.Libraries[index].Message = progress.Message
-					status.Libraries[index].Imported = progress.Generated
+					status.Libraries[index].Generated = thumbStatus.Generated
 					status.Libraries[index].Failed = progress.Failed
 				})
 				task.persist(false)
@@ -1665,24 +1843,52 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 		if m.lockStore != nil {
 			_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
 		}
+		if remainingMissing > 0 {
+			reason := fmt.Sprintf("补建后仍有 %d 个媒体缺少可解码缩略图；旧文件已保留", remainingMissing)
+			if len(repairResult.Errors) > 0 {
+				reason += "：" + strings.Join(repairResult.Errors[:min(len(repairResult.Errors), 4)], "；")
+			}
+			m.failLibrary(task, index, fmt.Errorf("%s", reason))
+			task.mutate(func(status *api.LibraryBatchBuildStatus) {
+				status.Libraries[index].Generated = thumbStatus.Generated + repairResult.Generated
+				status.Libraries[index].Failed = remainingMissing
+			})
+			task.persist(true)
+			continue
+		}
 		task.mutate(func(status *api.LibraryBatchBuildStatus) {
 			status.CompletedLibraries++
-			status.Libraries[index].Generated = thumbStatus.Generated
+			status.Libraries[index].Generated = thumbStatus.Generated + repairResult.Generated
 			status.Libraries[index].Skipped = thumbStatus.Skipped
-			status.Libraries[index].Imported = playbackStatus.Generated
-			status.Libraries[index].Failed = thumbStatus.Failed + playbackStatus.Failed
+			status.Libraries[index].Imported = legacyResult.Copied
+			status.Libraries[index].Matched = len(legacyMatches)
+			status.Libraries[index].Resumed = legacyResult.Resumed
+			status.Libraries[index].Existing = legacyResult.Existing
+			status.Libraries[index].MissingOld = legacyResult.Missing
+			status.Libraries[index].DuplicatePaths = append([]string(nil), duplicatePaths...)
+			status.Libraries[index].Pruned = legacyResult.Cleaned
+			status.Libraries[index].Failed = playbackStatus.Failed
 			status.Libraries[index].Status = "completed"
 			if snapshot.BuildPlaybackCaches {
-				status.Libraries[index].Message = fmt.Sprintf("%s；播放缓存 %d，跳过 %d", thumbStatus.Message, playbackStatus.Generated, playbackStatus.Skipped)
+				status.Libraries[index].Message = fmt.Sprintf("缩略图：旧库匹配 %d，重复路径跳过 %d，复制 %d，续跑 %d，已有 %d，补建 %d，清理 %d；播放缓存 %d，跳过 %d", len(legacyMatches), len(duplicatePaths), legacyResult.Copied, legacyResult.Resumed, legacyResult.Existing, thumbStatus.Generated+repairResult.Generated, legacyResult.Cleaned, playbackStatus.Generated, playbackStatus.Skipped)
+			} else if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+				status.Libraries[index].Message = fmt.Sprintf("缩略图：旧库匹配 %d，重复路径跳过 %d，复制 %d，续跑 %d，已有 %d，旧文件缺失 %d，补建 %d，清理 %d", len(legacyMatches), len(duplicatePaths), legacyResult.Copied, legacyResult.Resumed, legacyResult.Existing, legacyResult.Missing, thumbStatus.Generated+repairResult.Generated, legacyResult.Cleaned)
 			} else {
 				status.Libraries[index].Message = thumbStatus.Message
 			}
 			status.Message = fmt.Sprintf("资源库 %s 缩略图构建完成", library.Name)
 			status.CurrentDone = thumbStatus.Done
 			status.CurrentTotal = thumbStatus.Total
-			status.CurrentPercent = thumbStatus.Percent
+			status.CurrentPercent = 100
 		})
 		task.persist(true)
+		if snapshot.MoveLegacyThumbnails || snapshot.CleanThumbnailFiles {
+			fmt.Printf("Legacy thumbnails %s: matched=%d duplicate-skipped=%d copied=%d resumed=%d existing=%d missing-old=%d generated=%d repaired=%d cleaned=%d verified=all\n",
+				library.Name, len(legacyMatches), len(duplicatePaths), legacyResult.Copied, legacyResult.Resumed, legacyResult.Existing, legacyResult.Missing, thumbStatus.Generated, repairResult.Generated, legacyResult.Cleaned)
+			for _, path := range duplicatePaths {
+				fmt.Printf("  skipped duplicate path: %s\n", path)
+			}
+		}
 	}
 
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
@@ -1738,6 +1944,10 @@ func (m *libraryBatchThumbnailBuildManager) beginLibrary(task *libraryBatchBuild
 }
 
 func (m *libraryBatchThumbnailBuildManager) failLibrary(task *libraryBatchBuildTask, index int, err error) {
+	snapshot := task.snapshot()
+	if index >= 0 && index < len(snapshot.Libraries) {
+		fmt.Fprintf(os.Stderr, "Batch thumbnails %s failed: %v\n", snapshot.Libraries[index].Name, err)
+	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
 		status.FailedLibraries++
 		status.Libraries[index].Status = "failed"
@@ -1766,29 +1976,22 @@ func (m *libraryBatchThumbnailBuildManager) cancelTask(task *libraryBatchBuildTa
 	task.persist(true)
 }
 
-func prepareLibraryBatchPaths(cfg *config.Config) (string, string, string, error) {
-	managedDataDir, err := cfg.ManagedDataDir()
+func prepareLibraryBatchPaths(cfg *config.Config, library config.Library) (string, string, string, error) {
+	managedDataDir, err := cfg.ManagedDataDirForStorage(library.Path)
 	if err != nil {
 		return "", "", "", fmt.Errorf("计算媒体数据目录失败: %w", err)
 	}
-	trashDir, err := cfg.TrashPath()
-	if err != nil {
-		return "", "", "", fmt.Errorf("计算回收站目录失败: %w", err)
-	}
-	thumbDir, err := cfg.ThumbnailStoragePath()
+	thumbDir, err := cfg.ThumbnailStoragePathForStorage(library.Path)
 	if err != nil {
 		return "", "", "", fmt.Errorf("计算缩略图目录失败: %w", err)
 	}
 	if err := os.MkdirAll(managedDataDir, 0755); err != nil {
 		return "", "", "", fmt.Errorf("创建媒体数据目录失败: %w", err)
 	}
-	if err := os.MkdirAll(trashDir, 0755); err != nil {
-		return "", "", "", fmt.Errorf("创建回收站目录失败: %w", err)
-	}
 	if err := os.MkdirAll(thumbDir, 0755); err != nil {
 		return "", "", "", fmt.Errorf("创建缩略图目录失败: %w", err)
 	}
-	return managedDataDir, trashDir, thumbDir, nil
+	return managedDataDir, "", thumbDir, nil
 }
 
 func runLegacyCleanup(cfg *config.Config, lockStore *sessionlock.Store) error {
@@ -1937,6 +2140,9 @@ func resolveBootstrapLibrary(cfg *config.Config) (config.Library, bool) {
 }
 
 func openBatchLibraryService(cfg *config.Config, library config.Library, managedDataDir, trashDir, thumbDir string) (*sqlite.DB, *service.PhotoService, error) {
+	if err := config.ValidatePortableLibraryIdentity(library.Path, library.ID); err != nil {
+		return nil, nil, err
+	}
 	dbPath, err := cfg.DatabasePathForStorage(library.Path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("计算数据库路径失败: %w", err)
@@ -1944,9 +2150,17 @@ func openBatchLibraryService(cfg *config.Config, library config.Library, managed
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, nil, fmt.Errorf("创建数据库目录失败: %w", err)
 	}
-	repo, err := sqlite.New(dbPath)
+	repo, err := sqlite.NewPortableWorkingCopy(dbPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("打开数据库失败: %w", err)
+	}
+	if err := repo.EnsureLibraryMetadata(library.ID, library.Name, library.AccentColor); err != nil {
+		_ = repo.Close()
+		return nil, nil, fmt.Errorf("识别资源库数据失败: %w", err)
+	}
+	if err := repo.SyncPortable(); err != nil {
+		_ = repo.Close()
+		return nil, nil, fmt.Errorf("同步资源库数据库失败: %w", err)
 	}
 	svc := service.NewPhotoServiceWithoutWarmup(repo, library.Path, managedDataDir, trashDir)
 	svc.SetThumbnailRoot(thumbDir)
@@ -1982,7 +2196,17 @@ func waitThumbnailBuildTask(ctx context.Context, svc *service.PhotoService, task
 			batch.CurrentPhase = "thumbnails"
 			batch.CurrentDone = status.Done
 			batch.CurrentTotal = status.Total
-			batch.CurrentPercent = status.Percent
+			if batch.MoveLegacyThumbnails || batch.CleanThumbnailFiles {
+				start := 0.0
+				if batch.MoveLegacyThumbnails {
+					start = 50
+				}
+				batch.CurrentPercent = start + (85-start)*status.Percent/100
+			} else if batch.BuildPlaybackCaches {
+				batch.CurrentPercent = status.Percent * .9
+			} else {
+				batch.CurrentPercent = status.Percent
+			}
 			batch.Message = fmt.Sprintf(messagePattern, library.Name)
 			batch.Libraries[index].Generated = status.Generated
 			batch.Libraries[index].Skipped = status.Skipped
@@ -2275,8 +2499,8 @@ func main() {
 	}
 	processSessionID := uuid.NewString()
 
-	fmt.Printf("Config loaded. Server will run on port %d\n", cfg.Port)
-	fmt.Printf("Storage path: %s\n", cfg.StoragePath)
+	fmt.Printf("✅ Config loaded. Server will run on port %d\n", cfg.Port)
+	fmt.Printf("📂 Storage path: %s\n", cfg.StoragePath)
 
 	if strings.TrimSpace(cfg.StoragePath) == "" && len(cfg.Libraries) == 0 {
 		startSetupServer(api.SetupState{
@@ -2287,35 +2511,8 @@ func main() {
 		return
 	}
 
-	managedDataDir, err := cfg.ManagedDataDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to resolve app data directory: %v\n", err)
-		os.Exit(1)
-	}
-	trashDir, err := cfg.TrashPath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to resolve trash directory: %v\n", err)
-		os.Exit(1)
-	}
-	thumbDir, err := cfg.ThumbnailStoragePath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to resolve thumbnail directory: %v\n", err)
-		os.Exit(1)
-	}
 	if err := os.MkdirAll(filepath.Join(cfg.AppDataDir, "db"), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to create database directory: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(managedDataDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create app data directory: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(trashDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create trash directory: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(thumbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to create thumbnail directory: %v\n", err)
 		os.Exit(1)
 	}
 	service.SetLowResourceMode(cfg.Preferences.LowResourceMode)
@@ -2328,18 +2525,45 @@ func main() {
 	var repo *sqlite.DB
 	var photoService *service.PhotoService
 	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok {
-		dbPath, err := cfg.DatabasePathForStorage(bootstrapLibrary.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to resolve bootstrap database path for %s: %v\n", bootstrapLibrary.Name, err)
-		} else if openedRepo, err := sqlite.New(dbPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to open bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
+		if err := config.ValidatePortableLibraryIdentity(bootstrapLibrary.Path, bootstrapLibrary.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to identify bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
 		} else {
-			repo = openedRepo
-			photoService = service.NewPhotoService(repo, bootstrapLibrary.Path, managedDataDir, trashDir)
-			photoService.SetThumbnailRoot(thumbDir)
-			photoService.SetThumbnailLibraryID(bootstrapLibrary.ID)
-			photoService.SetThumbnailSize(cfg.ThumbnailSize)
-			defer repo.Close()
+			dbPath, err := cfg.DatabasePathForStorage(bootstrapLibrary.Path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to resolve bootstrap database path for %s: %v\n", bootstrapLibrary.Name, err)
+			} else if managedDataDir, mediaErr := cfg.ManagedDataDirForStorage(bootstrapLibrary.Path); mediaErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to resolve bootstrap media path for %s: %v\n", bootstrapLibrary.Name, mediaErr)
+			} else if thumbDir, thumbErr := cfg.ThumbnailStoragePathForStorage(bootstrapLibrary.Path); thumbErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to resolve bootstrap thumbnail path for %s: %v\n", bootstrapLibrary.Name, thumbErr)
+			} else if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create bootstrap library data directory for %s: %v\n", bootstrapLibrary.Name, err)
+			} else if err := os.MkdirAll(managedDataDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create bootstrap media directory for %s: %v\n", bootstrapLibrary.Name, err)
+			} else if err := os.MkdirAll(thumbDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create bootstrap thumbnail directory for %s: %v\n", bootstrapLibrary.Name, err)
+			} else if openedRepo, err := sqlite.NewPortableWorkingCopy(dbPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to open bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
+			} else {
+				if err := openedRepo.EnsureLibraryMetadata(bootstrapLibrary.ID, bootstrapLibrary.Name, bootstrapLibrary.AccentColor); err != nil {
+					_ = openedRepo.Close()
+					fmt.Fprintf(os.Stderr, "Warning: failed to identify bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
+				} else if err := openedRepo.SyncPortable(); err != nil {
+					_ = openedRepo.Close()
+					fmt.Fprintf(os.Stderr, "Warning: failed to sync bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
+				} else {
+					repo = openedRepo
+					photoService = service.NewPhotoService(repo, bootstrapLibrary.Path, managedDataDir, "")
+					photoService.SetThumbnailRoot(thumbDir)
+					photoService.SetThumbnailLibraryID(bootstrapLibrary.ID)
+					photoService.SetThumbnailSize(cfg.ThumbnailSize)
+					if legacyRoot := strings.TrimSpace(cfg.ThumbnailDir); legacyRoot != "" {
+						if info, statErr := os.Stat(legacyRoot); statErr == nil && info.IsDir() {
+							photoService.SetLegacyThumbnailRoot(legacyRoot)
+							fmt.Printf("🛠️ Use Settings > Build thumbnails to generate thumbnails in: %s (old files are preserved).\n", thumbDir)
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -2377,6 +2601,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: failed to initialize per-library runtime provider: %v\n", err)
 		os.Exit(1)
 	}
+	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok && photoService != nil && repo != nil {
+		runtimeProvider.Register(bootstrapLibrary.ID, photoService, repo)
+	}
+	defer runtimeProvider.Close()
 
 	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, photoService, restartCurrentProcessFn, shutdownCurrentProcess, api.LibraryBuildHooks{
 		Status:               buildState.Status,
@@ -2407,9 +2635,9 @@ func main() {
 	})
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	if host := preferredLANIP(); host != "" {
-		fmt.Printf("HTTP server started: http://%s%s\n", host, addr)
+		fmt.Printf("🌐 HTTP server started: http://%s%s\n", host, addr)
 	} else {
-		fmt.Printf("HTTP server started: http://127.0.0.1%s\n", addr)
+		fmt.Printf("🌐 HTTP server started: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 && photoService != nil {
 		go runLibraryBuild(rootCtx, photoService, buildState)

@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme>
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#2d6a5f">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="EchoGallery">
@@ -13,19 +13,53 @@
     <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
     <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
     <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+    <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
     <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
     <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
   </head>
-  <body>
+  <body class="register-page">
     <script>
   (function(){
-    var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    document.documentElement.dataset.theme = t;
+    var systemThemeQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    function syncThemeWithSystem() {
+      document.documentElement.dataset.theme = systemThemeQuery && systemThemeQuery.matches ? 'dark' : 'light';
+    }
+    syncThemeWithSystem();
+    if (systemThemeQuery) {
+      if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener('change', syncThemeWithSystem);
+      else if (systemThemeQuery.addListener) systemThemeQuery.addListener(syncThemeWithSystem);
+    }
+    window.addEventListener('focus', syncThemeWithSystem);
+    window.addEventListener('pageshow', syncThemeWithSystem);
   })();
 </script>
+    <script>
+  (function() {
+    function blockViewportZoom(event) { event.preventDefault(); }
+    ['gesturestart', 'gesturechange', 'gestureend'].forEach(function(type) {
+      document.addEventListener(type, blockViewportZoom, { passive: false });
+    });
+    document.addEventListener('touchmove', function(event) {
+      if (event.touches && event.touches.length > 1) event.preventDefault();
+    }, { passive: false });
+    document.addEventListener('dblclick', function(event) {
+      if (event.target.closest('.register-page, .timeline-order-btn')) event.preventDefault();
+    }, { passive: false });
+    document.addEventListener('wheel', function(event) {
+      if (event.ctrlKey) event.preventDefault();
+    }, { passive: false });
+  })();
+</script>
+    <a class="timeline-order-btn" id="register-back-btn" href="/login" aria-label="返回登录" title="返回登录">
+      <svg data-icon-source width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><use href="/static/svg/back.svg#back-icon"></use></svg>
+    </a>
     <div class="login-wrap">
       <div class="login-card register-card">
         <section class="login-hero" aria-label="EchoGallery">
+          <div class="login-hero-media">
+            <div class="login-hero-media-layer is-current" id="register-hero-media-current"></div>
+            <div class="login-hero-media-layer" id="register-hero-media-next"></div>
+          </div>
           <h1 id="register-hero-title">创建账号</h1>
           <p id="register-hero-copy">为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。</p>
         </section>
@@ -186,6 +220,13 @@
     el.addEventListener('pointermove', move);
   }
   bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
+  var heroEl = document.querySelector('.login-hero');
+  var heroMediaCurrent = document.getElementById('register-hero-media-current');
+  var heroMediaNext = document.getElementById('register-hero-media-next');
+  var heroMediaItems = [];
+  var heroMediaIndex = -1;
+  var heroMediaAnimating = false;
+  var heroMediaActiveLayer = 0;
   var btn = document.getElementById('register-btn');
   var errEl = document.getElementById('register-error');
   var visitorToggle = document.getElementById('register-visitor-toggle');
@@ -198,6 +239,47 @@
   var adminCancelBtn = document.getElementById('register-admin-cancel');
   var adminErrEl = document.getElementById('register-admin-error');
   var copy = applyCopy();
+
+  function heroBackgroundStyle(url) {
+    return url ? 'linear-gradient(rgba(0, 0, 0, .08), rgba(0, 0, 0, .14)), url("' + String(url).replace(/"/g, '%22') + '") center / cover no-repeat' : '';
+  }
+
+  function showHeroMedia(url, immediate) {
+    if (!heroMediaCurrent || !heroMediaNext || !url) return;
+    var currentLayer = heroMediaActiveLayer === 0 ? heroMediaCurrent : heroMediaNext;
+    var nextLayer = heroMediaActiveLayer === 0 ? heroMediaNext : heroMediaCurrent;
+    if (immediate) {
+      currentLayer.style.background = heroBackgroundStyle(url);
+      currentLayer.classList.add('is-current');
+      nextLayer.classList.remove('is-current');
+      return;
+    }
+    if (heroMediaAnimating) return;
+    heroMediaAnimating = true;
+    nextLayer.style.background = heroBackgroundStyle(url);
+    nextLayer.classList.add('is-current');
+    currentLayer.classList.remove('is-current');
+    window.setTimeout(function() {
+      heroMediaActiveLayer = heroMediaActiveLayer === 0 ? 1 : 0;
+      heroMediaAnimating = false;
+    }, 700);
+  }
+
+  function cycleHeroMedia() {
+    if (!heroMediaItems.length) return;
+    heroMediaIndex = (heroMediaIndex + 1) % heroMediaItems.length;
+    showHeroMedia(heroMediaItems[heroMediaIndex], heroMediaIndex === 0 && !heroMediaCurrent.style.background);
+  }
+
+  async function loadHeroMedia() {
+    try {
+      var response = await fetch('/api/login/hero', { cache: 'no-store' });
+      var data = await response.json().catch(function() { return {}; });
+      var photos = Array.isArray(data && data.photos) ? data.photos : [];
+      heroMediaItems = photos.map(function(item) { return item && item.url ? item.url : ''; }).filter(Boolean);
+      if (heroMediaItems.length) cycleHeroMedia();
+    } catch (_) {}
+  }
 
   function isVisitorMode() {
     return !!(visitorToggle && visitorToggle.checked);
@@ -307,6 +389,9 @@
   if (adminCancelBtn) adminCancelBtn.addEventListener('click', closeAdminModal);
   if (adminConfirmBtn) adminConfirmBtn.addEventListener('click', function () { doRegister(true); });
   btn.addEventListener('click', function () { doRegister(false); });
+  heroEl && heroEl.addEventListener('click', function () {
+    cycleHeroMedia();
+  });
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape' && modal && !modal.hidden) {
       e.preventDefault();
@@ -321,6 +406,7 @@
     doRegister(false);
   });
   syncRoleMode();
+  loadHeroMedia();
 })();
 </script>
   </body>

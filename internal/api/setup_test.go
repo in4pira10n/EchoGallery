@@ -1,11 +1,25 @@
 package api
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"testing/fstest"
 
 	"echogallery/internal/config"
 )
+
+func TestSetupPageIncludesTransferImport(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "..", "web", "pages", "setup.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := buildSetupPageHTML(fstest.MapFS{"web/pages/setup.html": {Data: content}}, `{"mode":"init","port":8080}`)
+	if !strings.Contains(html, "setup-import-transfer") || !strings.Contains(html, "/api/setup/import") {
+		t.Fatal("首次初始化页应提供换机配置包导入")
+	}
+}
 
 func TestPersistRecoveredLibrarySelection_UpdatesActiveProfile(t *testing.T) {
 	dir := t.TempDir()

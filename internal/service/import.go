@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"io/fs"
 	"os"
@@ -23,6 +24,8 @@ import (
 const (
 	folderAlbumDescription = "自动从文件夹导入"
 	folderAlbumSourceKind  = "folder"
+	rootFolderAlbumKey     = "__echogallery_root__"
+	rootFolderAlbumName    = "根目录"
 )
 
 // ImportSummary 汇总一次启动扫描导入的结果。
@@ -48,11 +51,13 @@ type sourceMoveJob struct {
 }
 
 type libraryDirectorySnapshot struct {
-	rootInfo       fs.FileInfo
-	dirCount       int
-	dirModHash     string
-	mediaFileHash  string
-	mediaFileCount int
+	rootInfo             fs.FileInfo
+	directoryModTimes    map[string]int64
+	directoryEntryHashes map[string]string
+	dirCount             int
+	dirModHash           string
+	mediaFileHash        string
+	mediaFileCount       int
 }
 
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
@@ -64,19 +69,19 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 // ImportExistingPhotosContext 扫描 storagePath 中现有的图片文件并导入数据库。
 // ctx 用于让启动扫描在 Ctrl+C 或网页退出时尽快停下，避免大资源库后台任务拖住进程。
 func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
+	uploadedBy = s.LibraryUserID(uploadedBy)
 	summary := &ImportSummary{}
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
-	dirSnapshot, err := collectLibraryDirectorySnapshot(ctx, s.sourcePath)
+	rootInfo, err := os.Stat(s.sourcePath)
 	if err != nil {
 		return summary, err
 	}
-	rootInfo := dirSnapshot.rootInfo
 	if !rootInfo.IsDir() {
 		return summary, fmt.Errorf("资源库路径不是目录: %s", s.sourcePath)
 	}
-	if snapshot, err := s.repo.GetLibraryScanSnapshot(); err == nil && libraryScanSnapshotMatches(snapshot, s.sourcePath, dirSnapshot) {
+	if snapshot, err := s.repo.GetLibraryScanSnapshot(); err == nil && quickLibraryScanSnapshotMatches(ctx, snapshot, s.sourcePath, rootInfo) {
 		summary.Skipped = snapshot.FileCount
 		if progress != nil {
 			progress(snapshot.FileCount, snapshot.FileCount)
@@ -85,9 +90,20 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	} else if err != nil {
 		return summary, err
 	}
+	dirSnapshot, err := collectLibraryDirectorySnapshot(ctx, s.sourcePath)
+	if err != nil {
+		return summary, err
+	}
 	albumCache, err := s.loadAlbumCache(uploadedBy)
 	if err != nil {
 		return summary, err
+	}
+	deletedFolderPaths := make(map[string]bool)
+	if trashRepo, ok := s.repo.(folderAlbumTrashRepository); ok {
+		deletedFolderPaths, err = trashRepo.ListTrashedFolderAlbumPaths(uploadedBy)
+		if err != nil {
+			return summary, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return summary, err
@@ -117,6 +133,16 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 
 		name := d.Name()
 		if d.IsDir() {
+			if path != s.sourcePath {
+				rel, relErr := filepath.Rel(s.sourcePath, path)
+				if relErr != nil {
+					return relErr
+				}
+				rel = filepath.ToSlash(filepath.Clean(rel))
+				if isUnderDeletedFolderPath(rel, deletedFolderPaths) {
+					return filepath.SkipDir
+				}
+			}
 			if strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
@@ -138,9 +164,16 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 			return err
 		}
 		sourceRelPath = filepath.ToSlash(filepath.Clean(sourceRelPath))
+		if isUnderDeletedFolderPath(sourceRelPath, deletedFolderPaths) {
+			summary.Skipped++
+			return nil
+		}
 		seenSourcePaths[sourceRelPath] = true
 		for _, albumPath := range folderAlbumPathsForSourceRelPath(sourceRelPath) {
 			seenFolderAlbums[albumPath] = true
+		}
+		if len(folderAlbumPathsForSourceRelPath(sourceRelPath)) == 0 {
+			seenFolderAlbums[rootFolderAlbumKey] = true
 		}
 		totalCandidates++
 		if progress != nil && (totalCandidates <= 12 || totalCandidates%32 == 0) {
@@ -229,14 +262,14 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		return summary, err
 	}
 	summary.Pruned += pruned
-	if err := s.ensureFolderAlbums(uploadedBy, seenFolderAlbums, albumCache); err != nil {
+	if err := s.ensureFolderAlbums(uploadedBy, seenFolderAlbums, albumCache, deletedFolderPaths); err != nil {
 		return summary, err
 	}
 	if err := s.pruneMissingFolderAlbums(uploadedBy, seenFolderAlbums); err != nil {
 		return summary, err
 	}
 	for _, photo := range relocatedPhotos {
-		if err := s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache); err != nil {
+		if err := s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache, deletedFolderPaths); err != nil {
 			return summary, err
 		}
 	}
@@ -294,7 +327,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 					return
 				}
 				cacheMu.Lock()
-				jobErr = s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache)
+				jobErr = s.attachImportedPhotoToFolderAlbum(photo, uploadedBy, albumCache, deletedFolderPaths)
 				cacheMu.Unlock()
 				if jobErr != nil {
 					select {
@@ -364,18 +397,23 @@ func (s *PhotoService) saveLibraryScanSnapshot(snapshot libraryDirectorySnapshot
 		return nil
 	}
 	return s.repo.SaveLibraryScanSnapshot(storage.LibraryScanSnapshot{
-		RootPath:         filepath.Clean(s.sourcePath),
-		RootModUnixNano:  snapshot.rootInfo.ModTime().UnixNano(),
-		DirectoryCount:   snapshot.dirCount,
-		DirectoryModHash: snapshot.dirModHash,
-		MediaFileHash:    snapshot.mediaFileHash,
-		FileCount:        fileCount,
-		CompletedAt:      time.Now(),
+		RootPath:             filepath.Clean(s.sourcePath),
+		RootModUnixNano:      snapshot.rootInfo.ModTime().UnixNano(),
+		DirectoryModTimes:    snapshot.directoryModTimes,
+		DirectoryEntryHashes: snapshot.directoryEntryHashes,
+		DirectoryCount:       snapshot.dirCount,
+		DirectoryModHash:     snapshot.dirModHash,
+		MediaFileHash:        snapshot.mediaFileHash,
+		FileCount:            fileCount,
+		CompletedAt:          time.Now(),
 	})
 }
 
 func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (libraryDirectorySnapshot, error) {
-	var snapshot libraryDirectorySnapshot
+	snapshot := libraryDirectorySnapshot{
+		directoryModTimes:    make(map[string]int64),
+		directoryEntryHashes: make(map[string]string),
+	}
 	rootInfo, err := os.Stat(sourcePath)
 	if err != nil {
 		return snapshot, err
@@ -386,6 +424,7 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 	}
 	dirHasher := fnv.New64a()
 	mediaHasher := fnv.New64a()
+	entryHashers := map[string]hash.Hash64{".": fnv.New64a()}
 	err = filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -396,6 +435,14 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 		if d.IsDir() {
 			if path != sourcePath && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
+			}
+			if path != sourcePath {
+				parentRel, err := filepath.Rel(sourcePath, filepath.Dir(path))
+				if err != nil {
+					return err
+				}
+				parentRel = filepath.ToSlash(filepath.Clean(parentRel))
+				_, _ = fmt.Fprintf(entryHashers[parentRel], "d:%s\x00", d.Name())
 			}
 			info, err := d.Info()
 			if err != nil {
@@ -410,6 +457,8 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 				relPath = filepath.ToSlash(filepath.Clean(relPath))
 			}
 			snapshot.dirCount++
+			snapshot.directoryModTimes[relPath] = info.ModTime().UnixNano()
+			entryHashers[relPath] = fnv.New64a()
 			_, _ = fmt.Fprintf(dirHasher, "%s\x00%d\x00", relPath, info.ModTime().UnixNano())
 			return nil
 		}
@@ -420,6 +469,12 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 		if !imgpkg.SupportedMimeTypes[imgpkg.DetectMimeType(name)] && !media.IsSupportedVideoFilename(name) {
 			return nil
 		}
+		parentRel, err := filepath.Rel(sourcePath, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		parentRel = filepath.ToSlash(filepath.Clean(parentRel))
+		_, _ = fmt.Fprintf(entryHashers[parentRel], "f:%s\x00", name)
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -438,7 +493,58 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 	}
 	snapshot.dirModHash = fmt.Sprintf("%016x", dirHasher.Sum64())
 	snapshot.mediaFileHash = fmt.Sprintf("%016x", mediaHasher.Sum64())
+	for relPath, hasher := range entryHashers {
+		snapshot.directoryEntryHashes[relPath] = fmt.Sprintf("%016x", hasher.Sum64())
+	}
 	return snapshot, nil
+}
+
+func quickLibraryScanSnapshotMatches(ctx context.Context, snapshot *storage.LibraryScanSnapshot, sourcePath string, rootInfo fs.FileInfo) bool {
+	if snapshot == nil || rootInfo == nil || len(snapshot.DirectoryModTimes) == 0 ||
+		len(snapshot.DirectoryEntryHashes) != len(snapshot.DirectoryModTimes) {
+		return false
+	}
+	if filepath.Clean(snapshot.RootPath) != filepath.Clean(sourcePath) ||
+		snapshot.RootModUnixNano != rootInfo.ModTime().UnixNano() ||
+		time.Since(snapshot.CompletedAt) >= 24*time.Hour {
+		return false
+	}
+	for relPath, expected := range snapshot.DirectoryModTimes {
+		if err := ctx.Err(); err != nil {
+			return false
+		}
+		path := sourcePath
+		if relPath != "." {
+			path = filepath.Join(sourcePath, filepath.FromSlash(relPath))
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() || info.ModTime().UnixNano() != expected {
+			return false
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil || hashDirectoryEntries(entries) != snapshot.DirectoryEntryHashes[relPath] {
+			return false
+		}
+	}
+	return true
+}
+
+func hashDirectoryEntries(entries []fs.DirEntry) string {
+	hasher := fnv.New64a()
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if entry.IsDir() {
+			_, _ = fmt.Fprintf(hasher, "d:%s\x00", name)
+			continue
+		}
+		if entry.Type().IsRegular() && (imgpkg.SupportedMimeTypes[imgpkg.DetectMimeType(name)] || media.IsSupportedVideoFilename(name)) {
+			_, _ = fmt.Fprintf(hasher, "f:%s\x00", name)
+		}
+	}
+	return fmt.Sprintf("%016x", hasher.Sum64())
 }
 
 func libraryScanSnapshotMatches(snapshot *storage.LibraryScanSnapshot, sourcePath string, current libraryDirectorySnapshot) bool {
@@ -491,15 +597,12 @@ func folderAlbumPathsForSourceRelPath(sourceRelPath string) []string {
 
 func (s *PhotoService) pruneMissingSourceMedia(ctx context.Context, uploadedBy int64, sourceIndex map[string]storage.SourceMediaInfo, seenSourcePaths map[string]bool) (int, error) {
 	pruned := 0
-	for sourceRelPath, existing := range sourceIndex {
+	for sourceRelPath := range sourceIndex {
 		if err := ctx.Err(); err != nil {
 			return pruned, err
 		}
 		if sourceRelPath == "" || seenSourcePaths[filepath.ToSlash(filepath.Clean(sourceRelPath))] {
 			continue
-		}
-		if err := s.repo.HardDeletePhoto(existing.ID, uploadedBy); err != nil {
-			return pruned, err
 		}
 		pruned++
 	}
@@ -782,17 +885,27 @@ func (s *PhotoService) loadAlbumCache(uploadedBy int64) (map[string]int64, error
 			cache[path] = album.ID
 			continue
 		}
+		if album.SourceKind == folderAlbumSourceKind && album.Name == rootFolderAlbumName {
+			cache[rootFolderAlbumKey] = album.ID
+			continue
+		}
 		cache[album.Name] = album.ID
 	}
 	return cache, nil
 }
 
-func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, uploadedBy int64, albumCache map[string]int64) error {
+func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, uploadedBy int64, albumCache map[string]int64, deletedFolderPaths map[string]bool) error {
 	if photo == nil || photo.SourceRelPath == "" {
+		return nil
+	}
+	if isUnderDeletedFolderPath(photo.SourceRelPath, deletedFolderPaths) {
 		return nil
 	}
 	albumPaths := folderAlbumPathsForSourceRelPath(photo.SourceRelPath)
 	if len(albumPaths) == 0 {
+		if albumID := albumCache[rootFolderAlbumKey]; albumID != 0 {
+			return s.repo.AddPhotoToAlbum(albumID, photo.ID, uploadedBy)
+		}
 		return nil
 	}
 	leafAlbumID := int64(0)
@@ -837,10 +950,25 @@ func (s *PhotoService) attachImportedPhotoToFolderAlbum(photo *storage.Photo, up
 	return s.repo.AddPhotoToAlbum(leafAlbumID, photo.ID, uploadedBy)
 }
 
-func (s *PhotoService) ensureFolderAlbums(uploadedBy int64, seenFolderAlbums map[string]bool, albumCache map[string]int64) error {
+func (s *PhotoService) ensureFolderAlbums(uploadedBy int64, seenFolderAlbums map[string]bool, albumCache map[string]int64, deletedFolderPaths map[string]bool) error {
+	if seenFolderAlbums[rootFolderAlbumKey] {
+		if _, ok := albumCache[rootFolderAlbumKey]; !ok {
+			album := &storage.Album{Name: rootFolderAlbumName, Description: folderAlbumDescription, SourceKind: folderAlbumSourceKind, CreatedBy: uploadedBy, CreatedAt: time.Now()}
+			if err := s.repo.CreateAlbum(album); err != nil {
+				return err
+			}
+			albumCache[rootFolderAlbumKey] = album.ID
+		}
+	}
 	for albumPath := range seenFolderAlbums {
+		if albumPath == rootFolderAlbumKey {
+			continue
+		}
 		albumPath = filepath.ToSlash(filepath.Clean(albumPath))
 		if albumPath == "." || albumPath == "" {
+			continue
+		}
+		if isUnderDeletedFolderPath(albumPath, deletedFolderPaths) {
 			continue
 		}
 		if _, ok := albumCache[albumPath]; ok {
@@ -869,8 +997,13 @@ func (s *PhotoService) pruneMissingFolderAlbums(uploadedBy int64, seenFolderAlbu
 	}
 	for _, album := range albums {
 		if !isAutoFolderAlbum(album) {
-			if err := s.repo.DeleteAlbum(album.ID, uploadedBy); err != nil {
-				return err
+			// A scan only owns automatically generated folder albums. Personal
+			// albums must survive even if they are not present on disk.
+			continue
+		}
+		if strings.TrimSpace(album.SourceRelPath) == "" && album.Name == rootFolderAlbumName {
+			if !seenFolderAlbums[rootFolderAlbumKey] {
+				_ = s.repo.DeleteAlbum(album.ID, uploadedBy)
 			}
 			continue
 		}
@@ -883,6 +1016,27 @@ func (s *PhotoService) pruneMissingFolderAlbums(uploadedBy int64, seenFolderAlbu
 		}
 	}
 	return nil
+}
+
+func isUnderDeletedFolderPath(sourceRelPath string, deletedFolderPaths map[string]bool) bool {
+	if len(deletedFolderPaths) == 0 {
+		return false
+	}
+	path := filepath.ToSlash(filepath.Clean(strings.TrimSpace(sourceRelPath)))
+	if path == "." || path == "" {
+		return false
+	}
+	for current := path; current != "." && current != ""; {
+		if deletedFolderPaths[current] {
+			return true
+		}
+		parent := filepath.ToSlash(filepath.Dir(current))
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return false
 }
 
 func isAutoFolderAlbum(album *storage.Album) bool {

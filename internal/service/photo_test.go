@@ -34,20 +34,41 @@ func newTestPhotoService(t *testing.T) (*PhotoService, string) {
 	return svc, dataDir
 }
 
+func TestPhotoService_UserAlbumIsVisibleAfterCreation(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+
+	created, err := svc.CreateAlbum("用户相册", "", 1)
+	if err != nil {
+		t.Fatalf("创建用户相册失败: %v", err)
+	}
+
+	albums, err := svc.ListAlbums(1)
+	if err != nil {
+		t.Fatalf("查询相册列表失败: %v", err)
+	}
+	if len(albums) != 1 || albums[0].ID != created.ID {
+		t.Fatalf("新建用户相册应出现在列表中，得到 %+v", albums)
+	}
+
+	detail, err := svc.GetAlbum(created.ID, 1)
+	if err != nil {
+		t.Fatalf("查询用户相册详情失败: %v", err)
+	}
+	if detail == nil || detail.ID != created.ID {
+		t.Fatalf("新建用户相册应可打开，得到 %+v", detail)
+	}
+}
+
 func readTrashLinks(t *testing.T, svc *PhotoService) []string {
 	t.Helper()
-	data, err := os.ReadFile(svc.trashLinksPath())
-	if os.IsNotExist(err) {
-		return nil
-	}
+	links, err := svc.collectTrashLinks(1)
 	if err != nil {
-		t.Fatalf("读取 trash-links.txt 失败: %v", err)
+		t.Fatalf("读取回收站数据库失败: %v", err)
 	}
-	content := strings.TrimSpace(string(data))
-	if content == "" {
-		return nil
+	if _, err := os.Stat(filepath.Join(svc.trashBaseDir(), "trash-links.txt")); !os.IsNotExist(err) {
+		t.Fatalf("不应再生成 trash-links.txt: %v", err)
 	}
-	return strings.Split(content, "\n")
+	return links
 }
 
 // --- Upload 测试 ---
@@ -180,7 +201,7 @@ func TestThumbnailExistsForTier_DoesNotUseLegacyPreviewOnly(t *testing.T) {
 	}
 }
 
-func TestThumbnailExistsForTier_MigratesLegacyFlatWebPToShardedPath(t *testing.T) {
+func TestThumbnailExistsForTier_ReadsLegacyFlatWebPWithoutMoving(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	photo := &storage.Photo{UUID: "thumb-legacy-1", MediaKind: storage.MediaKindImage}
 
@@ -195,17 +216,17 @@ func TestThumbnailExistsForTier_MigratesLegacyFlatWebPToShardedPath(t *testing.T
 	}
 
 	if !svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
-		t.Fatal("旧平铺 webp 缩略图应当被迁移后继续复用")
+		t.Fatal("旧平铺 webp 缩略图应继续复用")
 	}
-	if _, err := os.Stat(shardedPath); err != nil {
-		t.Fatalf("迁移后新的分片缩略图应存在: %v", err)
+	if _, err := os.Stat(shardedPath); !os.IsNotExist(err) {
+		t.Fatalf("读取旧缩略图不应生成新的分片文件，得到 err=%v", err)
 	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("迁移后旧平铺缩略图应被移除，得到 err=%v", err)
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("旧平铺缩略图应保留: %v", err)
 	}
 }
 
-func TestThumbnailExistsForTier_MigratesLegacySharedShardToLibraryScopedPath(t *testing.T) {
+func TestThumbnailExistsForTier_ReadsLegacySharedShardWithoutMoving(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	svc.SetThumbnailLibraryID("lib_a")
 	photo := &storage.Photo{UUID: "thumb-legacy-library-1", MediaKind: storage.MediaKindImage}
@@ -224,16 +245,16 @@ func TestThumbnailExistsForTier_MigratesLegacySharedShardToLibraryScopedPath(t *
 	}
 
 	if !svc.thumbnailExistsForTier(photo, thumbnailTierFull) {
-		t.Fatal("旧共享分片缩略图应当被迁移到资源库 ID 目录后继续复用")
+		t.Fatal("旧共享分片缩略图应继续复用")
 	}
-	if _, err := os.Stat(scopedPath); err != nil {
-		t.Fatalf("迁移后的资源库缩略图应存在: %v", err)
+	if _, err := os.Stat(scopedPath); !os.IsNotExist(err) {
+		t.Fatalf("读取旧缩略图不应生成新的资源库文件，得到 err=%v", err)
 	}
 	if !strings.Contains(scopedPath, filepath.Join("lib_a")) {
 		t.Fatalf("期望新缩略图路径包含资源库 ID 目录，得到 %s", scopedPath)
 	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("迁移后旧共享分片缩略图应被移除，得到 err=%v", err)
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("旧共享分片缩略图应保留: %v", err)
 	}
 }
 
@@ -276,8 +297,8 @@ func TestMaintainThumbnailsContext_MovesLegacyAndCleansLegacyFiles(t *testing.T)
 	if summary.Moved != 1 {
 		t.Fatalf("期望移动 1 个旧缩略图，得到 %d", summary.Moved)
 	}
-	if summary.Cleaned != 3 {
-		t.Fatalf("期望清理 3 个旧文件，得到 %d", summary.Cleaned)
+	if summary.Cleaned != 4 {
+		t.Fatalf("期望清理 4 个旧文件，得到 %d", summary.Cleaned)
 	}
 	if _, err := os.Stat(shardedPath); err != nil {
 		t.Fatalf("迁移后的分片缩略图应存在: %v", err)
@@ -553,8 +574,8 @@ func TestDeleteAndRestorePhoto(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("删除后 trash-links 应有 1 条，got=%d", len(links))
 	}
-	if links[0] != filepath.Clean(svc.MediaPath(result.Photo)) {
-		t.Fatalf("trash-links 记录不正确: got=%q want=%q", links[0], filepath.Clean(svc.MediaPath(result.Photo)))
+	if links[0] != filepath.ToSlash(result.Photo.SourceRelPath) {
+		t.Fatalf("回收站相对路径不正确: got=%q want=%q", links[0], result.Photo.SourceRelPath)
 	}
 
 	// 恢复
@@ -607,13 +628,11 @@ func TestPermanentlyDeletePhoto_MovesManagedFilesToTrashDir(t *testing.T) {
 		t.Fatalf("原缩略图文件应已移走，stat err=%v", err)
 	}
 
-	mediaRel, _ := filepath.Rel(sourceDir, mediaPath)
-	thumbRel, _ := filepath.Rel(dataDir, thumbPath)
-	if _, err := os.Stat(filepath.Join(trashDir, mediaRel)); err != nil {
+	if _, err := os.Stat(filepath.Join(sourceDir, ".echogallery", ".trash", filepath.Base(mediaPath))); err != nil {
 		t.Fatalf("媒体文件应移动到回收站目录: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(trashDir, thumbRel)); err != nil {
-		t.Fatalf("缩略图文件应移动到回收站目录: %v", err)
+	if _, err := os.Stat(filepath.Join(sourceDir, ".echogallery", ".trash", filepath.Base(thumbPath))); !os.IsNotExist(err) {
+		t.Fatalf("缩略图不应移动到回收站，应该被清理，stat err=%v", err)
 	}
 	if links := readTrashLinks(t, svc); len(links) != 0 {
 		t.Fatalf("永久删除后 trash-links 应为空，got=%v", links)

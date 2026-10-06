@@ -133,14 +133,13 @@ func (s *PhotoService) maintainThumbnailForPhoto(photo *storage.Photo, options T
 	}
 	targetPath := s.ThumbnailPath(photo)
 	targetExists := resolveManagedFile(targetPath)
-	legacyShardedPath := s.legacyShardedThumbnailPath(photo)
-	legacyFlatPath := s.legacyFlatThumbnailPath(photo)
+	legacyPaths := s.legacyThumbnailCandidates(photo)
 	if options.MoveLegacyThumbnails && !targetExists {
-		for _, legacyPath := range []string{legacyShardedPath, legacyFlatPath} {
+		for _, legacyPath := range legacyPaths {
 			if legacyPath == "" || legacyPath == targetPath || !resolveManagedFile(legacyPath) {
 				continue
 			}
-			if err := relocateManagedThumbnailFile(legacyPath, targetPath); err != nil {
+			if err := copyManagedThumbnailFile(legacyPath, targetPath); err != nil {
 				return 0, 0, false, err
 			}
 			moved = 1

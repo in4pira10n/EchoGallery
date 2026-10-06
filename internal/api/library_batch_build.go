@@ -9,16 +9,21 @@ import (
 )
 
 type LibraryBatchBuildLibraryStatus struct {
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Status    string `json:"status"`
-	Message   string `json:"message"`
-	Imported  int    `json:"imported"`
-	Skipped   int    `json:"skipped"`
-	Pruned    int    `json:"pruned"`
-	Generated int    `json:"generated"`
-	Failed    int    `json:"failed"`
+	ID             string   `json:"id,omitempty"`
+	Name           string   `json:"name"`
+	Path           string   `json:"path"`
+	Status         string   `json:"status"`
+	Message        string   `json:"message"`
+	Imported       int      `json:"imported"`
+	Skipped        int      `json:"skipped"`
+	Pruned         int      `json:"pruned"`
+	Generated      int      `json:"generated"`
+	Failed         int      `json:"failed"`
+	Matched        int      `json:"matched,omitempty"`
+	Resumed        int      `json:"resumed,omitempty"`
+	Existing       int      `json:"existing,omitempty"`
+	MissingOld     int      `json:"missing_old,omitempty"`
+	DuplicatePaths []string `json:"duplicate_paths,omitempty"`
 }
 
 type LibraryBatchBuildStatus struct {
@@ -103,6 +108,10 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 				c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 				return
 			}
+		}
+		if req.MoveLegacyThumbnails || req.CleanThumbnailFiles || req.BuildPlaybackCaches {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "批量工作流的迁移、旧文件清理和播放缓存阶段已暂停"})
+			return
 		}
 		profile, ok := requestProfile(c, cfg)
 		if !ok {

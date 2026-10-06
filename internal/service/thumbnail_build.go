@@ -124,6 +124,7 @@ func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, 
 		},
 	}
 	s.thumbBuild = task
+	s.thumbnailBuildActive.Store(true)
 	go s.runThumbnailBuild(ctx, task)
 	return task.snapshot(), nil
 }
@@ -166,6 +167,7 @@ func (s *PhotoService) CancelThumbnailBuild(userID int64) (ThumbnailBuildStatus,
 }
 
 func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBuildTask) {
+	defer s.thumbnailBuildActive.Store(false)
 	heavyImageJobs := make(chan thumbnailBuildJob, heavyImageThumbnailBuildWorkerCount()*4)
 	imageJobs := make(chan thumbnailBuildJob, imageThumbnailBuildWorkerCount()*6)
 	videoJobs := make(chan thumbnailBuildJob, videoThumbnailBuildWorkerCount()*6)
@@ -229,7 +231,7 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 			if err := ctx.Err(); err != nil {
 				break
 			}
-			missingTarget := !s.thumbnailExistsForTier(photo, targetTier)
+			missingTarget := !s.thumbnailTargetExists(photo)
 			if !missingTarget {
 				task.incrementSkipped(targetLabel)
 			}

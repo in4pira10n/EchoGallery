@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"echogallery/internal/storage"
 )
@@ -14,6 +15,66 @@ import (
 const metaStoragePathKey = "storage_path"
 const metaLibraryScanSnapshotKey = "library_scan_snapshot"
 const metaLibraryVideoVolumeKey = "library_video_volume"
+const metaLibraryIDKey = "library_id"
+
+// EnsureLibraryIdentity binds the portable data directory to its thumbnail
+// namespace, without replacing an identity already stored in the library.
+func (s *DB) EnsureLibraryIdentity(id string) error {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return fmt.Errorf("资源库 ID 不能为空")
+	}
+	existing, err := s.getMeta(metaLibraryIDKey)
+	if err != nil {
+		return err
+	}
+	if existing != "" {
+		if existing != id {
+			return fmt.Errorf("资源库 ID 不一致：目录记录为 %s，当前配置为 %s", existing, id)
+		}
+		return nil
+	}
+	return s.setMeta(metaLibraryIDKey, id)
+}
+
+func (s *DB) EnsureLibraryMetadata(id, name, accentColor string) error {
+	if err := s.EnsureLibraryIdentity(id); err != nil {
+		return err
+	}
+	for key, value := range map[string]string{
+		"library_name":         strings.TrimSpace(name),
+		"library_accent_color": strings.TrimSpace(accentColor),
+	} {
+		if err := s.setMeta(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *DB) initializePortableMetadata() error {
+	if err := s.ensureMetaTable(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO app_meta(key, value)
+		VALUES ('library_data_owner_id', COALESCE(
+			(SELECT CAST(uploaded_by AS TEXT) FROM photos GROUP BY uploaded_by ORDER BY COUNT(*) DESC, uploaded_by LIMIT 1),
+			(SELECT CAST(created_by AS TEXT) FROM albums GROUP BY created_by ORDER BY COUNT(*) DESC, created_by LIMIT 1), '1'))`); err != nil {
+		return err
+	}
+	owner, err := s.getMeta("library_data_owner_id")
+	if err != nil {
+		return err
+	}
+	s.libraryUserID, err = strconv.ParseInt(owner, 10, 64)
+	if err != nil || s.libraryUserID <= 0 {
+		return fmt.Errorf("无效的资源库数据所有者编号: %q", owner)
+	}
+	_, err = s.db.Exec(`CREATE VIEW IF NOT EXISTS trash_links AS
+		SELECT uuid AS media_id, source_rel_path AS relative_path, deleted_at AS trashed_at
+		FROM photos WHERE deleted_at IS NOT NULL`)
+	return err
+}
 
 func (s *DB) ensureMetaTable() error {
 	_, err := s.db.Exec(`

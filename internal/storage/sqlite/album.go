@@ -78,7 +78,7 @@ func (s *DB) buildAlbumPhotoScope(albumID int64, userID int64, mediaKind string)
 	if err := s.db.QueryRow(`
 		SELECT name, source_kind, description, source_rel_path
 		FROM albums
-		WHERE id = ? AND created_by = ?`, albumID, userID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
+		WHERE id = ? AND created_by = ? AND deleted_at IS NULL`, albumID, userID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
 		if err == sql.ErrNoRows {
 			return "", "", nil, nil
 		}
@@ -86,13 +86,16 @@ func (s *DB) buildAlbumPhotoScope(albumID int64, userID int64, mediaKind string)
 	}
 	isFolderAlbum := sourceKind == "folder" || (sourceKind == "" && description == legacyFolderAlbumDescription)
 	sourceRelPath = normalizeAlbumSourcePath(sourceRelPath)
-	if isFolderAlbum && sourceRelPath == "" {
+	isRootFolderAlbum := isFolderAlbum && sourceRelPath == "" && strings.TrimSpace(name) == "根目录"
+	if isFolderAlbum && sourceRelPath == "" && !isRootFolderAlbum {
 		sourceRelPath = normalizeAlbumSourcePath(name)
 	}
 	where := "p.uploaded_by = ? AND p.deleted_at IS NULL"
 	args := []interface{}{userID}
 	joinClause := ""
-	if isFolderAlbum && sourceRelPath != "" {
+	if isRootFolderAlbum {
+		where += " AND instr(p.source_rel_path, '/') = 0"
+	} else if isFolderAlbum && sourceRelPath != "" {
 		where += ` AND (
 			(p.source_rel_path LIKE ? AND instr(substr(p.source_rel_path, ?), '/') = 0)
 			OR (
@@ -406,7 +409,7 @@ func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 		FROM albums a
 		LEFT JOIN album_photos ap ON ap.album_id = a.id
 		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
-		WHERE a.id = ? AND a.created_by = ?
+		WHERE a.id = ? AND a.created_by = ? AND a.deleted_at IS NULL
 		GROUP BY a.id`, id, userID)
 
 	album, err := scanAlbum(row)
@@ -419,17 +422,45 @@ func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 // ListAlbums 查询用户所有相册（photo_count 不含已软删除的图片，附带封面 UUID）
 func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 	rows, err := s.db.Query(`
-		WITH user_albums AS (
-			SELECT id, name, description, cover_photo_id, source_kind, source_rel_path, created_by, created_at
+		WITH ranked_user_albums AS (
+			SELECT id, name, description, cover_photo_id, source_kind, source_rel_path, created_by, created_at,
+			       ROW_NUMBER() OVER (
+				       PARTITION BY CASE
+					       WHEN source_kind = 'folder' AND trim(name) = '根目录' AND COALESCE(source_rel_path, '') = '' THEN 'root'
+					       ELSE printf('album:%lld', id)
+				       END
+				       ORDER BY id
+			       ) AS duplicate_rank
 			FROM albums
-			WHERE created_by = ?
+			WHERE created_by = ? AND deleted_at IS NULL
 		),
-		photo_counts AS (
+		user_albums AS (
+			SELECT id, name, description, cover_photo_id, source_kind, source_rel_path, created_by, created_at
+			FROM ranked_user_albums
+			WHERE duplicate_rank = 1
+		),
+		photo_count_parts AS (
 			SELECT ap.album_id, COUNT(p.id) AS photo_count
 			FROM album_photos ap
 			INNER JOIN user_albums ua ON ua.id = ap.album_id
 			INNER JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
+			WHERE NOT (ua.source_kind = 'folder' AND trim(ua.name) = '根目录' AND ua.source_rel_path = '')
 			GROUP BY ap.album_id
+			UNION ALL
+			SELECT ua.id AS album_id, COUNT(p.id) AS photo_count
+			FROM user_albums ua
+			INNER JOIN photos p ON p.uploaded_by = ua.created_by
+			WHERE ua.source_kind = 'folder'
+			  AND trim(ua.name) = '根目录'
+			  AND ua.source_rel_path = ''
+			  AND p.deleted_at IS NULL
+			  AND instr(p.source_rel_path, '/') = 0
+			GROUP BY ua.id
+		),
+		photo_counts AS (
+			SELECT album_id, SUM(photo_count) AS photo_count
+			FROM photo_count_parts
+			GROUP BY album_id
 		),
 		latest_album_photos AS (
 			SELECT album_id, uuid
@@ -485,7 +516,7 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 		          ORDER BY ph.taken_at DESC LIMIT 1)
 		       ) as cover_uuid
 		FROM target_photo
-		INNER JOIN albums a ON a.created_by = ?
+		INNER JOIN albums a ON a.created_by = ? AND a.deleted_at IS NULL
 		LEFT JOIN album_photos target_ap ON target_ap.album_id = a.id AND target_ap.photo_id = target_photo.id
 		LEFT JOIN album_photos ap ON ap.album_id = a.id
 		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
@@ -531,7 +562,7 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 func (s *DB) UpdateAlbum(album *storage.Album) error {
 	result, err := s.db.Exec(`
 		UPDATE albums SET name = ?, description = ?, cover_photo_id = ?
-		WHERE id = ? AND created_by = ?`,
+		WHERE id = ? AND created_by = ? AND deleted_at IS NULL`,
 		album.Name, album.Description, album.CoverPhotoID,
 		album.ID, album.CreatedBy,
 	)
@@ -555,13 +586,15 @@ func (s *DB) RefreshFolderAlbumCovers(userID int64) error {
 			 WHERE ap.album_id = a.id AND ph.deleted_at IS NULL
 			 ORDER BY ph.taken_at DESC, ph.id DESC LIMIT 1),
 			(SELECT ph.id FROM photos ph
-			 WHERE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
+			 WHERE (a.source_rel_path = '' AND trim(a.name) = '根目录' AND instr(ph.source_rel_path, '/') = 0)
+			   OR ((CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
 			   AND ph.uploaded_by = a.created_by
 			   AND ph.deleted_at IS NULL
 			   AND substr(ph.source_rel_path, 1, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 1) = (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/'
+			   )
 			 ORDER BY ph.taken_at DESC, ph.id DESC LIMIT 1)
 		)
-		WHERE a.created_by = ?
+		WHERE a.created_by = ? AND a.deleted_at IS NULL
 		  AND (a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))`, userID)
 	if err != nil {
 		return fmt.Errorf("刷新文件夹相册封面失败: %w", err)
@@ -571,7 +604,7 @@ func (s *DB) RefreshFolderAlbumCovers(userID int64) error {
 
 // DeleteAlbum 删除相册（级联删除 album_photos 关联，不删除图片本身）
 func (s *DB) DeleteAlbum(id int64, userID int64) error {
-	result, err := s.db.Exec(`DELETE FROM albums WHERE id = ? AND created_by = ?`, id, userID)
+	result, err := s.db.Exec(`DELETE FROM albums WHERE id = ? AND created_by = ? AND deleted_at IS NULL`, id, userID)
 	if err != nil {
 		return fmt.Errorf("删除相册失败: %w", err)
 	}
@@ -582,11 +615,305 @@ func (s *DB) DeleteAlbum(id int64, userID int64) error {
 	return nil
 }
 
+// SoftDeleteFolderAlbumTree 将文件夹相册、子文件夹相册以及目录树中的有效媒体
+// 放入同一个回收站批次。真实媒体文件不会在这里移动，永久删除时由 PhotoService 处理。
+func (s *DB) SoftDeleteFolderAlbumTree(id int64, userID int64, deletedBy int64, groupID string) (*storage.FolderAlbumTrashEntry, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, fmt.Errorf("文件夹相册回收站批次无效")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("开始删除文件夹相册事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		name          string
+		sourceKind    string
+		description   string
+		sourceRelPath string
+		createdAt     time.Time
+	)
+	err = tx.QueryRow(`
+		SELECT name, source_kind, description, source_rel_path, created_at
+		FROM albums
+		WHERE id = ? AND created_by = ? AND deleted_at IS NULL`, id, userID).
+		Scan(&name, &sourceKind, &description, &sourceRelPath, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("相册不存在")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("查询待删除相册失败: %w", err)
+	}
+	if sourceKind != "folder" && description != legacyFolderAlbumDescription {
+		return nil, fmt.Errorf("个人相册不会删除内部媒体")
+	}
+	sourceRelPath = normalizeAlbumSourcePath(sourceRelPath)
+	if sourceRelPath == "" && strings.TrimSpace(name) == "根目录" {
+		return nil, fmt.Errorf("资源库根目录不能删除")
+	}
+	if sourceRelPath == "" {
+		sourceRelPath = normalizeAlbumSourcePath(name)
+	}
+	if sourceRelPath == "" {
+		return nil, fmt.Errorf("文件夹相册路径为空")
+	}
+
+	deletedAt := time.Now()
+	pathPrefix := sourceRelPath + "/"
+	// Use instr instead of LIKE so folder names containing '%' or '_' are
+	// treated literally and cannot cause an unrelated directory to be deleted.
+	albumPredicate := `(source_rel_path = ? OR instr(source_rel_path, ?) = 1)`
+	if _, err := tx.Exec(`
+		UPDATE albums
+		SET deleted_at = ?, deleted_by = ?, deleted_group_id = ?
+		WHERE created_by = ?
+		  AND deleted_at IS NULL
+		  AND (source_kind = 'folder' OR (source_kind = '' AND description = ?))
+		  AND `+albumPredicate,
+		deletedAt, deletedBy, groupID, userID, legacyFolderAlbumDescription,
+		sourceRelPath, pathPrefix); err != nil {
+		return nil, fmt.Errorf("删除文件夹相册树失败: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE photos
+		SET deleted_at = ?, deleted_by = ?, deleted_group_id = ?
+		WHERE uploaded_by = ?
+		  AND deleted_at IS NULL
+		  AND (source_rel_path = ? OR instr(source_rel_path, ?) = 1)`,
+		deletedAt, deletedBy, groupID, userID, sourceRelPath, pathPrefix); err != nil {
+		return nil, fmt.Errorf("删除文件夹媒体失败: %w", err)
+	}
+
+	var photoCount, folderCount int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM photos
+		WHERE uploaded_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID).Scan(&photoCount); err != nil {
+		return nil, fmt.Errorf("统计文件夹媒体失败: %w", err)
+	}
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM albums
+		WHERE created_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID).Scan(&folderCount); err != nil {
+		return nil, fmt.Errorf("统计文件夹相册失败: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交文件夹相册删除失败: %w", err)
+	}
+
+	return &storage.FolderAlbumTrashEntry{
+		GroupID:       groupID,
+		AlbumID:       id,
+		Name:          name,
+		SourceRelPath: sourceRelPath,
+		DeletedAt:     deletedAt,
+		PhotoCount:    photoCount,
+		FolderCount:   folderCount,
+	}, nil
+}
+
+// ListTrashedFolderAlbumPaths 返回扫描时需要跳过的已删除文件夹路径。
+func (s *DB) ListTrashedFolderAlbumPaths(userID int64) (map[string]bool, error) {
+	rows, err := s.db.Query(`
+		SELECT source_rel_path, name, description
+		FROM albums
+		WHERE created_by = ? AND deleted_at IS NOT NULL
+		  AND (source_kind = 'folder' OR (source_kind = '' AND description = ?))`, userID, legacyFolderAlbumDescription)
+	if err != nil {
+		return nil, fmt.Errorf("查询已删除文件夹路径失败: %w", err)
+	}
+	defer rows.Close()
+
+	paths := make(map[string]bool)
+	for rows.Next() {
+		var sourceRelPath, name, description string
+		if err := rows.Scan(&sourceRelPath, &name, &description); err != nil {
+			return nil, err
+		}
+		path := normalizeAlbumSourcePath(sourceRelPath)
+		if path == "" && description == legacyFolderAlbumDescription && strings.TrimSpace(name) != "根目录" {
+			path = normalizeAlbumSourcePath(name)
+		}
+		if path != "" {
+			paths[path] = true
+		}
+	}
+	return paths, rows.Err()
+}
+
+// ListTrashedFolderAlbums 将同一批次的父文件夹和子文件夹聚合为一条回收站记录。
+func (s *DB) ListTrashedFolderAlbums(userID int64) ([]*storage.FolderAlbumTrashEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT a.deleted_group_id, a.id, a.name, a.source_rel_path, a.description, a.deleted_at,
+		       (SELECT p.uuid
+		        FROM photos p
+		        WHERE p.uploaded_by = a.created_by
+		          AND p.deleted_group_id = a.deleted_group_id
+		          AND p.deleted_at IS NOT NULL
+		        ORDER BY p.taken_at DESC, p.id DESC
+		        LIMIT 1) AS cover_uuid,
+		       (SELECT COUNT(*) FROM photos p
+		        WHERE p.uploaded_by = a.created_by
+		          AND p.deleted_group_id = a.deleted_group_id
+		          AND p.deleted_at IS NOT NULL) AS photo_count,
+		       (SELECT COUNT(*) FROM albums child
+		        WHERE child.created_by = a.created_by
+		          AND child.deleted_group_id = a.deleted_group_id
+		          AND child.deleted_at IS NOT NULL) AS folder_count
+		FROM albums a
+		WHERE a.created_by = ? AND a.deleted_at IS NOT NULL
+		  AND a.deleted_group_id <> ''
+		  AND (a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = ?))
+		ORDER BY a.deleted_at DESC,
+		         CASE WHEN a.source_rel_path = '' THEN 0 ELSE length(a.source_rel_path) END ASC,
+		         a.id ASC`, userID, legacyFolderAlbumDescription)
+	if err != nil {
+		return nil, fmt.Errorf("查询文件夹回收站失败: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]*storage.FolderAlbumTrashEntry, 0)
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var (
+			groupID       string
+			albumID       int64
+			name          string
+			sourceRelPath string
+			description   string
+			coverUUID     sql.NullString
+			deletedAt     sql.NullTime
+			photoCount    int
+			folderCount   int
+		)
+		if err := rows.Scan(&groupID, &albumID, &name, &sourceRelPath, &description, &deletedAt, &coverUUID, &photoCount, &folderCount); err != nil {
+			return nil, err
+		}
+		if !deletedAt.Valid || groupID == "" || seen[groupID] {
+			continue
+		}
+		seen[groupID] = true
+		path := normalizeAlbumSourcePath(sourceRelPath)
+		if path == "" && description == legacyFolderAlbumDescription && strings.TrimSpace(name) != "根目录" {
+			path = normalizeAlbumSourcePath(name)
+		}
+		entries = append(entries, &storage.FolderAlbumTrashEntry{
+			GroupID:       groupID,
+			AlbumID:       albumID,
+			Name:          name,
+			SourceRelPath: path,
+			CoverUUID:     coverUUID.String,
+			DeletedAt:     deletedAt.Time,
+			PhotoCount:    photoCount,
+			FolderCount:   folderCount,
+		})
+	}
+	return entries, rows.Err()
+}
+
+// RestoreFolderAlbumTrash 恢复一个文件夹删除批次，包括相册树和媒体记录。
+func (s *DB) RestoreFolderAlbumTrash(groupID string, userID int64) error {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return fmt.Errorf("文件夹回收站批次无效")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		UPDATE photos SET deleted_at = NULL, deleted_by = NULL, deleted_group_id = ''
+		WHERE uploaded_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID); err != nil {
+		return fmt.Errorf("恢复文件夹媒体失败: %w", err)
+	}
+	result, err := tx.Exec(`
+		UPDATE albums SET deleted_at = NULL, deleted_by = NULL, deleted_group_id = ''
+		WHERE created_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID)
+	if err != nil {
+		return fmt.Errorf("恢复文件夹相册失败: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return fmt.Errorf("文件夹相册不在回收站中")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交文件夹相册恢复失败: %w", err)
+	}
+	return nil
+}
+
+// HardDeleteFolderAlbumTrash 永久删除一个文件夹回收站批次，返回需要清理磁盘的媒体记录。
+func (s *DB) HardDeleteFolderAlbumTrash(groupID string, userID int64) ([]*storage.Photo, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, fmt.Errorf("文件夹回收站批次无效")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
+		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+		FROM photos
+		WHERE uploaded_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID)
+	if err != nil {
+		return nil, err
+	}
+	photos := make([]*storage.Photo, 0)
+	for rows.Next() {
+		photo, scanErr := scanPhoto(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		photos = append(photos, photo)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM photos
+		WHERE uploaded_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID); err != nil {
+		return nil, fmt.Errorf("永久删除文件夹媒体失败: %w", err)
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM albums
+		WHERE created_by = ? AND deleted_group_id = ? AND deleted_at IS NOT NULL`, userID, groupID); err != nil {
+		return nil, fmt.Errorf("永久删除文件夹相册失败: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交文件夹永久删除失败: %w", err)
+	}
+	return photos, nil
+}
+
+// HardDeleteTrashedFolderAlbums 删除所有已在回收站中的文件夹相册记录。
+// 媒体记录由 HardDeleteTrashedPhotos 负责清理。
+func (s *DB) HardDeleteTrashedFolderAlbums(userID int64) error {
+	_, err := s.db.Exec(`
+		DELETE FROM albums
+		WHERE created_by = ? AND deleted_at IS NOT NULL AND deleted_group_id <> ''`, userID)
+	if err != nil {
+		return fmt.Errorf("清空文件夹相册回收站失败: %w", err)
+	}
+	return nil
+}
+
 // AddPhotoToAlbum 将图片添加到相册
 func (s *DB) AddPhotoToAlbum(albumID int64, photoID int64, userID int64) error {
 	// 验证相册属于当前用户
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM albums WHERE id = ? AND created_by = ?`,
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM albums WHERE id = ? AND created_by = ? AND deleted_at IS NULL`,
 		albumID, userID).Scan(&count); err != nil || count == 0 {
 		return fmt.Errorf("相册不存在")
 	}
@@ -603,7 +930,7 @@ func (s *DB) AddPhotoToAlbum(albumID int64, photoID int64, userID int64) error {
 func (s *DB) RemovePhotoFromAlbum(albumID int64, photoID int64, userID int64) error {
 	// 验证相册属于当前用户
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM albums WHERE id = ? AND created_by = ?`,
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM albums WHERE id = ? AND created_by = ? AND deleted_at IS NULL`,
 		albumID, userID).Scan(&count); err != nil || count == 0 {
 		return fmt.Errorf("相册不存在")
 	}
@@ -626,7 +953,7 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	if err := s.db.QueryRow(`
 		SELECT name, source_kind, description, source_rel_path
 		FROM albums
-		WHERE id = ? AND created_by = ?`, params.AlbumID, params.UserID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
+		WHERE id = ? AND created_by = ? AND deleted_at IS NULL`, params.AlbumID, params.UserID).Scan(&name, &sourceKind, &description, &sourceRelPath); err != nil {
 		if err == sql.ErrNoRows {
 			return &storage.PhotoPage{}, nil
 		}
@@ -634,13 +961,16 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 	}
 	isFolderAlbum := sourceKind == "folder" || (sourceKind == "" && description == legacyFolderAlbumDescription)
 	sourceRelPath = normalizeAlbumSourcePath(sourceRelPath)
-	if isFolderAlbum && sourceRelPath == "" {
+	isRootFolderAlbum := isFolderAlbum && sourceRelPath == "" && strings.TrimSpace(name) == "根目录"
+	if isFolderAlbum && sourceRelPath == "" && !isRootFolderAlbum {
 		sourceRelPath = normalizeAlbumSourcePath(name)
 	}
 	where := "p.uploaded_by = ? AND p.deleted_at IS NULL"
 	args := []interface{}{params.UserID}
 	joinClause := ""
-	if isFolderAlbum && sourceRelPath != "" {
+	if isRootFolderAlbum {
+		where += " AND instr(p.source_rel_path, '/') = 0"
+	} else if isFolderAlbum && sourceRelPath != "" {
 		where += ` AND (
 			(p.source_rel_path LIKE ? AND instr(substr(p.source_rel_path, ?), '/') = 0)
 			OR (

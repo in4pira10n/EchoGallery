@@ -52,6 +52,8 @@
       trashLabel: '回收站目录（可选）',
       trashPlaceholder: '默认使用应用数据目录下的 Trash',
       save: '保存并重启',
+      importTransfer: '导入换机配置包',
+      importingTransfer: '正在导入配置…',
       saving: '保存中…',
       restarting: '正在重启…',
       switchUser: '切换用户',
@@ -176,6 +178,10 @@
             '<div class="form-group"><label class="form-label" for="setup-trash-dir">' + esc(text('init.trashLabel', '回收站目录（可选）')) + '</label><input class="input" id="setup-trash-dir" type="text" placeholder="' + esc(text('init.trashPlaceholder', '默认使用应用数据目录下的 Trash')) + '"></div>' +
           '</div>' +
         '</details>' +
+        '<div class="settings-actions settings-actions-fill">' +
+          '<button class="btn" id="setup-import-transfer" type="button">' + esc(text('init.importTransfer', '导入换机配置包')) + '</button>' +
+          '<input id="setup-import-transfer-file" type="file" accept=".zip,application/zip" hidden>' +
+        '</div>' +
         '<button class="btn btn-primary setup-init-submit" id="setup-submit">' + esc(text('init.save', '保存并重启')) + '</button>' +
         '<a class="setup-secondary-link" href="/login" id="setup-switch-user">' + esc(text('init.switchUser', '切换用户')) + '</a>' +
         '<div class="login-error" id="setup-error"></div>' +
@@ -209,6 +215,40 @@
           path: row.querySelector('.setup-library-path').value || ''
         };
       }).concat([{name:text('init.libraryName', '资源库 {index}', { index: list.children.length + 1 }), path:''}]));
+    });
+
+    document.getElementById('setup-import-transfer').addEventListener('click', function () {
+      document.getElementById('setup-import-transfer-file').click();
+    });
+    document.getElementById('setup-import-transfer-file').addEventListener('change', async function () {
+      var file = this.files && this.files[0];
+      if (!file) return;
+      var btn = document.getElementById('setup-import-transfer');
+      var errorEl = document.getElementById('setup-error');
+      btn.disabled = true;
+      btn.innerHTML = renderButtonBusySpinner();
+      btn.setAttribute('aria-label', text('init.importingTransfer', '正在导入配置…'));
+      errorEl.textContent = '';
+      try {
+        var form = new FormData();
+        form.append('file', file);
+        var resp = await fetch('/api/setup/import', {method:'POST', body:form});
+        var data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '导入失败');
+        var browser = data.browser_settings;
+        var allowed = ['echogallery_pwa_settings_v1','echogallery_media_kind_filter_v1','echogallery_timeline_order_v1','echogallery_album_detail_sort_v1','echogallery_global_video_volume_v1','echogallery_library_batch_workflow_enabled_v1','echogallery_library_batch_workflow_aggressive_v1','echogallery_sidebar_compact'];
+        if (browser && typeof browser === 'object') allowed.forEach(function (key) {
+          if (typeof browser[key] === 'string') localStorage.setItem(key, browser[key]);
+        });
+        btn.textContent = text('init.restarting', '正在重启…');
+        setTimeout(function () { location.href = '/login'; }, 1800);
+      } catch (err) {
+        errorEl.textContent = err.message || String(err);
+        btn.disabled = false;
+        btn.textContent = text('init.importTransfer', '导入换机配置包');
+      } finally {
+        this.value = '';
+      }
     });
 
     document.getElementById('setup-submit').addEventListener('click', async function () {

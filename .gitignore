@@ -1,4 +1,5 @@
 .vscode
+.playwright-cli
 build.sh
 .build
 .DS_Store
@@ -9,11 +10,6 @@ EchoGallery
 config.json
 publish.sh
 releases
-EchoGallery_linux_amd64_v1.0.0
-EchoGallery_linux_arm64_v1.0.0
-EchoGallery_macos_amd64_v1.0.0
-EchoGallery_macos_arm64_v1.0.0
-EchoGallery_windows_amd64_v1.0.0.exe
 generate_qr_code.py
 repo_qr_circle.png
 release notes
@@ -24,3 +20,4 @@ TO-DOs.md
 TO-DOs
 local-update.toml
 EchoGalleryUpdater
+handoff

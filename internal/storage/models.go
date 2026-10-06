@@ -4,34 +4,46 @@ import "time"
 
 // Photo 图片模型
 type Photo struct {
-	ID              int64      `json:"id"`
-	UUID            string     `json:"uuid"`          // 对应磁盘文件名（不含扩展名）
-	OriginalName    string     `json:"original_name"` // 用户上传时的原始文件名
-	MediaKind       string     `json:"media_kind"`    // image 或 video
-	MimeType        string     `json:"mime_type"`     // image/jpeg 等
-	Size            int64      `json:"size"`          // 文件大小（字节）
-	Width           int        `json:"width"`
-	Height          int        `json:"height"`
-	DurationMS      int64      `json:"duration_ms"`
-	IsFavorite      bool       `json:"is_favorite"`
-	IsSuperFavorite bool       `json:"is_super_favorite"`
-	ThumbnailURL    string     `json:"thumbnail_url,omitempty"`
-	PosterURL       string     `json:"poster_url,omitempty"`
-	ThumbnailReady  bool       `json:"thumbnail_ready,omitempty"`
-	PosterReady     bool       `json:"poster_ready,omitempty"`
-	DominantColor   string     `json:"dominant_color,omitempty"`
-	StorageRelPath  string     `json:"-"` // 应用内部实际存储的相对路径
-	SourceRelPath   string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
-	EXIF            *PhotoEXIF `json:"exif,omitempty"`
-	SourceModUnix   int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
-	RandomSortKey   int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
-	TakenAt         time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
-	UploadedAt      time.Time  `json:"uploaded_at"`
-	UploadedBy      int64      `json:"uploaded_by"` // 关联 users.id
-	DeletedAt       *time.Time `json:"deleted_at"`  // nil 表示未删除
-	DeletedBy       *int64     `json:"deleted_by"`  // nil 表示未删除
-	VideoBookmarkCount int     `json:"video_bookmark_count,omitempty"`
-	VideoResumeTime    int64   `json:"video_resume_time,omitempty"`
+	ID                 int64      `json:"id"`
+	UUID               string     `json:"uuid"`          // 对应磁盘文件名（不含扩展名）
+	OriginalName       string     `json:"original_name"` // 用户上传时的原始文件名
+	MediaKind          string     `json:"media_kind"`    // image 或 video
+	MimeType           string     `json:"mime_type"`     // image/jpeg 等
+	Size               int64      `json:"size"`          // 文件大小（字节）
+	Width              int        `json:"width"`
+	Height             int        `json:"height"`
+	DurationMS         int64      `json:"duration_ms"`
+	IsFavorite         bool       `json:"is_favorite"`
+	IsSuperFavorite    bool       `json:"is_super_favorite"`
+	ThumbnailURL       string     `json:"thumbnail_url,omitempty"`
+	PosterURL          string     `json:"poster_url,omitempty"`
+	ThumbnailReady     bool       `json:"thumbnail_ready,omitempty"`
+	PosterReady        bool       `json:"poster_ready,omitempty"`
+	DominantColor      string     `json:"dominant_color,omitempty"`
+	StorageRelPath     string     `json:"-"` // 应用内部实际存储的相对路径
+	SourceRelPath      string     `json:"-"` // 启动扫描导入时源文件的相对路径，用于避免重复导入
+	EXIF               *PhotoEXIF `json:"exif,omitempty"`
+	SourceModUnix      int64      `json:"-"`        // 源文件修改时间，用于大库启动时快速判断是否可跳过
+	RandomSortKey      int64      `json:"-"`        // 乱序相册使用的持久随机键，避免前端一次性打乱全库
+	TakenAt            time.Time  `json:"taken_at"` // ���摄时间（EXIF 或文件创建时间）
+	UploadedAt         time.Time  `json:"uploaded_at"`
+	UploadedBy         int64      `json:"uploaded_by"` // 关联 users.id
+	DeletedAt          *time.Time `json:"deleted_at"`  // nil 表示未删除
+	DeletedBy          *int64     `json:"deleted_by"`  // nil 表示未删除
+	DeletedGroupID     string     `json:"-"`           // 文件夹相册批量删除时的回收站批次
+	VideoBookmarkCount int        `json:"video_bookmark_count,omitempty"`
+	VideoResumeTime    int64      `json:"video_resume_time,omitempty"`
+}
+
+type LegacyUUIDMatch struct {
+	SourceRelPath string
+	OldUUID       string
+	NewUUID       string
+}
+
+type LegacyUUIDReport struct {
+	Matches      []LegacyUUIDMatch
+	SkippedPaths []string
 }
 
 // PhotoEXIF 保存可展示的 EXIF 字段。
@@ -61,16 +73,32 @@ const (
 
 // Album 相册模型
 type Album struct {
-	ID            int64     `json:"id"`
+	ID             int64      `json:"id"`
+	Name           string     `json:"name"`
+	Description    string     `json:"description"`
+	CoverPhotoID   *int64     `json:"cover_photo_id"` // nil 时自动取最新图片
+	CoverUUID      string     `json:"cover_uuid"`     // 封面图片 UUID，查询时填充，前端用于显示缩略图
+	SourceKind     string     `json:"source_kind,omitempty"`
+	SourceRelPath  string     `json:"source_rel_path,omitempty"`
+	CreatedBy      int64      `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	PhotoCount     int        `json:"photo_count"` // 非数据库字段，查询时聚合
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+	DeletedBy      *int64     `json:"deleted_by,omitempty"`
+	DeletedGroupID string     `json:"-"`
+}
+
+// FolderAlbumTrashEntry 表示一次文件夹相册删除操作在回收站中的聚合条目。
+// 同一目录树下的父文件夹、子文件夹和媒体共用一个 GroupID，避免回收站重复展示。
+type FolderAlbumTrashEntry struct {
+	GroupID       string    `json:"group_id"`
+	AlbumID       int64     `json:"album_id"`
 	Name          string    `json:"name"`
-	Description   string    `json:"description"`
-	CoverPhotoID  *int64    `json:"cover_photo_id"` // nil 时自动取最新图片
-	CoverUUID     string    `json:"cover_uuid"`     // 封面图片 UUID，查询时填充，前端用于显示缩略图
-	SourceKind    string    `json:"source_kind,omitempty"`
 	SourceRelPath string    `json:"source_rel_path,omitempty"`
-	CreatedBy     int64     `json:"created_by"`
-	CreatedAt     time.Time `json:"created_at"`
-	PhotoCount    int       `json:"photo_count"` // 非数据库字段，查询时聚合
+	CoverUUID     string    `json:"cover_uuid,omitempty"`
+	DeletedAt     time.Time `json:"deleted_at"`
+	PhotoCount    int       `json:"photo_count"`
+	FolderCount   int       `json:"folder_count"`
 }
 
 // VideoPlaybackPreference 保存单个视频的播放偏好。
@@ -133,13 +161,15 @@ type TimelineLocateResult struct {
 
 // LibraryScanSnapshot 保存一次成功扫描后的轻量状态，用于资源库目录树未变化时快速跳过全量扫描。
 type LibraryScanSnapshot struct {
-	RootPath         string    `json:"root_path"`
-	RootModUnixNano  int64     `json:"root_mod_unix_nano"`
-	DirectoryCount   int       `json:"directory_count,omitempty"`
-	DirectoryModHash string    `json:"directory_mod_hash,omitempty"`
-	MediaFileHash    string    `json:"media_file_hash,omitempty"`
-	FileCount        int       `json:"file_count"`
-	CompletedAt      time.Time `json:"completed_at"`
+	RootPath             string            `json:"root_path"`
+	RootModUnixNano      int64             `json:"root_mod_unix_nano"`
+	DirectoryModTimes    map[string]int64  `json:"directory_mod_times,omitempty"`
+	DirectoryEntryHashes map[string]string `json:"directory_entry_hashes,omitempty"`
+	DirectoryCount       int               `json:"directory_count,omitempty"`
+	DirectoryModHash     string            `json:"directory_mod_hash,omitempty"`
+	MediaFileHash        string            `json:"media_file_hash,omitempty"`
+	FileCount            int               `json:"file_count"`
+	CompletedAt          time.Time         `json:"completed_at"`
 }
 
 // ListPhotosParams 查询图片参数

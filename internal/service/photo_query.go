@@ -12,8 +12,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"echogallery/internal/storage"
 )
+
+// folderAlbumTrashRepository is intentionally optional. The service keeps the
+// general storage.Repository small so lightweight test repositories and future
+// backends can continue to support personal albums without implementing the
+// folder-trash feature immediately.
+type folderAlbumTrashRepository interface {
+	SoftDeleteFolderAlbumTree(id, userID, deletedBy int64, groupID string) (*storage.FolderAlbumTrashEntry, error)
+	ListTrashedFolderAlbumPaths(userID int64) (map[string]bool, error)
+	ListTrashedFolderAlbums(userID int64) ([]*storage.FolderAlbumTrashEntry, error)
+	RestoreFolderAlbumTrash(groupID string, userID int64) error
+	HardDeleteFolderAlbumTrash(groupID string, userID int64) ([]*storage.Photo, error)
+	HardDeleteTrashedFolderAlbums(userID int64) error
+}
 
 var (
 	execCommand    = exec.Command
@@ -87,6 +102,17 @@ func (s *PhotoService) GetTrash(params storage.ListPhotosParams) (*storage.Photo
 	return s.filterExistingMediaPage(page), nil
 }
 
+// GetTrashAlbums returns folder deletion batches, one entry per deleted root
+// folder. Child folders are represented by the same group and are not emitted
+// as separate recycle-bin cards.
+func (s *PhotoService) GetTrashAlbums(userID int64) ([]*storage.FolderAlbumTrashEntry, error) {
+	repo, ok := s.repo.(folderAlbumTrashRepository)
+	if !ok {
+		return nil, fmt.Errorf("当前数据库不支持文件夹相册回收站")
+	}
+	return repo.ListTrashedFolderAlbums(userID)
+}
+
 // GetFavorites 获取个人收藏（游标分页）
 func (s *PhotoService) GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	page, err := s.repo.ListFavoritePhotos(params)
@@ -125,45 +151,17 @@ func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*sto
 
 // GetAlbum 获取单个相册。
 func (s *PhotoService) GetAlbum(id int64, userID int64) (*storage.Album, error) {
-	album, err := s.repo.GetAlbumByID(id, userID)
-	if err != nil || album == nil {
-		return album, err
-	}
-	if !isAutoFolderAlbum(album) {
-		return nil, nil
-	}
-	return album, nil
+	return s.repo.GetAlbumByID(id, userID)
 }
 
 // ListAlbums 获取用户所有相册。
 func (s *PhotoService) ListAlbums(userID int64) ([]*storage.Album, error) {
-	albums, err := s.repo.ListAlbums(userID)
-	if err != nil {
-		return nil, err
-	}
-	return filterAutoFolderAlbums(albums), nil
+	return s.repo.ListAlbums(userID)
 }
 
 // ListAlbumsForPhoto 获取包含指定媒体的相册。
 func (s *PhotoService) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, error) {
-	albums, err := s.repo.ListAlbumsForPhoto(photoID, userID)
-	if err != nil {
-		return nil, err
-	}
-	return filterAutoFolderAlbums(albums), nil
-}
-
-func filterAutoFolderAlbums(albums []*storage.Album) []*storage.Album {
-	if len(albums) == 0 {
-		return albums
-	}
-	filtered := make([]*storage.Album, 0, len(albums))
-	for _, album := range albums {
-		if isAutoFolderAlbum(album) {
-			filtered = append(filtered, album)
-		}
-	}
-	return filtered
+	return s.repo.ListAlbumsForPhoto(photoID, userID)
 }
 
 // ListShares 获取用户所有分享链接。
@@ -206,6 +204,16 @@ func (s *PhotoService) DeleteShare(id int64, userID int64) error {
 	return s.repo.DeleteShareLink(id, userID)
 }
 
+func (s *PhotoService) syncPortableDatabase() error {
+	if s == nil || s.repo == nil {
+		return nil
+	}
+	if syncer, ok := s.repo.(interface{ SyncPortable() error }); ok {
+		return syncer.SyncPortable()
+	}
+	return nil
+}
+
 // CreateAlbum 创建相册。
 func (s *PhotoService) CreateAlbum(name, description string, userID int64) (*storage.Album, error) {
 	if name == "" {
@@ -219,6 +227,9 @@ func (s *PhotoService) CreateAlbum(name, description string, userID int64) (*sto
 	}
 	if err := s.repo.CreateAlbum(album); err != nil {
 		return nil, err
+	}
+	if err := s.syncPortableDatabase(); err != nil {
+		return nil, fmt.Errorf("保存相册到资源库数据库失败: %w", err)
 	}
 	return album, nil
 }
@@ -240,12 +251,35 @@ func (s *PhotoService) UpdateAlbum(id int64, name, description string, coverPhot
 	if err := s.repo.UpdateAlbum(album); err != nil {
 		return nil, err
 	}
+	if err := s.syncPortableDatabase(); err != nil {
+		return nil, fmt.Errorf("保存相册到资源库数据库失败: %w", err)
+	}
 	return album, nil
 }
 
 // DeleteAlbum 删除相册。
 func (s *PhotoService) DeleteAlbum(id int64, userID int64) error {
-	return s.repo.DeleteAlbum(id, userID)
+	album, err := s.repo.GetAlbumByID(id, userID)
+	if err != nil {
+		return err
+	}
+	if album == nil {
+		return fmt.Errorf("相册不存在")
+	}
+	if isAutoFolderAlbum(album) {
+		trashRepo, ok := s.repo.(folderAlbumTrashRepository)
+		if !ok {
+			return fmt.Errorf("当前数据库不支持文件夹相册回收站")
+		}
+		if _, err := trashRepo.SoftDeleteFolderAlbumTree(id, userID, userID, uuid.NewString()); err != nil {
+			return err
+		}
+		return s.syncPortableDatabase()
+	}
+	if err := s.repo.DeleteAlbum(id, userID); err != nil {
+		return err
+	}
+	return s.syncPortableDatabase()
 }
 
 // GetAlbumDownloadEntries 获取相册下载条目。
@@ -288,12 +322,18 @@ func (s *PhotoService) GetAlbumDownloadEntries(albumID int64, userID int64) (str
 
 // AddPhoto 将媒体添加到相册。
 func (s *PhotoService) AddPhoto(albumID int64, photoID int64, userID int64) error {
-	return s.repo.AddPhotoToAlbum(albumID, photoID, userID)
+	if err := s.repo.AddPhotoToAlbum(albumID, photoID, userID); err != nil {
+		return err
+	}
+	return s.syncPortableDatabase()
 }
 
 // RemovePhoto 将媒体从相册移除。
 func (s *PhotoService) RemovePhoto(albumID int64, photoID int64, userID int64) error {
-	return s.repo.RemovePhotoFromAlbum(albumID, photoID, userID)
+	if err := s.repo.RemovePhotoFromAlbum(albumID, photoID, userID); err != nil {
+		return err
+	}
+	return s.syncPortableDatabase()
 }
 
 // GetPhoto 获取单张图片
@@ -323,10 +363,6 @@ func (s *PhotoService) DeletePhoto(id int64, userID int64) error {
 	if err := s.repo.SoftDeletePhoto(id, userID, userID); err != nil {
 		return err
 	}
-	if err := s.syncTrashLinks(userID); err != nil {
-		_ = s.repo.RestorePhoto(id, userID)
-		return fmt.Errorf("更新回收站链接失败: %w", err)
-	}
 	return nil
 }
 
@@ -335,11 +371,20 @@ func (s *PhotoService) RestorePhoto(id int64, userID int64) error {
 	if err := s.repo.RestorePhoto(id, userID); err != nil {
 		return err
 	}
-	if err := s.syncTrashLinks(userID); err != nil {
-		_ = s.repo.SoftDeletePhoto(id, userID, userID)
-		return fmt.Errorf("更新回收站链接失败: %w", err)
-	}
 	return nil
+}
+
+// RestoreFolderAlbum restores an entire folder deletion batch, including its
+// child folder albums and media records.
+func (s *PhotoService) RestoreFolderAlbum(groupID string, userID int64) error {
+	repo, ok := s.repo.(folderAlbumTrashRepository)
+	if !ok {
+		return fmt.Errorf("当前数据库不支持文件夹相册回收站")
+	}
+	if err := repo.RestoreFolderAlbumTrash(groupID, userID); err != nil {
+		return err
+	}
+	return s.syncPortableDatabase()
 }
 
 // SetPhotoFavorite 设置收藏状态
@@ -360,33 +405,226 @@ func (s *PhotoService) PermanentlyDeletePhoto(id int64, userID int64) error {
 		return err
 	}
 
-	s.moveManagedFileToTrash(s.MediaPath(photo))
-	for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
-		s.moveManagedFileToTrash(thumbPath)
-	}
-	if err := s.syncTrashLinks(userID); err != nil {
-		return fmt.Errorf("更新回收站链接失败: %w", err)
-	}
+	s.moveMediaToTrash(s.existingMediaPath(photo))
+	s.removeThumbnailFiles(photo)
 	return nil
+}
+
+// PermanentlyDeleteFolderAlbum removes one folder deletion batch from the
+// database after moving the entire source directory tree to
+// .echogallery/.trash. Thumbnails remain managed separately because they do
+// not live inside the source folder.
+func (s *PhotoService) PermanentlyDeleteFolderAlbum(groupID string, userID int64) error {
+	repo, ok := s.repo.(folderAlbumTrashRepository)
+	if !ok {
+		return fmt.Errorf("当前数据库不支持文件夹相册回收站")
+	}
+	entry, err := s.trashedFolderAlbumEntry(groupID, userID)
+	if err != nil {
+		return err
+	}
+	// Folder batches are moved as one directory so nested folders and
+	// unsupported files keep their original layout in .trash.
+	if err := s.moveFolderAlbumToTrash(entry); err != nil {
+		return fmt.Errorf("移动文件夹到 .trash 失败: %w", err)
+	}
+	photos, err := repo.HardDeleteFolderAlbumTrash(groupID, userID)
+	if err != nil {
+		return err
+	}
+	for _, photo := range photos {
+		s.removeThumbnailFiles(photo)
+	}
+	return s.syncPortableDatabase()
 }
 
 // EmptyTrash 清空回收站，同时删除磁盘文件
 func (s *PhotoService) EmptyTrash(userID int64) error {
+	var folderEntries []*storage.FolderAlbumTrashEntry
+	var folderRepo folderAlbumTrashRepository
+	if candidate, ok := s.repo.(folderAlbumTrashRepository); ok {
+		entries, err := candidate.ListTrashedFolderAlbums(userID)
+		if err != nil {
+			return fmt.Errorf("读取文件夹回收站失败: %w", err)
+		}
+		folderEntries = entries
+		folderRepo = candidate
+		for _, entry := range folderEntries {
+			if err := s.moveFolderAlbumToTrash(entry); err != nil {
+				return fmt.Errorf("移动文件夹到 .trash 失败: %w", err)
+			}
+		}
+	}
 	photos, err := s.repo.HardDeleteTrashedPhotos(userID)
 	if err != nil {
 		return fmt.Errorf("清空回收站失败: %w", err)
 	}
 
 	for _, photo := range photos {
-		s.moveManagedFileToTrash(s.MediaPath(photo))
-		for _, thumbPath := range s.thumbnailCleanupPaths(photo) {
-			s.moveManagedFileToTrash(thumbPath)
+		s.moveMediaToTrash(s.existingMediaPath(photo))
+		s.removeThumbnailFiles(photo)
+	}
+	if folderRepo != nil {
+		if err := folderRepo.HardDeleteTrashedFolderAlbums(userID); err != nil {
+			return fmt.Errorf("清空文件夹相册回收站失败: %w", err)
 		}
 	}
-	if err := s.syncTrashLinks(userID); err != nil {
-		return fmt.Errorf("更新回收站链接失败: %w", err)
+	if err := s.syncPortableDatabase(); err != nil {
+		return fmt.Errorf("同步资源库数据库失败: %w", err)
 	}
 	return nil
+}
+
+func (s *PhotoService) trashedFolderAlbumEntry(groupID string, userID int64) (*storage.FolderAlbumTrashEntry, error) {
+	repo, ok := s.repo.(folderAlbumTrashRepository)
+	if !ok {
+		return nil, fmt.Errorf("当前数据库不支持文件夹相册回收站")
+	}
+	key := strings.TrimSpace(groupID)
+	if key == "" {
+		return nil, fmt.Errorf("文件夹回收站批次无效")
+	}
+	entries, err := repo.ListTrashedFolderAlbums(userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry != nil && strings.TrimSpace(entry.GroupID) == key {
+			return entry, nil
+		}
+	}
+	return nil, fmt.Errorf("文件夹回收站批次不存在")
+}
+
+func (s *PhotoService) moveFolderAlbumToTrash(entry *storage.FolderAlbumTrashEntry) error {
+	if entry == nil || strings.TrimSpace(s.sourcePath) == "" {
+		return nil
+	}
+	relPath, err := safeLibraryRelativePath(entry.SourceRelPath)
+	if err != nil {
+		return err
+	}
+	groupID, err := safeTrashGroupID(entry.GroupID)
+	if err != nil {
+		return err
+	}
+	sourcePath := filepath.Join(s.sourcePath, relPath)
+	destination := filepath.Join(s.trashBaseDir(), "folders", groupID, relPath)
+
+	info, sourceErr := os.Stat(sourcePath)
+	if sourceErr != nil {
+		if os.IsNotExist(sourceErr) {
+			// A previous attempt may already have moved the folder, or the
+			// source folder may have been removed outside EchoGallery.
+			if destinationInfo, destinationErr := os.Stat(destination); destinationErr == nil && destinationInfo.IsDir() {
+				return nil
+			}
+			return nil
+		}
+		return sourceErr
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("源路径不是文件夹: %s", sourcePath)
+	}
+	if destinationInfo, destinationErr := os.Stat(destination); destinationErr == nil {
+		if destinationInfo.IsDir() {
+			return fmt.Errorf(".trash 中已存在同名文件夹: %s", destination)
+		}
+		return fmt.Errorf(".trash 中已存在同名文件: %s", destination)
+	} else if !os.IsNotExist(destinationErr) {
+		return destinationErr
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		return err
+	}
+	return moveDirectoryToTrash(sourcePath, destination)
+}
+
+func safeTrashGroupID(value string) (string, error) {
+	groupID := strings.TrimSpace(value)
+	if groupID == "" || groupID == "." || groupID == ".." || filepath.Base(groupID) != groupID || filepath.VolumeName(groupID) != "" {
+		return "", fmt.Errorf("文件夹回收站批次无效")
+	}
+	return groupID, nil
+}
+
+func safeLibraryRelativePath(value string) (string, error) {
+	normalized := strings.Trim(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/")
+	if normalized == "" {
+		return "", fmt.Errorf("文件夹相对路径为空")
+	}
+	clean := filepath.Clean(filepath.FromSlash(normalized))
+	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("文件夹相对路径无效: %s", value)
+	}
+	return clean, nil
+}
+
+func moveDirectoryToTrash(src, dest string) error {
+	if err := moveFileRename(src, dest); err == nil {
+		return nil
+	}
+	if err := copyDirectory(src, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return err
+	}
+	if err := os.RemoveAll(src); err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyDirectory(src, dest string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := dest
+		if rel != "." {
+			target = filepath.Join(dest, rel)
+		}
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		if err := copyFile(path, target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func copyFile(src, dest string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // RevealInFinder 在系统文件管理器中定位媒体文件。
@@ -605,29 +843,6 @@ func (s *PhotoService) filterExistingMediaPage(page *storage.PhotoPage) *storage
 	return page
 }
 
-func (s *PhotoService) syncTrashLinks(userID int64) error {
-	s.trashLinksMu.Lock()
-	defer s.trashLinksMu.Unlock()
-
-	links, err := s.collectTrashLinks(userID)
-	if err != nil {
-		return err
-	}
-
-	path := s.trashLinksPath()
-	if len(links) == 0 {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	content := strings.Join(links, "\n") + "\n"
-	return os.WriteFile(path, []byte(content), 0644)
-}
-
 func (s *PhotoService) collectTrashLinks(userID int64) ([]string, error) {
 	seen := make(map[string]struct{})
 	links := make([]string, 0)
@@ -662,38 +877,33 @@ func (s *PhotoService) collectTrashLinks(userID int64) ([]string, error) {
 }
 
 func (s *PhotoService) trashBaseDir() string {
-	baseDir := s.trashPath
-	if baseDir == "" {
-		baseDir = filepath.Join(s.dataPath, "Trash")
+	if strings.TrimSpace(s.sourcePath) != "" {
+		return filepath.Clean(filepath.Join(s.sourcePath, ".echogallery", ".trash"))
 	}
-	return filepath.Clean(baseDir)
-}
-
-func (s *PhotoService) trashLinksPath() string {
-	return filepath.Join(s.trashBaseDir(), "trash-links.txt")
+	if s.trashPath != "" {
+		return filepath.Clean(s.trashPath)
+	}
+	return filepath.Join(s.dataPath, "trash")
 }
 
 func (s *PhotoService) trashLinkTarget(photo *storage.Photo) string {
 	if photo == nil {
 		return ""
 	}
-	target := s.resolveFinderPath(photo)
-	if target == "" && photo.SourceRelPath != "" {
-		target = filepath.Join(s.sourcePath, photo.SourceRelPath)
-	}
-	if target == "" && photo.StorageRelPath != "" {
-		target = filepath.Join(s.dataPath, photo.StorageRelPath)
-	}
-	if target == "" && photo.UUID != "" && photo.OriginalName != "" {
-		target = filepath.Join(s.dataPath, photo.UUID+filepath.Ext(photo.OriginalName))
-	}
-	if target == "" {
-		return ""
-	}
-	return filepath.Clean(target)
+	return filepath.ToSlash(photo.SourceRelPath)
 }
 
-func (s *PhotoService) moveManagedFileToTrash(path string) {
+func (s *PhotoService) existingMediaPath(photo *storage.Photo) string {
+	for _, path := range s.mediaFileCandidates(photo) {
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return s.MediaPath(photo)
+}
+
+func (s *PhotoService) moveMediaToTrash(path string) {
 	if path == "" {
 		return
 	}
@@ -702,13 +912,23 @@ func (s *PhotoService) moveManagedFileToTrash(path string) {
 		return
 	}
 
-	rel := s.trashRelPath(path)
 	baseDir := s.trashBaseDir()
-	dest := filepath.Join(baseDir, rel)
+	dest := filepath.Join(baseDir, filepath.Base(path))
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return
 	}
 	_ = moveFileToTrash(path, uniqueTrashPath(dest))
+}
+
+func (s *PhotoService) removeThumbnailFiles(photo *storage.Photo) {
+	for _, path := range s.thumbnailCleanupPaths(photo) {
+		if path == "" {
+			continue
+		}
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func moveFileToTrash(src, dest string) error {
@@ -753,19 +973,6 @@ func moveFileToTrash(src, dest string) error {
 		return err
 	}
 	return nil
-}
-
-func (s *PhotoService) trashRelPath(path string) string {
-	for _, root := range []string{s.sourcePath, s.dataPath, s.thumbnailPath} {
-		if root == "" {
-			continue
-		}
-		rel, err := filepath.Rel(root, path)
-		if err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." && !filepath.IsAbs(rel) {
-			return rel
-		}
-	}
-	return filepath.Base(path)
 }
 
 func uniqueTrashPath(dest string) string {

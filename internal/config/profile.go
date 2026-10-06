@@ -31,16 +31,21 @@ type Profile struct {
 }
 
 type BatchTaskLibraryState struct {
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Status    string `json:"status"`
-	Message   string `json:"message"`
-	Imported  int    `json:"imported"`
-	Skipped   int    `json:"skipped"`
-	Pruned    int    `json:"pruned"`
-	Generated int    `json:"generated"`
-	Failed    int    `json:"failed"`
+	ID             string   `json:"id,omitempty"`
+	Name           string   `json:"name"`
+	Path           string   `json:"path"`
+	Status         string   `json:"status"`
+	Message        string   `json:"message"`
+	Imported       int      `json:"imported"`
+	Skipped        int      `json:"skipped"`
+	Pruned         int      `json:"pruned"`
+	Generated      int      `json:"generated"`
+	Failed         int      `json:"failed"`
+	Matched        int      `json:"matched,omitempty"`
+	Resumed        int      `json:"resumed,omitempty"`
+	Existing       int      `json:"existing,omitempty"`
+	MissingOld     int      `json:"missing_old,omitempty"`
+	DuplicatePaths []string `json:"duplicate_paths,omitempty"`
 }
 
 type BatchTaskState struct {
@@ -77,6 +82,7 @@ type profileDefaultsProbe struct {
 	Preferences struct {
 		WarmEnabled                 *bool `json:"warm_enabled"`
 		LowResourceMode             *bool `json:"low_resource_mode"`
+		LightboxUIIdleSeconds       *int  `json:"lightbox_ui_idle_seconds"`
 		ThrottledVideoSeek          *bool `json:"throttled_video_seek"`
 		VideoSeekThrottleMS         *int  `json:"video_seek_throttle_ms"`
 		VideoVolumeSwipeSensitivity *int  `json:"video_volume_swipe_sensitivity"`
@@ -185,6 +191,9 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	}
 	if probe.Preferences.WarmEnabled == nil {
 		profile.Preferences.WarmEnabled = true
+	}
+	if probe.Preferences.LightboxUIIdleSeconds == nil {
+		profile.Preferences.LightboxUIIdleSeconds = 0
 	}
 	if probe.Preferences.ThrottledVideoSeek == nil {
 		profile.Preferences.ThrottledVideoSeek = false
@@ -390,6 +399,9 @@ func (p *Profile) applyDefaults(fallback *Config) {
 	}
 	if p.Preferences.VideoSectionMinMinutes == 0 {
 		p.Preferences.VideoSectionMinMinutes = 10
+	}
+	if p.Preferences.LightboxUIIdleSeconds < 0 || p.Preferences.LightboxUIIdleSeconds > 15 {
+		p.Preferences.LightboxUIIdleSeconds = 0
 	}
 	if p.Preferences.VideoSeekThrottleMS < 120 || p.Preferences.VideoSeekThrottleMS > 1000 {
 		p.Preferences.VideoSeekThrottleMS = 240

@@ -22,6 +22,7 @@
     "experimental_restore_last_view": false,
     "continue_last_video_position": false,
     "warm_enabled": true,
+    "lightbox_ui_idle_seconds": 0,
     "throttled_video_seek": false,
     "video_seek_throttle_ms": 240,
     "video_volume_swipe_sensitivity": 100,

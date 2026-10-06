@@ -43,6 +43,10 @@ func handleStartLibraryBatchThumbnailBuild(cfg *config.Config, hooks LibraryBatc
 				return
 			}
 		}
+		if req.MoveLegacyThumbnails || req.CleanThumbnailFiles || req.BuildPlaybackCaches {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "批量工作流的迁移、旧文件清理和播放缓存阶段已暂停"})
+			return
+		}
 		profile, ok := requestProfile(c, cfg)
 		if !ok {
 			return

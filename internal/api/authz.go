@@ -128,6 +128,11 @@ func effectiveLibraryUsername(cfg *config.Config, username string) string {
 
 func currentLibraryUserID(c *gin.Context, cfg *config.Config) (int64, error) {
 	reqCfg := requestConfig(c, cfg)
+	if provider, ok := requestRegistrar(c, nil).(interface{ LibraryUserID(int64) int64 }); ok {
+		if owner := provider.LibraryUserID(0); owner > 0 {
+			return owner, nil
+		}
+	}
 	return currentUserID(reqCfg, effectiveLibraryUsername(reqCfg, currentUsername(c)))
 }
 

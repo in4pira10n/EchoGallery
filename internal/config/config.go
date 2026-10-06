@@ -63,6 +63,7 @@ type Preferences struct {
 	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
 	WarmEnabled                   bool   `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int    `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool   `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int    `json:"video_seek_throttle_ms"`
 	VideoVolumeSwipeSensitivity   int    `json:"video_volume_swipe_sensitivity"`
@@ -90,6 +91,7 @@ type configDefaultsProbe struct {
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
 		WarmEnabled                   *bool   `json:"warm_enabled"`
+		LightboxUIIdleSeconds         *int    `json:"lightbox_ui_idle_seconds"`
 		ThrottledVideoSeek            *bool   `json:"throttled_video_seek"`
 		VideoSeekThrottleMS           *int    `json:"video_seek_throttle_ms"`
 		VideoVolumeSwipeSensitivity   *int    `json:"video_volume_swipe_sensitivity"`
@@ -449,6 +451,9 @@ func (c *Config) applyDefaults() {
 	if c.Preferences.VideoSectionMinMinutes == 0 {
 		c.Preferences.VideoSectionMinMinutes = 10
 	}
+	if c.Preferences.LightboxUIIdleSeconds < 0 || c.Preferences.LightboxUIIdleSeconds > 15 {
+		c.Preferences.LightboxUIIdleSeconds = 0
+	}
 	if c.Preferences.VideoVolumeSwipeSensitivity < 40 || c.Preferences.VideoVolumeSwipeSensitivity > 220 {
 		c.Preferences.VideoVolumeSwipeSensitivity = 100
 	}
@@ -548,13 +553,24 @@ func (c *Config) normalizeLibraries() {
 		if name == "" {
 			name = defaultLibraryName(len(normalized))
 		}
+		accentColor := strings.TrimSpace(lib.AccentColor)
+		if normalizeLibraryID(lib.ID) == "" {
+			if metadata, err := existingPortableLibraryMetadata(path); err == nil && metadata.ID != "" {
+				if strings.TrimSpace(metadata.Name) != "" {
+					name = strings.TrimSpace(metadata.Name)
+				}
+				if strings.TrimSpace(metadata.AccentColor) != "" {
+					accentColor = strings.TrimSpace(metadata.AccentColor)
+				}
+			}
+		}
 		id := ensureLibraryIDForPath(lib.ID, path, usedIDs)
 		normalized = append(normalized, Library{
 			ID:            id,
 			Name:          name,
 			Path:          path,
 			LogoAsset:     strings.TrimSpace(lib.LogoAsset),
-			AccentColor:   strings.TrimSpace(lib.AccentColor),
+			AccentColor:   accentColor,
 			Status:        normalizeLibraryStatus(strings.TrimSpace(lib.Status)),
 			OwnerUsername: c.normalizeLibraryOwnerUsername(strings.TrimSpace(lib.OwnerUsername)),
 		})
@@ -591,6 +607,16 @@ func (c *Config) normalizeLibraries() {
 		c.ActiveLibraryID = c.Libraries[0].ID
 		c.StoragePath = c.Libraries[0].Path
 	}
+}
+
+// NormalizeLibraries resolves stable identities and portable metadata before
+// callers persist or activate a newly added library.
+func (c *Config) NormalizeLibraries() {
+	if c == nil {
+		return
+	}
+	c.normalizeLibraries()
+	c.normalizeUserLibraries()
 }
 
 func (c *Config) normalizeLibraryOwnerUsername(username string) string {
@@ -678,6 +704,9 @@ func ensureLibraryIDForPath(id string, path string, used map[string]struct{}) st
 			used[normalized] = struct{}{}
 			return normalized
 		}
+	}
+	if existing, err := existingPortableLibraryID(path); err == nil && existing != "" {
+		return reserveLibraryIDCandidate(existing, used)
 	}
 	candidate := normalizeLibraryID(libraryIDFromPath(path))
 	if candidate != "" {
@@ -814,6 +843,9 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	if probe.Preferences.WarmEnabled == nil {
 		c.Preferences.WarmEnabled = true
 	}
+	if probe.Preferences.LightboxUIIdleSeconds == nil {
+		c.Preferences.LightboxUIIdleSeconds = 0
+	}
 	if probe.Preferences.ThrottledVideoSeek == nil {
 		c.Preferences.ThrottledVideoSeek = false
 	}
@@ -842,6 +874,10 @@ func defaultAppDataDir() (string, error) {
 	return filepath.Join(baseDir, appDataDirName), nil
 }
 
+func DefaultAppDataDir() (string, error) {
+	return defaultAppDataDir()
+}
+
 func defaultAppBaseDir() (string, error) {
 	if configPathOverride != "" {
 		return filepath.Dir(configPathOverride), nil
@@ -866,17 +902,14 @@ func NormalizeStoragePath(path string) string {
 }
 
 func (c *Config) DatabasePath() (string, error) {
-	if err := c.prepareRuntimePaths(); err != nil {
-		return "", err
-	}
-	return databasePathForPrefix(c.AppDataDir, c.StoragePath), nil
+	return c.DatabasePathForStorage(c.StoragePath)
 }
 
 func (c *Config) DatabasePathForStorage(storagePath string) (string, error) {
 	if err := c.prepareRuntimePaths(); err != nil {
 		return "", err
 	}
-	return databasePathForPrefix(c.AppDataDir, storagePath), nil
+	return portableDatabasePath(c.AppDataDir, storagePath)
 }
 
 func databasePathForPrefix(appDataDir, storagePath string) string {
@@ -886,11 +919,26 @@ func databasePathForPrefix(appDataDir, storagePath string) string {
 	return filepath.Join(appDataDir, "db", fileName)
 }
 
+// LegacyDatabasePathForStorage resolves the v2.1 server-local media database.
+func (c *Config) LegacyDatabasePathForStorage(storagePath string) string {
+	if c == nil || strings.TrimSpace(c.AppDataDir) == "" {
+		return ""
+	}
+	return databasePathForPrefix(c.AppDataDir, storagePath)
+}
+
 func (c *Config) ManagedDataDir() (string, error) {
 	if err := c.prepareRuntimePaths(); err != nil {
 		return "", err
 	}
 	return filepath.Join(c.AppDataDir, "media"), nil
+}
+
+func (c *Config) ManagedDataDirForStorage(storagePath string) (string, error) {
+	if err := c.prepareRuntimePaths(); err != nil {
+		return "", err
+	}
+	return filepath.Join(LibraryDataRoot(storagePath), "media"), nil
 }
 
 func (c *Config) TrashPath() (string, error) {
@@ -919,6 +967,13 @@ func (c *Config) ThumbnailStoragePath() (string, error) {
 		return "", err
 	}
 	return NormalizeStoragePath(c.ThumbnailDir), nil
+}
+
+func (c *Config) ThumbnailStoragePathForStorage(storagePath string) (string, error) {
+	if err := c.prepareRuntimePaths(); err != nil {
+		return "", err
+	}
+	return filepath.Join(LibraryDataRoot(storagePath), "thumbnails"), nil
 }
 
 func (c *Config) LibraryLockDBPath() (string, error) {

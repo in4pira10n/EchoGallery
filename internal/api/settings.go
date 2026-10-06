@@ -22,8 +22,75 @@ import (
 	imgpkg "echogallery/internal/image"
 	"echogallery/internal/service"
 	"echogallery/internal/storage"
+	storagesqlite "echogallery/internal/storage/sqlite"
 	"echogallery/internal/update"
 )
+
+func persistPortableLibraryMetadata(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Libraries) > 0 {
+		if _, err := cfg.DatabasePathForStorage(cfg.Libraries[0].Path); err != nil {
+			return err
+		}
+	}
+	for _, library := range cfg.Libraries {
+		if config.PortableLibraryMetadataMatches(library.Path, library.ID, library.Name, library.AccentColor) {
+			continue
+		}
+		info, err := os.Stat(library.Path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		dbPath, err := cfg.DatabasePathForStorage(library.Path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+			return err
+		}
+		// Settings only updates portable identity metadata. Opening an SSD working
+		// copy here would copy the whole database twice before the library is used.
+		db, err := storagesqlite.New(dbPath)
+		if err != nil {
+			return err
+		}
+		err = db.EnsureLibraryMetadata(library.ID, library.Name, library.AccentColor)
+		_ = db.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func persistChangedPortableLibraryMetadata(previous []config.Library, cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	byID := make(map[string]config.Library, len(previous))
+	for _, library := range previous {
+		byID[strings.TrimSpace(library.ID)] = library
+	}
+	for _, library := range cfg.Libraries {
+		old, exists := byID[strings.TrimSpace(library.ID)]
+		if exists && config.NormalizeStoragePath(old.Path) == config.NormalizeStoragePath(library.Path) &&
+			strings.TrimSpace(old.Name) == strings.TrimSpace(library.Name) &&
+			strings.TrimSpace(old.AccentColor) == strings.TrimSpace(library.AccentColor) {
+			continue
+		}
+		one := *cfg
+		one.Libraries = []config.Library{library}
+		if err := persistPortableLibraryMetadata(&one); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type settingsResponse struct {
 	CurrentUsername               string            `json:"current_username,omitempty"`
@@ -57,6 +124,7 @@ type settingsResponse struct {
 	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
 	WarmEnabled                   bool              `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int               `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool              `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int               `json:"video_seek_throttle_ms"`
 	VideoVolumeSwipeSensitivity   int               `json:"video_volume_swipe_sensitivity"`
@@ -93,6 +161,7 @@ type settingsUpdateRequest struct {
 	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
 	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
 	WarmEnabled                   bool             `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int              `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool             `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int              `json:"video_seek_throttle_ms"`
 	VideoVolumeSwipeSensitivity   int              `json:"video_volume_swipe_sensitivity"`
@@ -114,6 +183,65 @@ type refreshLibraryLogosResult struct {
 	Errors  []string `json:"errors,omitempty"`
 }
 
+type discoverLibraryDirectoriesRequest struct {
+	Path string `json:"path"`
+}
+
+type discoveredLibraryDirectory struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func handleDiscoverLibraryDirectories() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req discoverLibraryDirectoriesRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+			return
+		}
+		parent := strings.TrimSpace(req.Path)
+		if parent == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "文件夹路径不能为空"})
+			return
+		}
+		parent, err := filepath.Abs(parent)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("文件夹路径无效：%v", err)})
+			return
+		}
+		info, err := os.Stat(parent)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无法读取文件夹：%v", err)})
+			return
+		}
+		if !info.IsDir() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "输入路径不是文件夹"})
+			return
+		}
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无法读取文件夹：%v", err)})
+			return
+		}
+		result := make([]discoveredLibraryDirectory, 0, len(entries))
+		for _, entry := range entries {
+			candidate := filepath.Join(parent, entry.Name())
+			entryInfo, statErr := os.Stat(candidate)
+			if statErr != nil || !entryInfo.IsDir() {
+				continue
+			}
+			result = append(result, discoveredLibraryDirectory{
+				Name: entry.Name(),
+				Path: candidate,
+			})
+		}
+		slices.SortFunc(result, func(a, b discoveredLibraryDirectory) int {
+			return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+		})
+		c.JSON(http.StatusOK, gin.H{"directories": result})
+	}
+}
+
 type libraryResponse struct {
 	Index                 int    `json:"index"`
 	ID                    string `json:"id,omitempty"`
@@ -133,6 +261,7 @@ type libraryResponse struct {
 	TotalSizeText         string `json:"total_size_text,omitempty"`
 	PhotoCount            int64  `json:"photo_count,omitempty"`
 	VideoCount            int64  `json:"video_count,omitempty"`
+	RebuildRequired       bool   `json:"rebuild_required,omitempty"`
 }
 
 type LibraryAvailabilityState struct {
@@ -165,13 +294,15 @@ type LibraryAvailabilityHooks struct {
 }
 
 type cachedLibraryStats struct {
-	DBSize    int64
-	DBModTime time.Time
-	ExpiresAt time.Time
-	Response  libraryResponse
+	DBSize     int64
+	DBModTime  time.Time
+	ExpiresAt  time.Time
+	Response   libraryResponse
+	Refreshing bool
 }
 
 var libraryStatsCache sync.Map
+var libraryLogoAssetCache sync.Map
 
 type RequestError struct {
 	Status  int
@@ -262,6 +393,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		ExperimentalRestoreLastView:   profile.Preferences.ExperimentalRestoreLastView,
 		ContinueLastVideoPosition:     profile.Preferences.ContinueLastVideoPosition,
 		WarmEnabled:                   profile.Preferences.WarmEnabled,
+		LightboxUIIdleSeconds:         profile.Preferences.LightboxUIIdleSeconds,
 		ThrottledVideoSeek:            profile.Preferences.ThrottledVideoSeek,
 		VideoSeekThrottleMS:           profile.Preferences.VideoSeekThrottleMS,
 		VideoVolumeSwipeSensitivity:   profile.Preferences.VideoVolumeSwipeSensitivity,
@@ -364,26 +496,41 @@ func handleApplyLocalUpdate(cfg *config.Config, shutdown func() error) gin.Handl
 }
 
 func buildLibraryStats(cfg *config.Config, library config.Library) libraryResponse {
-	stats := libraryResponse{}
 	dbPath, err := cfg.DatabasePathForStorage(library.Path)
 	if err != nil {
-		return stats
+		return libraryResponse{}
 	}
-	if info, err := os.Stat(dbPath); err == nil {
-		if cached, ok := loadCachedLibraryStats(dbPath, info); ok {
-			return cached
+	if value, ok := libraryStatsCache.Load(dbPath); ok {
+		cached, _ := value.(cachedLibraryStats)
+		if !cached.Refreshing && time.Now().After(cached.ExpiresAt) {
+			cached.Refreshing = true
+			libraryStatsCache.Store(dbPath, cached)
+			go refreshLibraryStats(dbPath)
 		}
-		stats.CreatedAt = formatLibraryStatTime(info.ModTime())
-	} else {
-		return stats
+		return cached.Response
 	}
+	libraryStatsCache.Store(dbPath, cachedLibraryStats{Refreshing: true})
+	go refreshLibraryStats(dbPath)
+	return libraryResponse{}
+}
+
+func refreshLibraryStats(dbPath string) {
+	stats := libraryResponse{}
+	info, err := os.Stat(dbPath)
+	if err != nil || info.IsDir() {
+		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
+		return
+	}
+	stats.CreatedAt = formatLibraryStatTime(info.ModTime())
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return stats
+		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
+		return
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return stats
+		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
+		return
 	}
 	if createdAt, ok := readLibraryCreatedAt(db); ok {
 		stats.CreatedAt = formatLibraryStatTime(createdAt)
@@ -398,10 +545,7 @@ func buildLibraryStats(cfg *config.Config, library config.Library) libraryRespon
 		stats.VideoCount = videoCount
 		stats.UnsupportedMediaCount = unsupportedCount
 	}
-	if info, err := os.Stat(dbPath); err == nil {
-		storeCachedLibraryStats(dbPath, info, stats)
-	}
-	return stats
+	storeCachedLibraryStats(dbPath, info, stats)
 }
 
 func loadCachedLibraryStats(dbPath string, info os.FileInfo) (libraryResponse, bool) {
@@ -425,20 +569,29 @@ func storeCachedLibraryStats(dbPath string, info os.FileInfo, stats libraryRespo
 	libraryStatsCache.Store(dbPath, cachedLibraryStats{
 		DBSize:    info.Size(),
 		DBModTime: info.ModTime(),
-		ExpiresAt: time.Now().Add(12 * time.Second),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 		Response:  stats,
 	})
 }
 
 func readLibraryCreatedAt(db *sql.DB) (time.Time, bool) {
 	var raw string
-	err := db.QueryRow(`SELECT uploaded_at FROM photos WHERE deleted_at IS NULL ORDER BY uploaded_at ASC LIMIT 1`).Scan(&raw)
+	err := db.QueryRow(`SELECT uploaded_at FROM photos
+		WHERE deleted_at IS NULL AND ` + libraryMediaStatsPathPredicate + `
+		ORDER BY uploaded_at ASC LIMIT 1`).Scan(&raw)
 	if err != nil || strings.TrimSpace(raw) == "" {
 		return time.Time{}, false
 	}
 	value, err := parseLibraryTime(raw)
 	return value, err == nil && !value.IsZero()
 }
+
+const libraryMediaStatsPathPredicate = `(
+	COALESCE(source_rel_path, '') = '' OR (
+		replace(source_rel_path, char(92), '/') <> '.echogallery' AND
+		replace(source_rel_path, char(92), '/') NOT LIKE '.echogallery/%'
+	)
+)`
 
 func readLibraryMediaStats(db *sql.DB) (int64, int64, int64, int64, bool) {
 	var totalSize, photoCount, videoCount, unsupportedCount sql.NullInt64
@@ -449,7 +602,7 @@ func readLibraryMediaStats(db *sql.DB) (int64, int64, int64, int64, bool) {
 			COALESCE(SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN lower(original_name) LIKE '%.wmv' OR lower(original_name) LIKE '%.wma' THEN 1 ELSE 0 END), 0)
 		FROM photos
-		WHERE deleted_at IS NULL`).Scan(&totalSize, &photoCount, &videoCount, &unsupportedCount)
+		WHERE deleted_at IS NULL AND `+libraryMediaStatsPathPredicate).Scan(&totalSize, &photoCount, &videoCount, &unsupportedCount)
 	if err != nil {
 		return 0, 0, 0, 0, false
 	}
@@ -547,12 +700,22 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 		if globalIndex >= 0 {
 			responseIndex = globalIndex
 		}
+		logoAsset := strings.TrimSpace(library.LogoAsset)
+		if logoAsset == "" {
+			cacheKey := config.NormalizeStoragePath(library.Path)
+			if cached, ok := libraryLogoAssetCache.Load(cacheKey); ok {
+				logoAsset, _ = cached.(string)
+			} else {
+				_, logoAsset = resolveLibraryLogoPath(cfg, library)
+				libraryLogoAssetCache.Store(cacheKey, logoAsset)
+			}
+		}
 		item := libraryResponse{
 			Index:       responseIndex,
 			ID:          library.ID,
 			Name:        library.Name,
 			Path:        library.Path,
-			LogoAsset:   library.LogoAsset,
+			LogoAsset:   logoAsset,
 			AccentColor: library.AccentColor,
 			Status:      status,
 			Available:   status != config.LibraryStatusMissing && status != config.LibraryStatusLocked,
@@ -565,6 +728,11 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 		item.TotalSizeText = stats.TotalSizeText
 		item.PhotoCount = stats.PhotoCount
 		item.VideoCount = stats.VideoCount
+		item.RebuildRequired = cfg.LegacyDataLayoutDetected() &&
+			stats.LastScannedAt == "" && stats.PhotoCount == 0 && stats.VideoCount == 0
+		if item.RebuildRequired {
+			item.UnavailableReason = "检测到旧版服务器数据，请重新构建全部数据"
+		}
 		if !item.Available && status == config.LibraryStatusMissing {
 			item.UnavailableReason = "资源库路径当前不可用"
 		}
@@ -578,8 +746,8 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 				item.LockedByUsername = strings.TrimSpace(availability.OwnerUsername)
 			}
 		}
-		if library.LogoAsset != "" {
-			item.LogoImageURL = fmt.Sprintf("/api/settings/libraries/%d/logo?v=%s", responseIndex, library.LogoAsset)
+		if logoAsset != "" {
+			item.LogoImageURL = fmt.Sprintf("/api/settings/libraries/%d/logo?v=%s", responseIndex, url.QueryEscape(logoAsset))
 		}
 		resp = append(resp, item)
 	}
@@ -898,6 +1066,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 				ExperimentalRestoreLastView:   req.ExperimentalRestoreLastView,
 				ContinueLastVideoPosition:     req.ContinueLastVideoPosition,
 				WarmEnabled:                   req.WarmEnabled,
+				LightboxUIIdleSeconds:         req.LightboxUIIdleSeconds,
 				ThrottledVideoSeek:            req.ThrottledVideoSeek,
 				VideoSeekThrottleMS:           req.VideoSeekThrottleMS,
 				VideoVolumeSwipeSensitivity:   req.VideoVolumeSwipeSensitivity,
@@ -933,7 +1102,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			})
 			return
 		}
-		requiresRestart := settingsProfileRequiresRestart(cfg, prevProfile, nextProfile, nextPort) || settingsLibrariesChanged(cfg.Libraries, req.Libraries)
+		requiresRestart := settingsProfileRequiresRestart(cfg, prevProfile, nextProfile, nextPort)
 		nextGlobal := *cfg
 		nextGlobal.Port = nextPort
 		nextGlobal.ActiveProfile = username
@@ -941,6 +1110,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		nextGlobal.Libraries = append([]config.Library(nil), req.Libraries...)
 		nextGlobal.Libraries = preserveLibraryOwners(cfg.Libraries, nextGlobal.Libraries)
 		nextGlobal.Libraries = preserveLibraryStatuses(cfg.Libraries, nextGlobal.Libraries)
+		nextGlobal.NormalizeLibraries()
 		if hooks.ValidateLibrarySelection != nil {
 			if err := hooks.ValidateLibrarySelection(&nextGlobal, username, nextProfile.ActiveLibraryID); err != nil {
 				var requestErr *RequestError
@@ -971,6 +1141,10 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			return
 		}
 		nextGlobal.ApplyProfile(nextProfile)
+		if err := persistChangedPortableLibraryMetadata(cfg.Libraries, &nextGlobal); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if err := nextGlobal.Save(); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -987,7 +1161,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			_ = os.MkdirAll(prevThumbnailDir, 0755)
 		}
 		message := "设置已保存"
-		if role == config.UserRoleAdmin {
+		if role == config.UserRoleAdmin && requiresRestart {
 			message = "设置已保存，涉及服务端行为的变更在重启后完全生效"
 		}
 		if prevThumbnailSize != nextProfile.ThumbnailSize {
@@ -1058,7 +1232,7 @@ func handleShutdownApp(shutdown func() error) gin.HandlerFunc {
 func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		username := currentUsername(c)
-		_, globalIndex, err := visibleLibraryByIndex(cfg, username, c.Param("index"))
+		library, globalIndex, err := visibleLibraryByIndex(cfg, username, c.Param("index"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -1076,43 +1250,26 @@ func handleUploadLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		assetDir, err := cfg.LibraryAssetsDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if err := os.MkdirAll(assetDir, 0755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		fileName := fmt.Sprintf("library-%d-%d.png", globalIndex, time.Now().UnixNano())
-		destPath := filepath.Join(assetDir, fileName)
 		src, err := file.Open()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取上传文件失败"})
 			return
 		}
 		defer src.Close()
-		if err := imgpkg.SaveSquareLibraryLogo(src, imgpkg.DetectMimeType(file.Filename), destPath, imgpkg.DefaultLibraryLogoEdge); err != nil {
+		if err := savePortableLibraryLogo(library, src, imgpkg.DetectMimeType(file.Filename)); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
 		nextCfg := *cfg
 		nextCfg.Libraries = append([]config.Library(nil), cfg.Libraries...)
-		previous := nextCfg.Libraries[globalIndex].LogoAsset
-		nextCfg.Libraries[globalIndex].LogoAsset = fileName
+		nextCfg.Libraries[globalIndex].LogoAsset = portableLibraryLogoName
 		if err := nextCfg.Save(); err != nil {
-			_ = os.Remove(destPath)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		cfg.Libraries = append([]config.Library(nil), nextCfg.Libraries...)
 
-		if previous != "" && previous != fileName {
-			_ = os.Remove(filepath.Join(assetDir, previous))
-		}
 		profile, ok := requestProfile(c, cfg)
 		if !ok {
 			return
@@ -1132,15 +1289,8 @@ func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		assetDir, err := cfg.LibraryAssetsDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
 		nextCfg := *cfg
 		nextCfg.Libraries = append([]config.Library(nil), cfg.Libraries...)
-		previous := nextCfg.Libraries[globalIndex].LogoAsset
 		nextCfg.Libraries[globalIndex].LogoAsset = ""
 		if err := nextCfg.Save(); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1148,9 +1298,7 @@ func handleDeleteLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 		}
 		cfg.Libraries = append([]config.Library(nil), nextCfg.Libraries...)
 
-		if previous != "" {
-			_ = os.Remove(filepath.Join(assetDir, previous))
-		}
+		_ = os.Remove(portableLibraryLogoPath(cfg.Libraries[globalIndex]))
 		profile, ok := requestProfile(c, cfg)
 		if !ok {
 			return
@@ -1259,16 +1407,6 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		assetDir, err := cfg.LibraryAssetsDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if err := os.MkdirAll(assetDir, 0755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 		username := currentUsername(c)
 		for _, library := range libraries {
@@ -1277,18 +1415,17 @@ func handleRefreshLibraryLogos(cfg *config.Config) gin.HandlerFunc {
 				result.Skipped++
 				continue
 			}
-			if strings.TrimSpace(library.LogoAsset) != "" && !req.ReplaceExisting && libraryLogoAssetExists(cfg, library.LogoAsset) {
+			if !req.ReplaceExisting && libraryLogoAssetExists(cfg, library) {
 				result.Skipped++
 				continue
 			}
-			updatedProfile, _, err := ensureLibraryLogoAsset(cfg, username, library.ID, req.ReplaceExisting, rng)
+			_, refreshedAsset, err := ensureLibraryLogoAsset(cfg, username, library.ID, req.ReplaceExisting, rng)
 			if err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", library.Name, err))
 				continue
 			}
-			if updatedProfile != nil {
-				profile = updatedProfile
+			if refreshedAsset != "" {
 				result.Updated++
 			} else {
 				result.Skipped++
@@ -1309,12 +1446,6 @@ func settingsProfileRequiresRestart(cfg *config.Config, prevProfile *config.Prof
 		return false
 	}
 	if normalizeSettingsPort(cfg.Port) != normalizeSettingsPort(nextPort) {
-		return true
-	}
-	if config.NormalizeStoragePath(prevProfile.StoragePath) != config.NormalizeStoragePath(nextProfile.StoragePath) {
-		return true
-	}
-	if normalizeSettingsLibraryID(prevProfile.ActiveLibraryID) != normalizeSettingsLibraryID(nextProfile.ActiveLibraryID) {
 		return true
 	}
 	if config.NormalizeStoragePath(prevProfile.ThumbnailDir) != config.NormalizeStoragePath(nextProfile.ThumbnailDir) {
@@ -1361,16 +1492,9 @@ func normalizeSettingsLibraryID(id string) string {
 	return builder.String()
 }
 
-func libraryLogoAssetExists(cfg *config.Config, asset string) bool {
-	if cfg == nil || strings.TrimSpace(asset) == "" {
-		return false
-	}
-	assetDir, err := cfg.LibraryAssetsDir()
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(filepath.Join(assetDir, filepath.Base(strings.TrimSpace(asset))))
-	return err == nil
+func libraryLogoAssetExists(cfg *config.Config, library config.Library) bool {
+	path, _ := resolveLibraryLogoPath(cfg, library)
+	return path != ""
 }
 
 func ensureLibraryLogoAsset(cfg *config.Config, username string, libraryID string, replaceExisting bool, rng *rand.Rand) (*config.Profile, string, error) {
@@ -1382,19 +1506,11 @@ func ensureLibraryLogoAsset(cfg *config.Config, username string, libraryID strin
 		return nil, "", fmt.Errorf("资源库索引无效")
 	}
 	library := cfg.Libraries[index]
-	previousAsset := strings.TrimSpace(library.LogoAsset)
-	if previousAsset != "" && !replaceExisting && libraryLogoAssetExists(cfg, previousAsset) {
-		return nil, previousAsset, nil
+	if !replaceExisting && libraryLogoAssetExists(cfg, library) {
+		return nil, portableLibraryLogoName, nil
 	}
 	sourcePath, err := randomLibraryLogoThumbnailSource(cfg, library, rng)
 	if err != nil {
-		return nil, "", err
-	}
-	assetDir, err := cfg.LibraryAssetsDir()
-	if err != nil {
-		return nil, "", err
-	}
-	if err := os.MkdirAll(assetDir, 0755); err != nil {
 		return nil, "", err
 	}
 	file, err := os.Open(sourcePath)
@@ -1403,35 +1519,31 @@ func ensureLibraryLogoAsset(cfg *config.Config, username string, libraryID strin
 	}
 	defer file.Close()
 
-	fileName := fmt.Sprintf("library-%d-%d.png", index, time.Now().UnixNano())
-	destPath := filepath.Join(assetDir, fileName)
-	if err := imgpkg.SaveSquareLibraryLogo(file, imgpkg.DetectMimeType(sourcePath), destPath, imgpkg.DefaultLibraryLogoEdge); err != nil {
-		_ = os.Remove(destPath)
+	if err := savePortableLibraryLogo(library, file, imgpkg.DetectMimeType(sourcePath)); err != nil {
 		return nil, "", err
 	}
 
 	nextCfg := *cfg
 	nextCfg.Libraries = append([]config.Library(nil), cfg.Libraries...)
-	nextCfg.Libraries[index].LogoAsset = fileName
+	nextCfg.Libraries[index].LogoAsset = portableLibraryLogoName
 	if err := nextCfg.Save(); err != nil {
-		_ = os.Remove(destPath)
 		return nil, "", err
 	}
 	cfg.Libraries = append([]config.Library(nil), nextCfg.Libraries...)
-	if previousAsset != "" && previousAsset != fileName {
-		_ = os.Remove(filepath.Join(assetDir, filepath.Base(previousAsset)))
-	}
 	_ = username
-	return nil, fileName, nil
+	return nil, portableLibraryLogoName, nil
 }
 
 func randomLibraryLogoThumbnailSource(cfg *config.Config, library config.Library, rng *rand.Rand) (string, error) {
-	root := strings.TrimSpace(cfg.ThumbnailDir)
+	root, err := cfg.ThumbnailStoragePathForStorage(library.Path)
+	if err != nil {
+		return "", err
+	}
 	libraryID := normalizeSettingsLibraryID(library.ID)
-	if root == "" || libraryID == "" {
+	if libraryID == "" {
 		return "", fmt.Errorf("未找到可用缩略图")
 	}
-	return randomLibraryLogoSource(filepath.Join(config.NormalizeStoragePath(root), libraryID), rng)
+	return randomLibraryLogoSource(filepath.Join(root, libraryID), rng)
 }
 
 func randomLibraryLogoSource(root string, rng *rand.Rand) (string, error) {
@@ -1487,9 +1599,9 @@ func handleServeLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		fileName := strings.TrimSpace(library.LogoAsset)
-		if fileName == "" || !libraryLogoAssetExists(cfg, fileName) {
-			updatedProfile, refreshedAsset, refreshErr := ensureLibraryLogoAsset(cfg, username, library.ID, false, rand.New(rand.NewSource(time.Now().UnixNano())))
+		logoPath, _ := resolveLibraryLogoPath(cfg, library)
+		if logoPath == "" {
+			_, _, refreshErr := ensureLibraryLogoAsset(cfg, username, library.ID, false, rand.New(rand.NewSource(time.Now().UnixNano())))
 			if refreshErr != nil {
 				if os.IsNotExist(refreshErr) || strings.Contains(refreshErr.Error(), "未找到可用图片") {
 					c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
@@ -1498,18 +1610,16 @@ func handleServeLibraryLogo(cfg *config.Config) gin.HandlerFunc {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "资源库头像生成失败"})
 				return
 			}
-			_ = updatedProfile
-			fileName = refreshedAsset
 			if globalIndex >= 0 && globalIndex < len(cfg.Libraries) {
 				library = cfg.Libraries[globalIndex]
 			}
+			logoPath, _ = resolveLibraryLogoPath(cfg, library)
 		}
-		assetDir, err := cfg.LibraryAssetsDir()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if logoPath == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 			return
 		}
-		c.File(filepath.Join(assetDir, filepath.Base(fileName)))
+		c.File(logoPath)
 	}
 }
 

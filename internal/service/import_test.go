@@ -495,7 +495,7 @@ func TestImportExistingPhotos_RemovesMovedPhotoFromOldFolderAlbum(t *testing.T) 
 	}
 }
 
-func TestImportExistingPhotos_DeletesUserCreatedAlbums(t *testing.T) {
+func TestImportExistingPhotos_PreservesUserCreatedAlbums(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	repo := svc.repo.(*mockRepo)
 	customAlbum, err := svc.CreateAlbum("用户自建", "旧相册", 1)
@@ -512,15 +512,25 @@ func TestImportExistingPhotos_DeletesUserCreatedAlbums(t *testing.T) {
 	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
 		t.Fatalf("导入失败: %v", err)
 	}
-	if album, _ := repo.GetAlbumByID(customAlbum.ID, 1); album != nil {
-		t.Fatalf("扫描后用户自建相册应被删除，得到 %+v", album)
+	if album, _ := repo.GetAlbumByID(customAlbum.ID, 1); album == nil {
+		t.Fatal("扫描不应删除用户自建相册")
 	}
 	albums, err := svc.ListAlbums(1)
 	if err != nil {
 		t.Fatalf("查询相册失败: %v", err)
 	}
-	if len(albums) != 1 || autoFolderAlbumPath(albums[0]) != "真实文件夹" {
-		t.Fatalf("只应展示实际文件夹相册，得到 %+v", albums)
+	seenFolder := false
+	seenPersonal := false
+	for _, album := range albums {
+		if album.ID == customAlbum.ID {
+			seenPersonal = true
+		}
+		if autoFolderAlbumPath(album) == "真实文件夹" {
+			seenFolder = true
+		}
+	}
+	if !seenFolder || !seenPersonal {
+		t.Fatalf("应同时保留用户相册和实际文件夹相册，得到 %+v", albums)
 	}
 }
 

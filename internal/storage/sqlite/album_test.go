@@ -717,3 +717,150 @@ func TestFolderAlbumCoverUUIDFallsBackToDescendantPhoto(t *testing.T) {
 		t.Fatalf("相册列表也应递归使用子级照片封面，得到 %#v", listedParent)
 	}
 }
+
+func TestFolderAlbumTrashLifecycle_GroupsTreeAndExcludesMediaTrash(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	parent := &storage.Album{
+		Name:          "旅行",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "旅行",
+		CreatedBy:     1,
+		CreatedAt:     now,
+	}
+	child := &storage.Album{
+		Name:          "旅行/第一天",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "旅行/第一天",
+		CreatedBy:     1,
+		CreatedAt:     now,
+	}
+	personal := &storage.Album{Name: "个人相册", CreatedBy: 1, CreatedAt: now}
+	for _, album := range []*storage.Album{parent, child, personal} {
+		if err := db.CreateAlbum(album); err != nil {
+			t.Fatalf("创建相册失败: %v", err)
+		}
+	}
+
+	photoInRoot := makePhoto(1, now)
+	photoInRoot.UUID = "folder-root-photo"
+	photoInRoot.SourceRelPath = "旅行/root.jpg"
+	photoInChild := makePhoto(1, now.Add(time.Second))
+	photoInChild.UUID = "folder-child-photo"
+	photoInChild.SourceRelPath = "旅行/第一天/child.jpg"
+	photoOutside := makePhoto(1, now.Add(2*time.Second))
+	photoOutside.UUID = "outside-photo"
+	photoOutside.SourceRelPath = "旅行2/outside.jpg"
+	for _, photo := range []*storage.Photo{photoInRoot, photoInChild, photoOutside} {
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatalf("保存媒体失败: %v", err)
+		}
+	}
+
+	entry, err := db.SoftDeleteFolderAlbumTree(parent.ID, 1, 1, "folder-group-1")
+	if err != nil {
+		t.Fatalf("软删除文件夹树失败: %v", err)
+	}
+	if entry.PhotoCount != 2 || entry.FolderCount != 2 {
+		t.Fatalf("批次统计错误: %+v", entry)
+	}
+
+	trashedMedia, err := db.ListTrashedPhotos(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil {
+		t.Fatalf("查询普通媒体回收站失败: %v", err)
+	}
+	if len(trashedMedia.Photos) != 0 {
+		t.Fatalf("文件夹批次媒体不应重复出现在普通媒体回收站，得到 %d 条", len(trashedMedia.Photos))
+	}
+	trashAlbums, err := db.ListTrashedFolderAlbums(1)
+	if err != nil {
+		t.Fatalf("查询文件夹回收站失败: %v", err)
+	}
+	if len(trashAlbums) != 1 || trashAlbums[0].GroupID != "folder-group-1" {
+		t.Fatalf("应聚合为 1 个文件夹批次，得到 %+v", trashAlbums)
+	}
+	if trashAlbums[0].CoverUUID != "folder-child-photo" {
+		t.Fatalf("文件夹回收站应返回批次封面 UUID，得到 %q", trashAlbums[0].CoverUUID)
+	}
+	if albums, err := db.ListAlbums(1); err != nil {
+		t.Fatalf("查询活动相册失败: %v", err)
+	} else if len(albums) != 1 || albums[0].ID != personal.ID {
+		t.Fatalf("软删除文件夹后只应保留个人相册，得到 %+v", albums)
+	}
+
+	if err := db.RestoreFolderAlbumTrash("folder-group-1", 1); err != nil {
+		t.Fatalf("恢复文件夹批次失败: %v", err)
+	}
+	if photo, err := db.GetPhotoByID(photoInChild.ID, 1); err != nil || photo == nil {
+		t.Fatalf("恢复后子目录媒体不可见: photo=%+v err=%v", photo, err)
+	}
+
+	if _, err := db.SoftDeleteFolderAlbumTree(parent.ID, 1, 1, "folder-group-2"); err != nil {
+		t.Fatalf("再次软删除文件夹树失败: %v", err)
+	}
+	deleted, err := db.HardDeleteFolderAlbumTrash("folder-group-2", 1)
+	if err != nil {
+		t.Fatalf("永久删除文件夹批次失败: %v", err)
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("永久删除应返回 2 条媒体记录，得到 %d", len(deleted))
+	}
+	if photo, err := db.GetPhotoByIDAny(photoInRoot.ID, 1); err != nil || photo != nil {
+		t.Fatalf("永久删除后根目录媒体记录仍存在: photo=%+v err=%v", photo, err)
+	}
+	trashAlbums, err = db.ListTrashedFolderAlbums(1)
+	if err != nil {
+		t.Fatalf("再次查询文件夹回收站失败: %v", err)
+	}
+	if len(trashAlbums) != 0 {
+		t.Fatalf("永久删除后文件夹批次应为空，得到 %+v", trashAlbums)
+	}
+}
+
+func TestFolderAlbumTrashTreatsPatternCharactersLiterally(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	percentFolder := &storage.Album{
+		Name:          "100%",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "100%",
+		CreatedBy:     1,
+		CreatedAt:     now,
+	}
+	otherFolder := &storage.Album{
+		Name:          "100X",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "100X",
+		CreatedBy:     1,
+		CreatedAt:     now,
+	}
+	if err := db.CreateAlbum(percentFolder); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateAlbum(otherFolder); err != nil {
+		t.Fatal(err)
+	}
+	percentPhoto := makePhoto(1, now)
+	percentPhoto.UUID = "percent-folder-photo"
+	percentPhoto.SourceRelPath = "100%/photo.jpg"
+	otherPhoto := makePhoto(1, now.Add(time.Second))
+	otherPhoto.UUID = "other-folder-photo"
+	otherPhoto.SourceRelPath = "100X/photo.jpg"
+	if err := db.SavePhoto(percentPhoto); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SavePhoto(otherPhoto); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.SoftDeleteFolderAlbumTree(percentFolder.ID, 1, 1, "literal-group"); err != nil {
+		t.Fatal(err)
+	}
+	if photo, err := db.GetPhotoByID(otherPhoto.ID, 1); err != nil || photo == nil {
+		t.Fatalf("相邻目录不应被误删: photo=%+v err=%v", photo, err)
+	}
+}

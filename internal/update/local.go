@@ -322,8 +322,7 @@ func launchRestartWatcher(stageRoot string, signalPath string, options StartOpti
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("cmd", "/C", scriptPath)
 		cmd.Dir = strings.TrimSpace(options.WorkingDir)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		cmd.SysProcAttr = hiddenWindowsProcessAttr()
 		return cmd.Start()
 	}
 	cmd := exec.Command("/bin/sh", scriptPath)

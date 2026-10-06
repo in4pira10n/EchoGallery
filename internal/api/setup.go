@@ -3,11 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -68,6 +70,7 @@ func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() e
 	r.GET("/register", handleRegisterPage(staticFS))
 	r.GET("/api/setup/state", ctrl.handleGetSetupState())
 	r.POST("/api/setup/init", ctrl.handleInitialize())
+	r.POST("/api/setup/import", ctrl.handleImportTransfer())
 	r.POST("/api/setup/select-library", ctrl.handleSelectLibrary())
 	r.POST("/api/auth/login", ctrl.handleSetupLogin())
 	r.POST("/api/auth/register", ctrl.handleSetupRegister())
@@ -95,6 +98,60 @@ func (s *setupController) loadConfigForAuth(c *gin.Context) (*config.Config, boo
 func (s *setupController) handleGetSetupState() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, s.state)
+	}
+}
+
+func (s *setupController) handleImportTransfer() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		file, err := c.FormFile("file")
+		if err != nil || file.Size <= 0 || file.Size > 64<<20 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请选择 64 MB 以内的 EchoGallery 配置包"})
+			return
+		}
+		input, err := file.Open()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		defer input.Close()
+		data, err := io.ReadAll(io.LimitReader(input, (64<<20)+1))
+		if err != nil || len(data) > 64<<20 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "读取配置包失败"})
+			return
+		}
+		var target *config.Config
+		if loaded, loadErr := config.Load(); loadErr == nil {
+			target = loaded
+		} else {
+			appDataDir, pathErr := config.DefaultAppDataDir()
+			if pathErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": pathErr.Error()})
+				return
+			}
+			target = &config.Config{
+				Port: s.state.Port, AppDataDir: appDataDir,
+				ThumbnailDir: filepath.Join(appDataDir, "thumbnails"),
+				TrashDir:     filepath.Join(appDataDir, "Trash"),
+			}
+		}
+		manifest, _, inspectErr := transferZipFiles(data)
+		if inspectErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": inspectErr.Error()})
+			return
+		}
+		if err := importConfigTransferBundle(target, data); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message": "配置已导入，应用正在重启", "browser_settings": manifest.BrowserSettings,
+		})
+		if s.restart != nil {
+			go func() {
+				time.Sleep(250 * time.Millisecond)
+				_ = s.restart()
+			}()
+		}
 	}
 }
 
@@ -199,16 +256,23 @@ func (s *setupController) handleInitialize() gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建资源库目录失败: %v", err)})
 				return
 			}
-		}
-		if thumbDir, err := cfg.ThumbnailStoragePath(); err == nil {
-			if err := os.MkdirAll(thumbDir, 0755); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建缩略图目录失败: %v", err)})
+			if err := os.MkdirAll(config.LibraryDataRoot(library.Path), 0755); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建资源库数据目录失败: %v", err)})
+				return
+			}
+			if err := os.MkdirAll(filepath.Join(config.LibraryDataRoot(library.Path), ".trash"), 0755); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建资源库回收站目录失败: %v", err)})
 				return
 			}
 		}
-		if trashDir, err := cfg.TrashPath(); err == nil {
-			if err := os.MkdirAll(trashDir, 0755); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建回收站目录失败: %v", err)})
+		for _, library := range cfg.Libraries {
+			thumbDir, err := cfg.ThumbnailStoragePathForStorage(library.Path)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("计算缩略图目录失败: %v", err)})
+				return
+			}
+			if err := os.MkdirAll(thumbDir, 0755); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("创建缩略图目录失败: %v", err)})
 				return
 			}
 		}

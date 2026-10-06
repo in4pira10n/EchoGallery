@@ -59,6 +59,37 @@ func TestFileManagerRevealCommand(t *testing.T) {
 	}
 }
 
+func TestMoveDirectoryToTrashPreservesStructure(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "library", "旅行")
+	nested := filepath.Join(source, "第一天")
+	destination := filepath.Join(root, ".echogallery", ".trash", "folders", "batch-1", "旅行")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("创建源目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "root.jpg"), []byte("root"), 0644); err != nil {
+		t.Fatalf("写入根目录媒体失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "child.jpg"), []byte("child"), 0644); err != nil {
+		t.Fatalf("写入子目录媒体失败: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		t.Fatalf("创建回收站父目录失败: %v", err)
+	}
+
+	if err := moveDirectoryToTrash(source, destination); err != nil {
+		t.Fatalf("移动整棵目录失败: %v", err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("源目录应已被整体移走，stat err=%v", err)
+	}
+	for _, relative := range []string{"root.jpg", filepath.Join("第一天", "child.jpg")} {
+		if _, err := os.Stat(filepath.Join(destination, relative)); err != nil {
+			t.Fatalf("回收站缺少保留结构的文件 %s: %v", relative, err)
+		}
+	}
+}
+
 func TestSystemOpenCommand(t *testing.T) {
 	originalOS := currentOS
 	t.Cleanup(func() { currentOS = originalOS })

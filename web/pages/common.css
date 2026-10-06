@@ -173,10 +173,9 @@ select.input {
 }
 
 .login-wrap {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
-  align-items: center;
-  justify-content: center;
+  place-items: center;
   padding: 32px;
   background:
     radial-gradient(circle at 14% 18%, color-mix(in srgb, var(--accent) 18%, transparent) 0 22%, transparent 38%),

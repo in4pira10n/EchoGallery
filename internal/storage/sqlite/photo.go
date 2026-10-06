@@ -932,7 +932,10 @@ func (s *DB) ListTrashedPhotos(params storage.ListPhotosParams) (*storage.PhotoP
 	if limit <= 0 {
 		limit = 30
 	}
-	where := "uploaded_by = ? AND deleted_at IS NOT NULL"
+	// Folder deletions are represented by their folder batch in the recycle
+	// bin. Keep their media out of the ordinary media stream so the same files
+	// are not shown once per photo and once per folder batch.
+	where := "uploaded_by = ? AND deleted_at IS NOT NULL AND deleted_group_id = ''"
 	args := []interface{}{params.UserID}
 	if params.MediaKind != "" {
 		where += " AND media_kind = ?"
@@ -1115,7 +1118,7 @@ func collectPhotoPage(rows *sql.Rows, limit int, cursorTimeFn func(*storage.Phot
 // SoftDeletePhoto 软删除图片
 func (s *DB) SoftDeletePhoto(id int64, userID int64, deletedBy int64) error {
 	result, err := s.db.Exec(`
-		UPDATE photos SET deleted_at = ?, deleted_by = ?
+		UPDATE photos SET deleted_at = ?, deleted_by = ?, deleted_group_id = ''
 		WHERE id = ? AND uploaded_by = ? AND deleted_at IS NULL`,
 		time.Now(), deletedBy, id, userID)
 	if err != nil {
@@ -1131,7 +1134,7 @@ func (s *DB) SoftDeletePhoto(id int64, userID int64, deletedBy int64) error {
 // RestorePhoto 从回收站恢复图片
 func (s *DB) RestorePhoto(id int64, userID int64) error {
 	result, err := s.db.Exec(`
-		UPDATE photos SET deleted_at = NULL, deleted_by = NULL
+		UPDATE photos SET deleted_at = NULL, deleted_by = NULL, deleted_group_id = ''
 		WHERE id = ? AND uploaded_by = ? AND deleted_at IS NOT NULL`,
 		id, userID)
 	if err != nil {
@@ -1150,13 +1153,16 @@ func (s *DB) HardDeletePhoto(id int64, userID int64) error {
 	return err
 }
 
-// HardDeleteTrashedPhotos 清空回收站，返回需要删除文件的记录。
+// HardDeleteTrashedPhotos 清空回收站，返回需要逐文件移动的普通媒体记录。
+// 文件夹删除批次的源目录由 PhotoService 按整棵目录树处理，但其媒体记录
+// 仍在这里一并删除。
 func (s *DB) HardDeleteTrashedPhotos(userID int64) ([]*storage.Photo, error) {
 	rows, err := s.db.Query(`
 		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 		       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
 		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
-		FROM photos WHERE uploaded_by = ? AND deleted_at IS NOT NULL`, userID)
+		FROM photos
+		WHERE uploaded_by = ? AND deleted_at IS NOT NULL AND deleted_group_id = ''`, userID)
 	if err != nil {
 		return nil, err
 	}

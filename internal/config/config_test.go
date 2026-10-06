@@ -7,7 +7,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -430,7 +429,7 @@ func TestDatabasePath_DiffersAcrossStoragePaths(t *testing.T) {
 	}
 }
 
-func TestDatabasePath_UsesEchoGalleryPrefix(t *testing.T) {
+func TestDatabasePath_IsScopedToLibrary(t *testing.T) {
 	dir := t.TempDir()
 	cfg := validConfig()
 	cfg.AppDataDir = dir
@@ -440,8 +439,9 @@ func TestDatabasePath_UsesEchoGalleryPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("获取数据库路径失败: %v", err)
 	}
-	if !strings.HasPrefix(filepath.Base(dbPath), "echogallery-") {
-		t.Fatalf("期望数据库文件前缀为 echogallery，得到 %s", filepath.Base(dbPath))
+	want := filepath.Join(cfg.StoragePath, ".echogallery", "metadata.sqlite")
+	if dbPath != want {
+		t.Fatalf("期望数据库位于资源库 .echogallery，得到 %s", dbPath)
 	}
 }
 

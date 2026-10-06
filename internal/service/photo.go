@@ -1,7 +1,7 @@
 package service
 
 import (
-	"errors"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,50 +31,59 @@ type thumbnailWorkItem struct {
 
 // PhotoService 图片业务逻辑
 type PhotoService struct {
-	repo               storage.Repository
-	sourcePath         string
-	dataPath           string
-	thumbnailPath      string
-	thumbnailLibraryID string
-	thumbnailSize      int
-	trashPath          string
-	syncThumbnail      bool // 测试用：同步生成缩略图
-	thumbPriorityHeavy chan thumbnailWorkItem
-	thumbJobsHeavy     chan thumbnailWorkItem
-	thumbPriorityImage chan thumbnailWorkItem
-	thumbJobsImage     chan thumbnailWorkItem
-	thumbPriorityVideo chan thumbnailWorkItem
-	thumbJobsVideo     chan thumbnailWorkItem
-	thumbJobsMu        sync.Mutex
-	thumbPending       map[string]struct{}
-	thumbUrgent        map[string]struct{}
-	thumbBuildMu       sync.Mutex
-	thumbBuild         *thumbnailBuildTask
-	playbackBuildMu    sync.Mutex
-	playbackBuild      *playbackCacheBuildTask
-	videoThumbRefresh  *videoThumbnailRefreshTask
-	exifBackfillMu     sync.Mutex
-	exifBackfill       *exifBackfillTask
-	trashLinksMu       sync.Mutex
+	repo                 storage.Repository
+	sourcePath           string
+	dataPath             string
+	thumbnailPath        string
+	thumbnailLibraryID   string
+	legacyThumbnailRoot  string
+	legacyReadOnly       bool
+	thumbnailBuildActive atomic.Bool
+	thumbnailSize        int
+	trashPath            string
+	syncThumbnail        bool // 测试用：同步生成缩略图
+	thumbPriorityHeavy   chan thumbnailWorkItem
+	thumbJobsHeavy       chan thumbnailWorkItem
+	thumbPriorityImage   chan thumbnailWorkItem
+	thumbJobsImage       chan thumbnailWorkItem
+	thumbPriorityVideo   chan thumbnailWorkItem
+	thumbJobsVideo       chan thumbnailWorkItem
+	thumbJobsMu          sync.Mutex
+	thumbPending         map[string]struct{}
+	thumbUrgent          map[string]struct{}
+	thumbBuildMu         sync.Mutex
+	thumbBuild           *thumbnailBuildTask
+	playbackBuildMu      sync.Mutex
+	playbackBuild        *playbackCacheBuildTask
+	videoThumbRefresh    *videoThumbnailRefreshTask
+	exifBackfillMu       sync.Mutex
+	exifBackfill         *exifBackfillTask
+}
+
+func (s *PhotoService) LibraryUserID(fallback int64) int64 {
+	if provider, ok := s.repo.(interface{ LibraryUserID(int64) int64 }); ok {
+		return provider.LibraryUserID(fallback)
+	}
+	return fallback
 }
 
 // NewPhotoService 创建图片服务
-func NewPhotoService(repo storage.Repository, sourcePath string, dataPath string, trashPath string) *PhotoService {
-	return newPhotoService(repo, sourcePath, dataPath, trashPath, true)
+func NewPhotoService(repo storage.Repository, sourcePath string, dataPath string, _ string) *PhotoService {
+	return newPhotoService(repo, sourcePath, dataPath, true)
 }
 
-func NewPhotoServiceWithoutWarmup(repo storage.Repository, sourcePath string, dataPath string, trashPath string) *PhotoService {
-	return newPhotoService(repo, sourcePath, dataPath, trashPath, false)
+func NewPhotoServiceWithoutWarmup(repo storage.Repository, sourcePath string, dataPath string, _ string) *PhotoService {
+	return newPhotoService(repo, sourcePath, dataPath, false)
 }
 
-func newPhotoService(repo storage.Repository, sourcePath string, dataPath string, trashPath string, startWorkers bool) *PhotoService {
+func newPhotoService(repo storage.Repository, sourcePath string, dataPath string, startWorkers bool) *PhotoService {
 	svc := &PhotoService{
 		repo:          repo,
 		sourcePath:    sourcePath,
 		dataPath:      dataPath,
 		thumbnailPath: dataPath,
 		thumbnailSize: imgpkg.DefaultThumbnailLongEdge,
-		trashPath:     trashPath,
+		trashPath:     filepath.Join(sourcePath, ".echogallery", ".trash"),
 		thumbPending:  make(map[string]struct{}),
 		thumbUrgent:   make(map[string]struct{}),
 	}
@@ -85,14 +94,14 @@ func newPhotoService(repo storage.Repository, sourcePath string, dataPath string
 }
 
 // newPhotoServiceSync 创建同步模式图片服务（仅用于测试）
-func newPhotoServiceSync(repo storage.Repository, sourcePath string, dataPath string, trashPath string) *PhotoService {
+func newPhotoServiceSync(repo storage.Repository, sourcePath string, dataPath string, _ string) *PhotoService {
 	return &PhotoService{
 		repo:          repo,
 		sourcePath:    sourcePath,
 		dataPath:      dataPath,
 		thumbnailPath: dataPath,
 		thumbnailSize: imgpkg.DefaultThumbnailLongEdge,
-		trashPath:     trashPath,
+		trashPath:     filepath.Join(sourcePath, ".echogallery", ".trash"),
 		syncThumbnail: true,
 		thumbPending:  make(map[string]struct{}),
 		thumbUrgent:   make(map[string]struct{}),
@@ -360,16 +369,17 @@ func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string)
 		s.cleanupRedundantThumbnailFiles(photo)
 		return true
 	}
-	for _, legacyPath := range []string{s.legacyShardedThumbnailPath(photo), s.legacyFlatThumbnailPath(photo)} {
+	for _, legacyPath := range s.legacyThumbnailCandidates(photo) {
 		if legacyPath == "" || legacyPath == targetPath || !resolveManagedFile(legacyPath) {
 			continue
 		}
-		if err := relocateManagedThumbnailFile(legacyPath, targetPath); err == nil {
-			s.cleanupRedundantThumbnailFiles(photo)
-			return true
-		}
+		return true
 	}
 	return false
+}
+
+func (s *PhotoService) thumbnailTargetExists(photo *storage.Photo) bool {
+	return photo != nil && resolveManagedFile(s.ThumbnailPath(photo))
 }
 
 func resolveManagedFile(path string) bool {
@@ -391,9 +401,16 @@ func (s *PhotoService) generateThumbnailForPhotoTier(photo *storage.Photo, tier 
 	if tier != thumbnailTierFull {
 		tier = thumbnailTierFull
 	}
-	if s.thumbnailExistsForTier(photo, tier) {
+	if s.thumbnailExistsForTier(photo, tier) && !s.thumbnailBuildIsActive() {
 		return nil
 	}
+	if s.legacyReadOnly && !s.thumbnailBuildIsActive() {
+		return fmt.Errorf("旧版缩略图仅可读取，请从设置页启动缩略图构建")
+	}
+	return s.writeThumbnailForPhoto(photo)
+}
+
+func (s *PhotoService) writeThumbnailForPhoto(photo *storage.Photo) error {
 	maxEdge := s.thumbnailLongEdge()
 	destPath := s.ThumbnailPath(photo)
 	if photo.MediaKind == storage.MediaKindVideo {
@@ -431,6 +448,34 @@ func (s *PhotoService) SetThumbnailRoot(path string) {
 
 func (s *PhotoService) SetThumbnailLibraryID(id string) {
 	s.thumbnailLibraryID = normalizeThumbnailLibraryID(id)
+}
+
+// SetLegacyThumbnailRoot enables read-only fallback to the old server-local layout.
+func (s *PhotoService) SetLegacyThumbnailRoot(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return
+	}
+	s.legacyThumbnailRoot = filepath.Clean(root)
+	s.legacyReadOnly = true
+}
+
+func (s *PhotoService) legacyManagedThumbnailRoot() string {
+	if s == nil || s.legacyThumbnailRoot == "" {
+		return ""
+	}
+	if s.thumbnailLibraryID == "" {
+		return s.legacyThumbnailRoot
+	}
+	return filepath.Join(s.legacyThumbnailRoot, s.thumbnailLibraryID)
+}
+
+func (s *PhotoService) thumbnailBuildIsActive() bool {
+	return s != nil && s.thumbnailBuildActive.Load()
+}
+
+func (s *PhotoService) LegacyThumbnailReadOnly() bool {
+	return s != nil && s.legacyReadOnly
 }
 
 func (s *PhotoService) SetThumbnailSize(size int) {
@@ -627,10 +672,25 @@ func (s *PhotoService) ThumbnailCandidates(photo *storage.Photo) []string {
 	if photo == nil {
 		return nil
 	}
+	return append([]string{s.ThumbnailPath(photo)}, s.legacyThumbnailCandidates(photo)...)
+}
+
+func (s *PhotoService) legacyThumbnailCandidates(photo *storage.Photo) []string {
+	if photo == nil {
+		return nil
+	}
+	root := s.legacyManagedThumbnailRoot()
+	if root == "" {
+		return []string{s.legacyShardedThumbnailPath(photo), s.legacyFlatThumbnailPath(photo)}
+	}
 	return []string{
-		s.ThumbnailPath(photo),
-		s.legacyShardedThumbnailPath(photo),
-		s.legacyFlatThumbnailPath(photo),
+		imgpkg.ThumbnailShardPath(root, photo.UUID),
+		imgpkg.ThumbnailFlatPath(root, photo.UUID),
+		filepath.Join(root, photo.UUID+".preview.webp"),
+		filepath.Join(root, photo.UUID+".build-preview.webp"),
+		filepath.Join(root, photo.UUID+".jpg"),
+		imgpkg.ThumbnailShardPath(s.legacyThumbnailRoot, photo.UUID),
+		imgpkg.ThumbnailFlatPath(s.legacyThumbnailRoot, photo.UUID),
 	}
 }
 
@@ -700,37 +760,48 @@ func (s *PhotoService) cleanupThumbnailArtifacts(photo *storage.Photo, fullExist
 	return cleaned
 }
 
-func relocateManagedThumbnailFile(srcPath string, destPath string) error {
+func copyManagedThumbnailFile(srcPath string, destPath string) error {
+	_, err := copyManagedThumbnailFileWithChecksum(srcPath, destPath)
+	return err
+}
+
+func copyManagedThumbnailFileWithChecksum(srcPath string, destPath string) ([32]byte, error) {
+	var empty [32]byte
 	if strings.TrimSpace(srcPath) == "" || strings.TrimSpace(destPath) == "" || srcPath == destPath {
-		return nil
+		return empty, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		return err
-	}
-	if err := os.Rename(srcPath, destPath); err == nil {
-		return nil
-	} else if linkErr, ok := err.(*os.LinkError); !ok || !errors.Is(linkErr.Err, syscall.EXDEV) {
-		return err
+		return empty, err
 	}
 	src, err := os.Open(srcPath)
 	if err != nil {
-		return err
+		return empty, err
 	}
 	defer src.Close()
-	dest, err := os.Create(destPath)
+	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".echogallery-thumb-copy-*")
 	if err != nil {
-		return err
+		return empty, err
 	}
-	defer dest.Close()
-	if _, err := io.Copy(dest, src); err != nil {
-		_ = os.Remove(destPath)
-		return err
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, hash), src); err != nil {
+		_ = tmp.Close()
+		return empty, err
 	}
-	if err := dest.Sync(); err != nil {
-		_ = os.Remove(destPath)
-		return err
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return empty, err
 	}
-	return os.Remove(srcPath)
+	if err := tmp.Close(); err != nil {
+		return empty, err
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return empty, err
+	}
+	var sum [32]byte
+	copy(sum[:], hash.Sum(nil))
+	return sum, nil
 }
 
 // ManagedMediaRelPath 返回应用内部托管媒体文件的相对路径。

@@ -4,14 +4,20 @@
       "pageTitle": "登录 - EchoGallery",
       "heroTitle": "欢迎回来",
       "heroCopy": "进入你的本地影像资源库，继续浏览、整理与回忆。",
-      "badge": "本地访问",
       "formTitle": "登录 EchoGallery",
+      "formNote": "使用你的本地账号继续进入当前资源库。",
       "usernameLabel": "用户名",
       "usernamePlaceholder": "请输入用户名",
       "passwordLabel": "密码",
       "passwordPlaceholder": "请输入密码",
       "submit": "登录",
       "registerLink": "注册新用户",
+      "panelFootnote": "所有数据仍保留在本地目录与当前实例中。",
+      "reasons": {
+        "duplicate": "该账号已在新页面登录，当前页面已退出",
+        "expired": "页面会话已过期，请重新登录",
+        "noLibrary": "当前没有可进入的资源库，请稍后再试"
+      },
       "errors": {
         "missingFields": "请输入用户名和密码",
         "network": "网络错误",
@@ -216,10 +222,15 @@
     },
     "logoCrop": {
       "title": "裁剪资源库头像",
-      "copy": "拖动画面并调整缩放，保存后将按这个 1:1 构图作为资源库头像。",
+      "copy": "拖动图片调整构图，或使用缩放控制；裁剪框内的内容会作为 1:1 资源库头像。",
       "alt": "资源库头像预览",
       "zoom": "缩放",
-      "reselect": "重新选择",
+      "zoomOut": "缩小",
+      "zoomIn": "放大",
+      "reset": "重置",
+      "cancel": "取消",
+      "hint": "可拖动图片；手机端也支持双指缩放。",
+      "processing": "正在裁剪…",
       "confirm": "使用裁剪结果"
     },
     "settings": {
@@ -239,7 +250,8 @@
         "libraries": {
           "title": "资源库",
           "copy": "管理当前用户可用资源库。",
-          "add": "添加资源库"
+          "add": "添加资源库",
+          "batchAdd": "批量添加资料库"
         },
         "batchWorkflow": {
           "title": "批量工作流",
@@ -321,6 +333,19 @@
           "deleteSuccess": "资源库已删除",
           "deleteTitle": "删除资源库",
           "deleteConfirm": "确定要删除资源库「{name}」吗？",
+          "batchTitle": "批量添加资料库",
+          "batchPathLabel": "文件夹路径",
+          "batchPathPlaceholder": "/Users/you/Pictures",
+          "batchExplore": "探索",
+          "batchExploring": "探索中…",
+          "batchSelectAll": "全选",
+          "batchEmpty": "当前文件夹没有可添加的一级子文件夹。",
+          "batchPending": "待创建的资料库",
+          "batchCreate": "创建",
+          "batchCreating": "创建中…",
+          "batchDiscoverFailed": "探索文件夹失败",
+          "batchCreateSuccess": "已添加 {count} 个资源库",
+          "batchNoNew": "没有新的资源库可添加",
           "unnamed": "未命名资源库"
         }
       },
@@ -330,6 +355,9 @@
         "thumbnailSize": "缩略图生成大小",
         "warmEnabled": "预热加载",
         "warmEnabledCopy": "提前预热缩略图与相邻媒体，关闭可减少额外后台请求。",
+        "uiIdle": "UI 自动隐藏",
+        "uiIdleTap": "点击切换",
+        "seconds": "{count} 秒",
         "throttledSeek": "节流模式",
         "throttledSeekCopy": "拖动进度条时按设定间隔才真正 seek 一次。",
         "seekThreshold": "seek 节流阈值",
@@ -436,6 +464,10 @@
         "copied": "分享链接已复制",
         "deleted": "分享链接已删除"
       },
+      "restart": {
+        "restarting": "EchoGallery 正在重启，请稍候重新连接。",
+        "refresh": "刷新"
+      },
       "batchWorkflow": {
         "progressAria": "批量工作流进度",
         "selectionTitle": "资源库范围",
@@ -446,15 +478,16 @@
         "aggressive": "高资源无人值守模式",
         "aggressiveCopy": "临时提高扫描与缩略图并发，优先缩短总耗时。",
         "advanced": "高级选项",
-        "moveLegacy": "整理旧版资源库",
-        "moveLegacyCopy": "为旧资源库补齐稳定 ID，并把旧缩略图迁移到按资源库 ID 隔离的新目录。",
+        "moveLegacy": "迁移旧版缩略图",
+        "moveLegacyCopy": "按旧版数据库的媒体路径与 UUID 精确匹配，复制缩略图到资源库 .echogallery/thumbnails；缺失的从原媒体补建。仅开启此项不会删除旧文件。",
         "cleanFiles": "清理文件",
-        "cleanFilesCopy": "清理旧 JPG、preview、build-preview 等遗留缩略图文件；不会删除其它资源库的缩略图目录。",
+        "cleanFilesCopy": "全部新版缩略图核对通过后，删除旧目录中对应媒体的缩略图及 JPG、preview 等变体；核对失败时保留旧文件。",
         "playbackCache": "转码 / 封装不支持的视频流",
         "playbackCacheCopy": "为 MKV、WMV、WMA 等浏览器不易直接播放的媒体预先生成播放兼容缓存。",
         "startBusy": "正在启动…",
         "startFull": "一键开始扫描并构建缩略图",
         "startScan": "开始批量扫描",
+        "directMigrate": "迁移旧版缩略图",
         "cancelWorkflow": "取消当前工作流",
         "cancelStage": "取消当前阶段",
         "metricLibrary": "资源库 {current} / {total}",
@@ -492,7 +525,7 @@
         "modeStandard": "标准资源模式",
         "phaseScan": "扫描",
         "phaseThumbnails": "缩略图",
-        "phaseMigrate": "整理旧版资源库",
+        "phaseMigrate": "迁移旧版缩略图",
         "phaseCleanup": "清理文件",
         "phaseMaintenance": "整理缩略图目录",
         "phasePlayback": "播放兼容缓存",

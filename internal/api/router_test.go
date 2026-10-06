@@ -54,6 +54,7 @@ type stubRegistrar struct {
 	getByUUID                      func(uuid string, userID int64) (*storage.Photo, error)
 	getFavorites                   func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	getTrash                       func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	getTrashAlbums                 func(userID int64) ([]*storage.FolderAlbumTrashEntry, error)
 	getTimeline                    func(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	locateTimelineWindow           func(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error)
 	getTimelineBefore              func(params storage.LocateTimelineParams) (*storage.PhotoPage, error)
@@ -81,6 +82,8 @@ type stubRegistrar struct {
 	revealAlbumInFinder            func(id int64, userID int64) error
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
+	restoreFolderAlbum             func(groupID string, userID int64) error
+	hardDeleteFolderAlbum          func(groupID string, userID int64) error
 	setPhotoFavorite               func(id int64, userID int64, favorite bool, superFavorite bool) error
 	thumbnailPath                  func(photo *storage.Photo) string
 }
@@ -166,6 +169,13 @@ func (s stubRegistrar) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*sto
 
 func (s stubRegistrar) GetTrash(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
 	return s.getTrash(params)
+}
+
+func (s stubRegistrar) GetTrashAlbums(userID int64) ([]*storage.FolderAlbumTrashEntry, error) {
+	if s.getTrashAlbums == nil {
+		return nil, nil
+	}
+	return s.getTrashAlbums(userID)
 }
 
 func (s stubRegistrar) GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
@@ -375,6 +385,20 @@ func (s stubRegistrar) RevealAlbumInFinder(id int64, userID int64) error {
 
 func (s stubRegistrar) RestorePhoto(id int64, userID int64) error {
 	return s.restorePhoto(id, userID)
+}
+
+func (s stubRegistrar) RestoreFolderAlbum(groupID string, userID int64) error {
+	if s.restoreFolderAlbum == nil {
+		return nil
+	}
+	return s.restoreFolderAlbum(groupID, userID)
+}
+
+func (s stubRegistrar) PermanentlyDeleteFolderAlbum(groupID string, userID int64) error {
+	if s.hardDeleteFolderAlbum == nil {
+		return nil
+	}
+	return s.hardDeleteFolderAlbum(groupID, userID)
 }
 
 func (s stubRegistrar) SetPhotoFavorite(id int64, userID int64, favorite bool, superFavorite bool) error {
@@ -1177,7 +1201,7 @@ func TestSettingsUpdate_VisitorOnlySavesOwnPreferences(t *testing.T) {
 	}
 }
 
-func TestSettingsUpdate_ReturnsRequiresRestartWhenSwitchingLibrary(t *testing.T) {
+func TestSettingsUpdate_SwitchesLibraryWithoutRestart(t *testing.T) {
 	cfg := testConfig()
 	cfg.AppDataDir = t.TempDir()
 	cfg.Port = 8080
@@ -1233,8 +1257,8 @@ func TestSettingsUpdate_ReturnsRequiresRestartWhenSwitchingLibrary(t *testing.T)
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("解析设置更新响应失败: %v", err)
 	}
-	if !resp.RequiresRestart {
-		t.Fatalf("期望切换资源库时返回 requires_restart=true，得到 %s", w.Body.String())
+	if resp.RequiresRestart {
+		t.Fatalf("期望切换资源库即时生效且无需重启，得到 %s", w.Body.String())
 	}
 }
 
@@ -1403,7 +1427,11 @@ func TestServeLibraryLogo_RegeneratesFromLibraryThumbnails(t *testing.T) {
 	cfg.Libraries = []config.Library{
 		{ID: "lib_a", Name: "A", Path: libA},
 	}
-	thumbPath := filepath.Join(cfg.ThumbnailDir, "lib_a", "ab", "cd", "sample.png")
+	thumbRoot, err := cfg.ThumbnailStoragePathForStorage(libA)
+	if err != nil {
+		t.Fatalf("计算资源库缩略图目录失败: %v", err)
+	}
+	thumbPath := filepath.Join(thumbRoot, "lib_a", "ab", "cd", "sample.png")
 	if err := os.MkdirAll(filepath.Dir(thumbPath), 0755); err != nil {
 		t.Fatalf("创建缩略图目录失败: %v", err)
 	}
@@ -1825,6 +1853,39 @@ func TestCreateAlbumMedia_Success(t *testing.T) {
 	}
 	if album.ID != 8 || album.Name != "旅行" {
 		t.Fatalf("新建相册响应不正确: %+v", album)
+	}
+}
+
+func TestCreateAlbumMedia_UsesLibraryOwnerRecord(t *testing.T) {
+	cfg := testConfig()
+	cfg.Users = []config.User{
+		{Username: "owner", PasswordHash: "hash", Role: config.UserRoleAdmin},
+		{Username: "administrator", PasswordHash: "hash", Role: config.UserRoleAdmin},
+	}
+	cfg.ActiveProfile = "administrator"
+	cfg.ActiveLibraryID = "lib_a"
+	cfg.StoragePath = "/libraries/a"
+	cfg.Libraries = []config.Library{{ID: "lib_a", Path: "/libraries/a", OwnerUsername: "owner"}}
+
+	var gotUserID int64
+	registrar := okRegistrar()
+	registrar.createAlbum = func(name, description string, userID int64) (*storage.Album, error) {
+		gotUserID = userID
+		return &storage.Album{ID: 9, Name: name, Description: description, CreatedBy: userID, CreatedAt: time.Now()}, nil
+	}
+	router := NewRouter(cfg, registrar)
+	req := httptest.NewRequest(http.MethodPost, "/api/media/albums", strings.NewReader(`{"name":"资源库相册"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "administrator")})
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("期望 201，得到 %d，响应: %s", w.Code, w.Body.String())
+	}
+	if gotUserID != 1 {
+		t.Fatalf("新建相册应写入资源库 owner user_id=1，得到 %d", gotUserID)
 	}
 }
 

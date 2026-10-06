@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -10,11 +11,17 @@ import (
 
 // DB SQLite 数据库封装
 type DB struct {
-	db *sql.DB
+	db            *sql.DB
+	libraryUserID int64
+	portableCopy  *portableCopyCoordinator
 }
 
 // New 打开 SQLite 数据库并执行迁移
 func New(dsn string) (*DB, error) {
+	return newDirect(dsn)
+}
+
+func newDirect(dsn string) (*DB, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
@@ -41,13 +48,33 @@ func New(dsn string) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	if filepath.Base(dsn) == "metadata.sqlite" {
+		if err := store.initializePortableMetadata(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("初始化资源库元数据失败: %w", err)
+		}
+	}
 
 	return store, nil
 }
 
+func (s *DB) LibraryUserID(fallback int64) int64 {
+	if s.libraryUserID > 0 {
+		return s.libraryUserID
+	}
+	return fallback
+}
+
 // Close 关闭数据库连接
 func (s *DB) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	portableCopy := s.portableCopy
+	s.portableCopy = nil
+	copyErr := releasePortableCopy(portableCopy)
+	if err != nil {
+		return err
+	}
+	return copyErr
 }
 
 // migrate 执行数据库建表迁移（幂等）
@@ -82,10 +109,22 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("photos", "is_super_favorite", `ALTER TABLE photos ADD COLUMN is_super_favorite INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("photos", "deleted_group_id", `ALTER TABLE photos ADD COLUMN deleted_group_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("albums", "source_kind", `ALTER TABLE albums ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("albums", "source_rel_path", `ALTER TABLE albums ADD COLUMN source_rel_path TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("albums", "deleted_at", `ALTER TABLE albums ADD COLUMN deleted_at DATETIME`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("albums", "deleted_by", `ALTER TABLE albums ADD COLUMN deleted_by INTEGER`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("albums", "deleted_group_id", `ALTER TABLE albums ADD COLUMN deleted_group_id TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`
@@ -134,8 +173,38 @@ func (s *DB) migrate() error {
 		return err
 	}
 	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_active_kind_taken
+		ON photos(uploaded_by, media_kind, taken_at DESC, id DESC)
+		WHERE deleted_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_favorite_taken
+		ON photos(uploaded_by, is_super_favorite DESC, taken_at DESC, id DESC)
+		WHERE deleted_at IS NULL AND is_favorite = 1`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_trashed_at
+		ON photos(uploaded_by, deleted_at DESC, id DESC)
+		WHERE deleted_at IS NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_deleted_group
+		ON photos(uploaded_by, deleted_group_id, deleted_at)
+		WHERE deleted_at IS NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_albums_created_by_source
 		ON albums(created_by, source_kind, source_rel_path)`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_albums_deleted_group
+		ON albums(created_by, deleted_group_id, deleted_at)
+		WHERE deleted_at IS NOT NULL`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`
@@ -265,7 +334,8 @@ CREATE TABLE IF NOT EXISTS photos (
     uploaded_at   DATETIME NOT NULL,
     uploaded_by   INTEGER  NOT NULL,
     deleted_at    DATETIME,
-    deleted_by    INTEGER
+    deleted_by    INTEGER,
+    deleted_group_id TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_uploaded_by_taken_at
@@ -285,6 +355,9 @@ CREATE TABLE IF NOT EXISTS albums (
     source_rel_path TEXT   NOT NULL DEFAULT '',
     created_by     INTEGER NOT NULL,
     created_at     DATETIME NOT NULL,
+    deleted_at     DATETIME,
+    deleted_by     INTEGER,
+    deleted_group_id TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (cover_photo_id) REFERENCES photos(id) ON DELETE SET NULL
 );
 

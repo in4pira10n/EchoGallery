@@ -152,9 +152,12 @@ type videoRegistrar interface {
 	GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error)
 	GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error)
 	GetTrash(params storage.ListPhotosParams) (*storage.PhotoPage, error)
+	GetTrashAlbums(userID int64) ([]*storage.FolderAlbumTrashEntry, error)
 	GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error)
 	SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error)
 	PermanentlyDeletePhoto(id int64, userID int64) error
+	RestoreFolderAlbum(groupID string, userID int64) error
+	PermanentlyDeleteFolderAlbum(groupID string, userID int64) error
 	PlayWithSystemPlayer(id int64, userID int64) error
 	RevealAlbumInFinder(id int64, userID int64) error
 	RevealInFinder(id int64, userID int64) error
@@ -214,9 +217,15 @@ type loginHeroMediaItem struct {
 	URL  string `json:"url"`
 }
 
+type loginHeroLibraryPreview struct {
+	Name   string             `json:"name"`
+	Avatar loginHeroMediaItem `json:"avatar"`
+}
+
 type loginHeroResponse struct {
-	Avatar loginHeroMediaItem   `json:"avatar"`
-	Photos []loginHeroMediaItem `json:"photos"`
+	Avatar         loginHeroMediaItem       `json:"avatar"`
+	Photos         []loginHeroMediaItem     `json:"photos"`
+	AccountLibrary *loginHeroLibraryPreview `json:"account_library,omitempty"`
 }
 
 type albumRequest struct {
@@ -335,6 +344,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/register", handleRegisterPage(staticFS))
 	r.GET("/api/login/hero", handleLoginHero(cfg, registrar))
 	r.GET("/api/login/hero/:kind/:name", handleServeLoginHeroAsset(cfg, registrar))
+	r.GET("/api/auth/account-library", handleLoginAccountLibrary(cfg))
 	r.POST("/api/auth/login", handleLogin(cfg, options))
 	r.POST("/api/auth/register", handleRegister(cfg))
 	r.POST("/api/auth/logout", handleLogout(cfg, options))
@@ -342,6 +352,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/auth/session/release", handlePageSessionRelease(cfg, options))
 	r.GET("/api/settings", authRequired, handleGetSettings(cfg, libraryHooks))
 	r.PUT("/api/settings", authRequired, handleUpdateSettings(cfg, libraryHooks))
+	r.GET("/api/settings/transfer/export", authRequired, adminOrRootRequired, handleExportConfigTransfer(cfg))
+	r.POST("/api/settings/transfer/import", authRequired, adminOrRootRequired, handleImportConfigTransfer(cfg, restart))
 	r.GET("/api/root/users", authRequired, rootRequired, handleListRootUsers(cfg))
 	r.POST("/api/root/users", authRequired, rootRequired, handleCreateRootUser(cfg))
 	r.PUT("/api/root/users/:username", authRequired, rootRequired, handleUpdateRootUser(cfg))
@@ -350,6 +362,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/restart", authRequired, adminRequired, handleRestartApp(restart))
 	r.POST("/api/settings/shutdown", authRequired, adminRequired, handleShutdownApp(shutdown))
 	r.GET("/api/library-build/status", authRequired, adminRequired, handleGetLibraryBuildStatus(buildHooks))
+	r.POST("/api/library-scan/refresh", authRequired, libraryRuntimeRequired, handleRefreshCurrentLibrary(cfg, registrar))
 	r.PUT("/api/library-build/exit-after-complete", authRequired, adminRequired, handleSetLibraryBuildExitAfterComplete(buildHooks))
 	r.DELETE("/api/library-build", authRequired, adminRequired, handleCancelLibraryBuild(buildHooks))
 	r.GET("/api/settings/libraries/build-all", authRequired, adminOrRootRequired, handleGetLibraryBatchBuildStatus(cfg, batchBuildHooks))
@@ -363,6 +376,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.PUT("/api/settings/libraries/thumbnails/build-all/exit-after-complete", authRequired, adminOrRootRequired, handleSetLibraryBatchThumbnailBuildExitAfterComplete(cfg, batchThumbnailBuildHooks))
 	r.PUT("/api/settings/libraries/thumbnails/build-all/selection", authRequired, adminOrRootRequired, handleSetLibraryBatchThumbnailBuildSelection(cfg, batchThumbnailBuildHooks))
 	r.POST("/api/settings/libraries/logos/refresh", authRequired, adminRequired, handleRefreshLibraryLogos(cfg))
+	r.POST("/api/settings/libraries/discover", authRequired, adminRequired, handleDiscoverLibraryDirectories())
 	r.POST("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authRequired, handleServeLibraryLogo(cfg))
@@ -410,8 +424,12 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/search", handleSearchMedia(cfg, registrar))
 		media.GET("/random", handleListRandomMedia(cfg, registrar))
 		media.POST("/thumbnails/warm", handleWarmVisibleThumbnails(cfg, registrar))
+		media.POST("/:id/playback-error", handleReportPlaybackError(cfg, registrar))
 		media.GET("/favorites", handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", handleListTrashMedia(cfg, registrar))
+		media.GET("/trash/albums", handleListTrashAlbums(cfg, registrar))
+		media.POST("/trash/albums/:groupID/restore", writableRequired, handleRestoreTrashAlbum(cfg, registrar))
+		media.DELETE("/trash/albums/:groupID", writableRequired, handleHardDeleteTrashAlbum(cfg, registrar))
 		media.GET("/:id/albums", handleListMediaAlbums(cfg, registrar))
 		media.GET("/:id/playback", handleGetVideoPlaybackPreference(cfg, registrar))
 		media.PUT("/:id/playback", handleSaveVideoPlaybackPreference(cfg, registrar))
@@ -1069,6 +1087,77 @@ func handleListTrashMedia(cfg *config.Config, registrar videoRegistrar) gin.Hand
 	}
 }
 
+func handleListTrashAlbums(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		albums, err := registrar.GetTrashAlbums(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"albums": albums})
+	}
+}
+
+func handleRestoreTrashAlbum(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		groupID := strings.TrimSpace(c.Param("groupID"))
+		if groupID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "文件夹回收站批次无效"})
+			return
+		}
+		if err := registrar.RestoreFolderAlbum(groupID, userID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "文件夹及其内容已恢复"})
+	}
+}
+
+func handleHardDeleteTrashAlbum(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentUserID(cfg, currentUsername(c))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		groupID := strings.TrimSpace(c.Param("groupID"))
+		if groupID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "文件夹回收站批次无效"})
+			return
+		}
+		if err := registrar.PermanentlyDeleteFolderAlbum(groupID, userID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "文件夹及其内容已永久删除"})
+	}
+}
+
 func handleListFavoriteMedia(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		registrar := requestRegistrar(c, registrar)
@@ -1390,7 +1479,7 @@ func handleAddMediaToAlbum(cfg *config.Config, registrar videoRegistrar) gin.Han
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
 			return
 		}
-		userID, err := currentUserID(cfg, currentUsername(c))
+		userID, err := currentLibraryUserID(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
@@ -1429,7 +1518,7 @@ func handleRemoveMediaFromAlbum(cfg *config.Config, registrar videoRegistrar) gi
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
 			return
 		}
-		userID, err := currentUserID(cfg, currentUsername(c))
+		userID, err := currentLibraryUserID(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
@@ -1536,7 +1625,7 @@ func handleCreateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
 			return
 		}
-		userID, err := currentUserID(cfg, currentUsername(c))
+		userID, err := currentLibraryUserID(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
@@ -1562,7 +1651,7 @@ func handleUpdateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
 			return
 		}
-		userID, err := currentUserID(cfg, currentUsername(c))
+		userID, err := currentLibraryUserID(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
@@ -1593,7 +1682,7 @@ func handleDeleteAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
 			return
 		}
-		userID, err := currentUserID(cfg, currentUsername(c))
+		userID, err := currentLibraryUserID(c, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
@@ -1836,6 +1925,9 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 	thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 	if thumbPath != "" {
 		return thumbPath, nil
+	}
+	if legacyOnly, ok := registrar.(interface{ LegacyThumbnailReadOnly() bool }); ok && legacyOnly.LegacyThumbnailReadOnly() {
+		return "", fmt.Errorf("旧版缩略图仅可读取，请从设置页启动缩略图构建")
 	}
 	previewSize := cfg.ThumbnailSize
 	preferredThumbPath := registrar.ThumbnailPath(photo)
@@ -2279,6 +2371,64 @@ func activeLibraryIndex(cfg *config.Config) int {
 	return 0
 }
 
+func libraryIndex(cfg *config.Config, target config.Library) int {
+	if cfg == nil {
+		return -1
+	}
+	targetID := strings.TrimSpace(target.ID)
+	targetPath := config.NormalizeStoragePath(target.Path)
+	for index, library := range cfg.Libraries {
+		if targetID != "" && strings.TrimSpace(library.ID) == targetID {
+			return index
+		}
+		if targetPath != "" && config.NormalizeStoragePath(library.Path) == targetPath {
+			return index
+		}
+	}
+	return -1
+}
+
+func loginAccountLibrary(cfg *config.Config, username string) (config.Library, int, bool) {
+	username = strings.TrimSpace(username)
+	if cfg == nil || username == "" {
+		return config.Library{}, -1, false
+	}
+	if user, _ := config.FindUser(cfg, username); user != nil {
+		library, ok := cfg.ResolveUserLibrarySelection(user.Username, "", "")
+		if ok {
+			return library, libraryIndex(cfg, library), true
+		}
+	}
+	return config.Library{}, -1, false
+}
+
+func buildLoginAccountLibraryPreview(cfg *config.Config, username string) *loginHeroLibraryPreview {
+	accountLibrary, index, ok := loginAccountLibrary(cfg, username)
+	if !ok {
+		return nil
+	}
+	preview := &loginHeroLibraryPreview{Name: accountLibrary.Name}
+	if index >= 0 {
+		if logoPath, asset := resolveLibraryLogoPath(cfg, accountLibrary); asset != "" {
+			version := asset
+			if info, err := os.Stat(logoPath); err == nil {
+				version = fmt.Sprintf("%d", info.ModTime().UnixNano())
+			}
+			preview.Avatar = loginHeroMediaItem{
+				Kind: "avatar",
+				URL:  fmt.Sprintf("/api/login/hero/avatar/%d?v=%s", index, url.QueryEscape(version)),
+			}
+		}
+	}
+	return preview
+}
+
+func handleLoginAccountLibrary(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"account_library": buildLoginAccountLibraryPreview(cfg, c.Query("username"))})
+	}
+}
+
 func loginHeroUserID(cfg *config.Config) int64 {
 	if len(cfg.Users) == 0 {
 		return 0
@@ -2290,11 +2440,18 @@ func handleLoginHero(cfg *config.Config, registrar videoRegistrar) gin.HandlerFu
 	return func(c *gin.Context) {
 		registrar := requestRegistrar(c, registrar)
 		resp := loginHeroResponse{}
+		resp.AccountLibrary = buildLoginAccountLibraryPreview(cfg, c.Query("username"))
 		index := activeLibraryIndex(cfg)
-		if index >= 0 && index < len(cfg.Libraries) && strings.TrimSpace(cfg.Libraries[index].LogoAsset) != "" {
-			resp.Avatar = loginHeroMediaItem{
-				Kind: "avatar",
-				URL:  fmt.Sprintf("/api/login/hero/avatar/%d?v=%s", index, url.QueryEscape(cfg.Libraries[index].LogoAsset)),
+		if index >= 0 && index < len(cfg.Libraries) {
+			if logoPath, asset := resolveLibraryLogoPath(cfg, cfg.Libraries[index]); asset != "" {
+				version := asset
+				if info, err := os.Stat(logoPath); err == nil {
+					version = fmt.Sprintf("%d", info.ModTime().UnixNano())
+				}
+				resp.Avatar = loginHeroMediaItem{
+					Kind: "avatar",
+					URL:  fmt.Sprintf("/api/login/hero/avatar/%d?v=%s", index, url.QueryEscape(version)),
+				}
 			}
 		}
 
@@ -2341,18 +2498,13 @@ func handleServeLoginHeroAsset(cfg *config.Config, registrar videoRegistrar) gin
 				c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 				return
 			}
-			fileName := strings.TrimSpace(cfg.Libraries[index].LogoAsset)
-			if fileName == "" {
+			logoPath, _ := resolveLibraryLogoPath(cfg, cfg.Libraries[index])
+			if logoPath == "" {
 				c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 				return
 			}
-			assetDir, err := cfg.LibraryAssetsDir()
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
 			setDerivedImageCacheHeaders(c)
-			c.File(filepath.Join(assetDir, filepath.Base(fileName)))
+			c.File(logoPath)
 		case "photo":
 			if registrar == nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
@@ -2550,6 +2702,7 @@ func handleServeBrowserPlaybackFile(cfg *config.Config, registrar videoRegistrar
 		}
 		playbackPath, mimeType, err := registrar.BrowserPlaybackPath(photo)
 		if err != nil {
+			logServerPlaybackFailure(c, cfg, registrar, photo, "server_playback_path_error", err)
 			c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "当前浏览器暂不支持直接播放该文件，请先在“更多操作”里转换为受支持的格式"})
 			return
 		}

@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	shell32DLL          = windows.NewLazySystemDLL("shell32.dll")
-	procShellExecuteW   = shell32DLL.NewProc("ShellExecuteW")
+	shell32DLL        = windows.NewLazySystemDLL("shell32.dll")
+	procShellExecuteW = shell32DLL.NewProc("ShellExecuteW")
 )
 
 func startUpdaterElevatedWindows(updaterPath string, planPath string) error {
@@ -34,7 +34,9 @@ func startUpdaterElevatedWindows(updaterPath string, planPath string) error {
 	if err != nil {
 		return err
 	}
-	show := uintptr(1) // SW_SHOWNORMAL
+	// The updater has no interactive UI; hide its process window. Windows may
+	// still show the UAC consent prompt required by the runas verb.
+	show := uintptr(0) // SW_HIDE
 	ret, _, callErr := procShellExecuteW.Call(
 		0,
 		uintptr(unsafe.Pointer(verbPtr)),
