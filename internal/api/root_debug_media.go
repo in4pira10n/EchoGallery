@@ -11,7 +11,7 @@ import (
 
 type rootDebugMediaItem struct {
 	ID            string
-	OriginalName   string
+	OriginalName  string
 	FilePath      string
 	MediaKind     string
 	MimeType      string
@@ -21,14 +21,14 @@ type rootDebugMediaItem struct {
 
 var rootDebugMediaItems = []rootDebugMediaItem{
 	{
-		ID:          "img-7688",
+		ID:           "img-7688",
 		OriginalName: "IMG_7688.JPG",
 		FilePath:     "/Users/starfruit/Pictures/Canon/100CANON/IMG_7688.JPG",
 		MediaKind:    "image",
 		MimeType:     "image/jpeg",
 	},
 	{
-		ID:          "img-7703",
+		ID:           "img-7703",
 		OriginalName: "IMG_7703.JPG",
 		FilePath:     "/Users/starfruit/Pictures/Canon/100CANON/IMG_7703.JPG",
 		MediaKind:    "image",
@@ -36,12 +36,12 @@ var rootDebugMediaItems = []rootDebugMediaItem{
 	},
 	{
 		ID:            "mvi-8411",
-		OriginalName:   "MVI_8411.MOV",
-		FilePath:       "/Users/starfruit/Pictures/Canon/100CANON/MVI_8411.MOV",
-		MediaKind:      "video",
-		MimeType:       "video/quicktime",
-		ThumbnailPath:  "",
-		PlaybackPath:   "",
+		OriginalName:  "MVI_8411.MOV",
+		FilePath:      "/Users/starfruit/Pictures/Canon/100CANON/MVI_8411.MOV",
+		MediaKind:     "video",
+		MimeType:      "video/quicktime",
+		ThumbnailPath: "",
+		PlaybackPath:  "",
 	},
 }
 

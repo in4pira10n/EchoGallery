@@ -15,6 +15,7 @@ type portableCopyCoordinator struct {
 	source string
 	cache  string
 	db     *sql.DB
+	lease  *sql.DB
 	refs   int
 	stop   chan struct{}
 	done   chan struct{}
@@ -68,6 +69,19 @@ func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
 		existing.refs++
 		return existing, nil
 	}
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		return nil, err
+	}
+	lease, err := acquirePortableLease(source)
+	if err != nil {
+		return nil, err
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			_ = lease.Close()
+		}
+	}()
 	if _, err := os.Stat(source); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
 			return nil, err
@@ -87,7 +101,8 @@ func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
 		return nil, fmt.Errorf("resolve system cache directory: %w", err)
 	}
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(source)))[:24]
-	dir := filepath.Join(root, "EchoGallery", "database", key)
+	// Another server process must never replace a database we have open.
+	dir := filepath.Join(root, "EchoGallery", "database", key, fmt.Sprintf("process-%d", os.Getpid()))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
@@ -101,8 +116,9 @@ func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
 	}
 	monitor.SetMaxOpenConns(1)
 	monitor.SetMaxIdleConns(1)
-	c := &portableCopyCoordinator{source: source, cache: cache, db: monitor, refs: 1, stop: make(chan struct{}), done: make(chan struct{})}
+	c := &portableCopyCoordinator{source: source, cache: cache, db: monitor, lease: lease, refs: 1, stop: make(chan struct{}), done: make(chan struct{})}
 	portableCopies.items[source] = c
+	owned = true
 	go c.run()
 	return c, nil
 }
@@ -156,21 +172,26 @@ func releasePortableCopy(c *portableCopyCoordinator) error {
 		return nil
 	}
 	portableCopies.Lock()
-	c.refs--
-	if c.refs > 0 {
+	if c.refs > 1 {
+		c.refs--
 		portableCopies.Unlock()
 		return nil
 	}
-	delete(portableCopies.items, c.source)
-	portableCopies.Unlock()
-	close(c.stop)
-	<-c.done
-	err := c.sync(true)
-	closeErr := c.db.Close()
-	if err != nil {
+	// On failure retain the coordinator and lease for a safe retry.
+	if err := c.sync(true); err != nil {
+		portableCopies.Unlock()
 		return err
 	}
-	return closeErr
+	delete(portableCopies.items, c.source)
+	close(c.stop)
+	<-c.done
+	closeErr := c.db.Close()
+	leaseErr := c.lease.Close()
+	portableCopies.Unlock()
+	if closeErr != nil {
+		return closeErr
+	}
+	return leaseErr
 }
 
 func snapshotSQLiteDatabase(source, target string) error {
@@ -184,6 +205,10 @@ func snapshotSQLiteDatabase(source, target string) error {
 		return err
 	}
 	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA busy_timeout=10000`); err != nil {
+		_ = db.Close()
+		return err
+	}
 	_, err = db.Exec(`VACUUM INTO '` + strings.ReplaceAll(tmp, "'", "''") + `'`)
 	closeErr := db.Close()
 	if err != nil {

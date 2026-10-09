@@ -147,7 +147,7 @@ func TestRebuildMissingThumbnailsRepairsCorruptAndMissingFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		photo := &storage.Photo{
-			UUID: fmt.Sprintf("%08x-1111-4111-8111-%012x", index+1, index+1),
+			UUID:         fmt.Sprintf("%08x-1111-4111-8111-%012x", index+1, index+1),
 			OriginalName: name, SourceRelPath: name, MimeType: "image/jpeg",
 			MediaKind: storage.MediaKindImage, UploadedBy: 1, TakenAt: time.Now(), UploadedAt: time.Now(),
 		}

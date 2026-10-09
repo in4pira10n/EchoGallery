@@ -9,6 +9,7 @@ import (
 
 	"echogallery/internal/config"
 	"echogallery/internal/service"
+	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage/sqlite"
 )
 
@@ -23,8 +24,11 @@ type libraryRuntimeProvider struct {
 	cfg *config.Config
 
 	mu       sync.Mutex
+	initMu   sync.Mutex
+	requests sync.RWMutex
 	services map[string]videoRegistrar
 	repos    map[string]*sqlite.DB
+	sessions map[string]string
 }
 
 func NewLibraryRuntimeProvider(cfg *config.Config) (*libraryRuntimeProvider, error) {
@@ -35,6 +39,7 @@ func NewLibraryRuntimeProvider(cfg *config.Config) (*libraryRuntimeProvider, err
 		cfg:      cfg,
 		services: make(map[string]videoRegistrar),
 		repos:    make(map[string]*sqlite.DB),
+		sessions: make(map[string]string),
 	}, nil
 }
 
@@ -52,12 +57,23 @@ func (p *libraryRuntimeProvider) Close() error {
 	if p == nil {
 		return nil
 	}
+	p.requests.Lock()
+	defer p.requests.Unlock()
+	p.initMu.Lock()
+	defer p.initMu.Unlock()
 	p.mu.Lock()
 	repos := p.repos
+	services := p.services
 	p.repos = make(map[string]*sqlite.DB)
 	p.services = make(map[string]videoRegistrar)
+	p.sessions = make(map[string]string)
 	p.mu.Unlock()
 	var firstErr error
+	for _, registrar := range services {
+		if stopper, ok := registrar.(interface{ StopBackground() }); ok {
+			stopper.StopBackground()
+		}
+	}
 	for _, repo := range repos {
 		if err := repo.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -66,10 +82,102 @@ func (p *libraryRuntimeProvider) Close() error {
 	return firstErr
 }
 
+// SyncBeforeRelease keeps the session lock until its durable snapshots succeed.
+func (p *libraryRuntimeProvider) SyncBeforeRelease(locks *sessionlock.Store, sessionID, keepLibraryID string) error {
+	if p == nil || locks == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	// Ordinary media requests do not need the exclusive shutdown barrier.
+	p.mu.Lock()
+	unchanged := keepLibraryID != "" && p.sessions[sessionID] == keepLibraryID
+	p.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+	p.requests.Lock()
+	defer p.requests.Unlock()
+	p.initMu.Lock()
+	defer p.initMu.Unlock()
+	p.mu.Lock()
+	if keepLibraryID != "" && p.sessions[sessionID] == keepLibraryID {
+		p.mu.Unlock()
+		return nil
+	}
+	repos := make(map[string]*sqlite.DB, len(p.repos))
+	for id, repo := range p.repos {
+		repos[id] = repo
+	}
+	p.mu.Unlock()
+	for id, repo := range repos {
+		if id == keepLibraryID {
+			continue
+		}
+		active, err := locks.ActiveForLibrary(id)
+		if err != nil {
+			return err
+		}
+		for _, lock := range active {
+			if lock.SessionID == sessionID && lock.Scope == "browse" {
+				// Another reader or a batch build still owns this runtime.
+				shared := false
+				for _, owner := range active {
+					if owner.SessionID != sessionID || owner.Scope != "browse" {
+						shared = true
+					}
+				}
+				if !shared {
+					p.mu.Lock()
+					registrar := p.services[id]
+					p.mu.Unlock()
+					if stopper, ok := registrar.(interface{ StopBackground() }); ok {
+						stopper.StopBackground()
+					}
+				}
+				if err := repo.SyncPortable(); err != nil {
+					return fmt.Errorf("sync library %s before release: %w", id, err)
+				}
+				if !shared {
+					if err := repo.Close(); err != nil {
+						return fmt.Errorf("close library %s: %w", id, err)
+					}
+					p.mu.Lock()
+					delete(p.repos, id)
+					delete(p.services, id)
+					p.mu.Unlock()
+				}
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func (p *libraryRuntimeProvider) beginRequest() func() {
+	if p == nil {
+		return func() {}
+	}
+	p.requests.RLock()
+	return p.requests.RUnlock
+}
+
+func (p *libraryRuntimeProvider) rememberSession(sessionID, libraryID string) {
+	if p == nil || sessionID == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sessions == nil {
+		p.sessions = make(map[string]string)
+	}
+	p.sessions[sessionID] = libraryID
+}
+
 func (p *libraryRuntimeProvider) ForLibrary(baseCfg *config.Config, library config.Library) (videoRegistrar, error) {
 	if p == nil {
 		return nil, fmt.Errorf("runtime provider is not configured")
 	}
+	p.initMu.Lock()
+	defer p.initMu.Unlock()
 	libraryID := strings.TrimSpace(library.ID)
 	if libraryID == "" {
 		return nil, fmt.Errorf("library id is required")

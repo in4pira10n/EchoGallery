@@ -161,6 +161,7 @@ type TimelineLocateResult struct {
 
 // LibraryScanSnapshot 保存一次成功扫描后的轻量状态，用于资源库目录树未变化时快速跳过全量扫描。
 type LibraryScanSnapshot struct {
+	Version              int               `json:"version"`
 	RootPath             string            `json:"root_path"`
 	RootModUnixNano      int64             `json:"root_mod_unix_nano"`
 	DirectoryModTimes    map[string]int64  `json:"directory_mod_times,omitempty"`
@@ -224,10 +225,12 @@ type RandomPhotosParams struct {
 
 // SourceMediaInfo 是启动扫描使用的轻量索引，避免为每个源文件做一次完整查询。
 type SourceMediaInfo struct {
-	ID            int64
-	SourceRelPath string
-	Size          int64
-	SourceModUnix int64
+	ID                int64
+	SourceRelPath     string
+	Size              int64
+	SourceModUnix     int64
+	Deleted           bool
+	DeletedAtUnixNano int64
 }
 
 // ListAlbumPhotosParams 查询相册内图片参数

@@ -10,9 +10,64 @@ import (
 
 	"echogallery/internal/config"
 	imgpkg "echogallery/internal/image"
+	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage"
 	"echogallery/internal/storage/sqlite"
 )
+
+func TestRuntimeReleaseEvictsWorkingCopyAndReloads(t *testing.T) {
+	root := t.TempDir()
+	library := config.Library{ID: "handoff", Name: "Handoff", Path: root}
+	cfg := &config.Config{AppDataDir: t.TempDir(), StoragePath: root, Libraries: []config.Library{library}}
+	provider, err := NewLibraryRuntimeProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	locks, err := sessionlock.New(filepath.Join(t.TempDir(), "locks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locks.Close()
+	if _, err := locks.Acquire(library, "admin", "admin", "page", "browse"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := provider.ForLibrary(cfg, library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.rememberSession("page", library.ID)
+	if err := provider.SyncBeforeRelease(locks, "page", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.repos) != 0 || len(provider.services) != 0 {
+		t.Fatal("released runtime retained")
+	}
+	locks.ReleaseSession("page")
+	path, err := cfg.DatabasePathForStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := sqlite.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durable.CreateAlbum(&storage.Album{Name: "from another Gallery", CreatedBy: 1, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	durable.Close()
+	next, err := provider.ForLibrary(cfg, library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == first {
+		t.Fatal("reused released service")
+	}
+	albums, err := provider.repos[library.ID].ListAlbums(1)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("did not reload latest state: %v %v", albums, err)
+	}
+}
 
 func TestRuntimeProviderReusesPortableDatabaseAndThumbnails(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "moved-library")

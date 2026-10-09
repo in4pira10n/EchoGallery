@@ -53,37 +53,31 @@
     <a class="timeline-order-btn" id="register-back-btn" href="/login" aria-label="返回登录" title="返回登录">
       <svg data-icon-source width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><use href="/static/svg/back.svg#back-icon"></use></svg>
     </a>
-    <div class="login-wrap">
-      <div class="login-card register-card">
-        <section class="login-hero" aria-label="EchoGallery">
-          <div class="login-hero-media">
-            <div class="login-hero-media-layer is-current" id="register-hero-media-current"></div>
-            <div class="login-hero-media-layer" id="register-hero-media-next"></div>
-          </div>
-          <h1 id="register-hero-title">创建账号</h1>
-          <p id="register-hero-copy">为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。</p>
-        </section>
-        <section class="login-form-panel" aria-label="注册">
-          <div class="login-form-head">
-            <span id="register-badge">新用户</span>
-            <strong id="register-form-title">注册 EchoGallery</strong>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="username" id="register-username-label">用户名</label>
-            <input class="input" id="username" type="text"
+    <main class="auth-screen">
+      <section class="auth-stage" aria-hidden="true"></section>
+      <section class="auth-pane" aria-label="注册">
+        <div class="auth-brand">
+          <img src="/static/pwa-icon.png?v={{ASSET_VERSION}}" alt="">
+          <p><strong id="register-form-title">注册 EchoGallery</strong></p>
+        </div>
+        <div class="auth-fields">
+          <div class="auth-field">
+            <label for="username" id="register-username-label">用户名</label>
+            <input id="username" type="text"
               autocomplete="username" placeholder="请输入用户名">
           </div>
-          <div class="form-group">
-            <label class="form-label" for="password" id="register-password-label">密码</label>
-            <input class="input" id="password" type="password"
+          <div class="auth-field">
+            <label for="password" id="register-password-label">密码</label>
+            <input id="password" type="password"
               autocomplete="new-password" placeholder="至少 6 位">
           </div>
-          <div class="form-group">
-            <label class="form-label" for="confirm-password" id="register-confirm-label">确认密码</label>
-            <input class="input" id="confirm-password" type="password"
+          <div class="auth-field">
+            <label for="confirm-password" id="register-confirm-label">确认密码</label>
+            <input id="confirm-password" type="password"
               autocomplete="new-password" placeholder="再次输入密码">
           </div>
-          <div class="form-group register-role-group">
+        </div>
+        <div class="form-group register-role-group">
             <label class="register-role-toggle" for="register-visitor-toggle">
               <span class="register-role-copy">
                 <strong id="register-role-title">访客用户</strong>
@@ -96,14 +90,13 @@
               </span>
             </label>
             <p class="register-admin-note" id="register-admin-note" hidden>将创建管理员账户，需要现有管理员授权。</p>
-          </div>
-          <button class="btn btn-primary login-submit"
+        </div>
+        <button class="btn btn-primary login-submit"
             id="register-btn">创建账号</button>
-          <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
-          <div class="login-error" id="register-error"></div>
-        </section>
-      </div>
-    </div>
+        <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
+        <div class="login-error" id="register-error"></div>
+      </section>
+    </main>
     <div class="auth-dialog-backdrop" id="register-admin-modal" hidden>
       <div class="auth-dialog-card" role="dialog" aria-modal="true" aria-labelledby="register-admin-modal-title">
         <div class="auth-dialog-head">
@@ -129,9 +122,6 @@
 (function() {
   var copyDefaults = {
     pageTitle: '注册 - EchoGallery',
-    heroTitle: '创建账号',
-    heroCopy: '为新的使用者建立独立入口，保留各自的资源库配置与浏览偏好。',
-    badge: '新用户',
     formTitle: '注册 EchoGallery',
     usernameLabel: '用户名',
     usernamePlaceholder: '请输入用户名',
@@ -167,12 +157,9 @@
     if (copy.errors && copyDefaults.errors) {
       copy.errors = Object.assign({}, copyDefaults.errors, copy.errors);
     }
-    document.title = copy.pageTitle || copyDefaults.pageTitle;
+    document.title = (copy.pageTitle || copyDefaults.pageTitle).replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery');
     var map = {
-      'register-hero-title': copy.heroTitle,
-      'register-hero-copy': copy.heroCopy,
-      'register-badge': copy.badge,
-      'register-form-title': copy.formTitle,
+      'register-form-title': copy.formTitle.replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery'),
       'register-username-label': copy.usernameLabel,
       'register-password-label': copy.passwordLabel,
       'register-confirm-label': copy.confirmLabel,
@@ -203,30 +190,6 @@
     if (loginLink) loginLink.textContent = copy.loginLink || copyDefaults.loginLink;
     return copy;
   }
-  function bindSpotlight(selector, xVar, yVar) {
-    var el = document.querySelector(selector);
-    if (!el || !window.matchMedia('(pointer: fine)').matches) return;
-    var frame = 0;
-    function move(e) {
-      if (frame) cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(function () {
-        var rect = el.getBoundingClientRect();
-        var x = Math.max(0, Math.min(100, (e.clientX - rect.left) / rect.width * 100));
-        var y = Math.max(0, Math.min(100, (e.clientY - rect.top) / rect.height * 100));
-        el.style.setProperty(xVar, x.toFixed(2) + '%');
-        el.style.setProperty(yVar, y.toFixed(2) + '%');
-      });
-    }
-    el.addEventListener('pointermove', move);
-  }
-  bindSpotlight('.login-hero', '--hero-spot-x', '--hero-spot-y');
-  var heroEl = document.querySelector('.login-hero');
-  var heroMediaCurrent = document.getElementById('register-hero-media-current');
-  var heroMediaNext = document.getElementById('register-hero-media-next');
-  var heroMediaItems = [];
-  var heroMediaIndex = -1;
-  var heroMediaAnimating = false;
-  var heroMediaActiveLayer = 0;
   var btn = document.getElementById('register-btn');
   var errEl = document.getElementById('register-error');
   var visitorToggle = document.getElementById('register-visitor-toggle');
@@ -239,47 +202,6 @@
   var adminCancelBtn = document.getElementById('register-admin-cancel');
   var adminErrEl = document.getElementById('register-admin-error');
   var copy = applyCopy();
-
-  function heroBackgroundStyle(url) {
-    return url ? 'linear-gradient(rgba(0, 0, 0, .08), rgba(0, 0, 0, .14)), url("' + String(url).replace(/"/g, '%22') + '") center / cover no-repeat' : '';
-  }
-
-  function showHeroMedia(url, immediate) {
-    if (!heroMediaCurrent || !heroMediaNext || !url) return;
-    var currentLayer = heroMediaActiveLayer === 0 ? heroMediaCurrent : heroMediaNext;
-    var nextLayer = heroMediaActiveLayer === 0 ? heroMediaNext : heroMediaCurrent;
-    if (immediate) {
-      currentLayer.style.background = heroBackgroundStyle(url);
-      currentLayer.classList.add('is-current');
-      nextLayer.classList.remove('is-current');
-      return;
-    }
-    if (heroMediaAnimating) return;
-    heroMediaAnimating = true;
-    nextLayer.style.background = heroBackgroundStyle(url);
-    nextLayer.classList.add('is-current');
-    currentLayer.classList.remove('is-current');
-    window.setTimeout(function() {
-      heroMediaActiveLayer = heroMediaActiveLayer === 0 ? 1 : 0;
-      heroMediaAnimating = false;
-    }, 700);
-  }
-
-  function cycleHeroMedia() {
-    if (!heroMediaItems.length) return;
-    heroMediaIndex = (heroMediaIndex + 1) % heroMediaItems.length;
-    showHeroMedia(heroMediaItems[heroMediaIndex], heroMediaIndex === 0 && !heroMediaCurrent.style.background);
-  }
-
-  async function loadHeroMedia() {
-    try {
-      var response = await fetch('/api/login/hero', { cache: 'no-store' });
-      var data = await response.json().catch(function() { return {}; });
-      var photos = Array.isArray(data && data.photos) ? data.photos : [];
-      heroMediaItems = photos.map(function(item) { return item && item.url ? item.url : ''; }).filter(Boolean);
-      if (heroMediaItems.length) cycleHeroMedia();
-    } catch (_) {}
-  }
 
   function isVisitorMode() {
     return !!(visitorToggle && visitorToggle.checked);
@@ -389,9 +311,6 @@
   if (adminCancelBtn) adminCancelBtn.addEventListener('click', closeAdminModal);
   if (adminConfirmBtn) adminConfirmBtn.addEventListener('click', function () { doRegister(true); });
   btn.addEventListener('click', function () { doRegister(false); });
-  heroEl && heroEl.addEventListener('click', function () {
-    cycleHeroMedia();
-  });
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape' && modal && !modal.hidden) {
       e.preventDefault();
@@ -406,7 +325,6 @@
     doRegister(false);
   });
   syncRoleMode();
-  loadHeroMedia();
 })();
 </script>
   </body>

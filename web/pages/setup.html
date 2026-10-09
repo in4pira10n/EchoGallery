@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#2d6a5f">
+  <meta name="theme-color" content="#1976d2">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="EchoGallery">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,6 +13,8 @@
   <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
+  <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/setup.css?v={{ASSET_VERSION}}">
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
@@ -147,75 +149,65 @@
   }
 
   function renderInit() {
+    document.body.className = 'register-page setup-init-page';
     root.className = 'login-card setup-card setup-init-card';
     var libraries = (state.libraries || []).length ? state.libraries : [{name:text('init.libraryName', '资源库 {index}', { index: 1 }), path:''}];
     root.innerHTML =
-      '<section class="setup-init-hero">' +
-        '<div class="setup-init-copy">' +
-          '<span class="setup-init-kicker">' + esc(text('init.kicker', '首次启动')) + '</span>' +
-          '<h1>' + esc(text('init.title', '网页初始化')) + '</h1>' +
-          '<p>' + esc(text('init.copy', '首次启动不再使用命令行向导，请在这里完成端口、资源库和管理员账号配置。')) + '</p>' +
-        '</div>' +
-      '</section>' +
-      '<section class="setup-init-panel" aria-label="' + esc(text('init.panelLabel', '网页初始化配置')) + '">' +
+      '<section class="login-form-panel setup-init-panel" aria-label="' + esc(text('init.panelLabel', '网页初始化配置')) + '">' +
+        '<div class="auth-brand"><img src="/static/pwa-icon.png?v={{ASSET_VERSION}}" alt=""><p><span id="setup-gallery-title">EchoGallery</span> <b>初始化</b></p></div>' +
+        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>EchoGallery 名称</strong></div>' +
+          '<div class="auth-fields"><div class="auth-field"><label for="setup-app-name">EchoGallery 名称</label><input id="setup-app-name" type="text" maxlength="80" placeholder="EchoGallery" value="EchoGallery"></div></div>' +
+          '<p class="setup-desc">为不同的 Gallery 设置独立名称，如「家庭照片」「iCloud 备份」。</p></div>' +
         '<div class="setup-init-section">' +
-          '<div class="setup-init-section-head"><strong>' + esc(text('init.serviceTitle', '服务配置')) + '</strong><span>' + esc(text('init.serviceHint', '启动后即可访问')) + '</span></div>' +
-          '<div class="setup-init-two-col">' +
-            '<div class="form-group"><label class="form-label" for="setup-port">' + esc(text('init.portLabel', '服务端口')) + '</label><input class="input" id="setup-port" type="number" min="1" max="65535" value="' + (state.port || 8080) + '"></div>' +
-            '<div class="form-group"><label class="form-label" for="setup-username">' + esc(text('init.usernameLabel', '管理员用户名')) + '</label><input class="input" id="setup-username" type="text" value="admin"></div>' +
-          '</div>' +
-          '<div class="form-group"><label class="form-label" for="setup-password">' + esc(text('init.passwordLabel', '管理员密码')) + '</label><input class="input" id="setup-password" type="password" placeholder="' + esc(text('init.passwordPlaceholder', '至少 6 位')) + '"></div>' +
+          '<div class="setup-init-section-head"><strong>服务端配置</strong></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-port">服务端口</label><input class="input" id="setup-port" type="number" min="1" max="65535" value="' + (state.port || 8080) + '"></div>' +
+          '<p class="setup-desc">默认端口为 8080；多个 Gallery 建议使用不同端口。</p>' +
+        '</div>' +
+        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>用户名及密码</strong></div>' +
+          '<div class="auth-fields"><div class="auth-field"><label for="setup-username">管理员用户名</label><input id="setup-username" type="text" autocomplete="username" placeholder="用户名" value="admin"></div>' +
+          '<div class="auth-field"><label for="setup-password">管理员密码</label><input id="setup-password" type="password" autocomplete="new-password" placeholder="密码（至少 6 位）"></div></div>' +
+          '<p class="setup-desc">此账户用于管理 Gallery。密码至少 6 位。</p>' +
         '</div>' +
         '<div class="setup-init-section">' +
-          '<div class="setup-init-section-head"><strong>' + esc(text('init.libraryTitle', '资源库')) + '</strong><span>' + esc(text('init.libraryHint', '可添加多个路径')) + '</span></div>' +
+          '<div class="setup-init-section-head"><strong>资源库配置</strong></div>' +
           '<div id="setup-libraries" class="setup-init-libraries"></div>' +
-          '<button class="btn setup-add-library-btn" id="setup-add-library" type="button">' + esc(text('init.addLibrary', '添加资源库')) + '</button>' +
+          '<p class="setup-desc">您可以以后在「设置」页详细配置资源库。</p>' +
         '</div>' +
-        '<details class="setup-init-advanced">' +
-          '<summary>' + esc(text('init.advanced', '高级路径设置')) + '</summary>' +
-          '<div class="setup-init-two-col">' +
-            '<div class="form-group"><label class="form-label" for="setup-thumbnail-dir">' + esc(text('init.thumbLabel', '缩略图目录（可选）')) + '</label><input class="input" id="setup-thumbnail-dir" type="text" placeholder="' + esc(text('init.thumbPlaceholder', '默认使用应用数据目录下的 thumbnails')) + '"></div>' +
-            '<div class="form-group"><label class="form-label" for="setup-trash-dir">' + esc(text('init.trashLabel', '回收站目录（可选）')) + '</label><input class="input" id="setup-trash-dir" type="text" placeholder="' + esc(text('init.trashPlaceholder', '默认使用应用数据目录下的 Trash')) + '"></div>' +
-          '</div>' +
-        '</details>' +
         '<div class="settings-actions settings-actions-fill">' +
-          '<button class="btn" id="setup-import-transfer" type="button">' + esc(text('init.importTransfer', '导入换机配置包')) + '</button>' +
+          '<button class="btn" id="setup-import-transfer" type="button"><img src="/static/svg/down.svg" alt="" aria-hidden="true">' + esc(text('init.importTransfer', '导入过往 EchoGallery 备份包（*.zip）')) + '</button>' +
           '<input id="setup-import-transfer-file" type="file" accept=".zip,application/zip" hidden>' +
         '</div>' +
-        '<button class="btn btn-primary setup-init-submit" id="setup-submit">' + esc(text('init.save', '保存并重启')) + '</button>' +
-        '<a class="setup-secondary-link" href="/login" id="setup-switch-user">' + esc(text('init.switchUser', '切换用户')) + '</a>' +
+        '<button class="timeline-order-btn" id="setup-submit" aria-label="保存并重启" title="保存并重启"><img src="/static/svg/check.svg" width="24" height="24" alt=""></button>' +
+        '<a class="timeline-order-btn" href="/login" id="setup-switch-user" aria-label="返回登录" title="返回登录"><img src="/static/svg/back.svg" width="24" height="24" alt=""></a>' +
         '<div class="login-error" id="setup-error"></div>' +
       '</section>';
-    bindSpotlight('.setup-init-hero', '--hero-spot-x', '--hero-spot-y');
+    Array.prototype.forEach.call(root.querySelectorAll('.form-group'), function (group) {
+      group.className = 'auth-fields';
+      var field = document.createElement('div');
+      field.className = 'auth-field';
+      while (group.firstChild) field.appendChild(group.firstChild);
+      group.appendChild(field);
+      var input = field.querySelector('input');
+      input.classList.remove('input');
+      input.placeholder = input.placeholder || field.querySelector('label').textContent;
+    });
+    document.getElementById('setup-app-name').addEventListener('input', function () {
+      var name = this.value.trim() || 'EchoGallery';
+      document.getElementById('setup-gallery-title').textContent = name;
+      document.title = name + ' 初始化';
+    });
     var list = document.getElementById('setup-libraries');
 
     function renderLibraries(items) {
       list.innerHTML = items.map(function (library, index) {
-        return '<div class="settings-library-row setup-library-row">' +
-          '<span class="setup-library-index">' + (index + 1) + '</span>' +
-          '<input class="input setup-library-name" type="text" maxlength="32" placeholder="' + esc(text('init.namePlaceholder', '资源库名称')) + '" value="' + esc(library.name || text('init.libraryName', '资源库 {index}', { index: index + 1 })) + '">' +
-          '<input class="input setup-library-path" type="text" placeholder="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" value="' + esc(library.path || '') + '">' +
-          '<button class="btn btn-danger btn-sm setup-library-remove" type="button">' + esc(text('init.remove', '删除')) + '</button>' +
+        return '<div class="setup-library-row">' +
+          '<div class="auth-fields"><div class="auth-field"><input class="setup-library-name" aria-label="' + esc(text('init.namePlaceholder', '资源库名称')) + '" type="text" maxlength="32" placeholder="' + esc(text('init.namePlaceholder', '资源库名称')) + '" value="' + esc(library.name || text('init.libraryName', '资源库 {index}', { index: index + 1 })) + '"></div>' +
+          '<div class="auth-field"><input class="setup-library-path" aria-label="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" type="text" placeholder="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" value="' + esc(library.path || '') + '"></div></div>' +
         '</div>';
       }).join('');
-      Array.prototype.forEach.call(list.querySelectorAll('.setup-library-remove'), function (btn) {
-        btn.addEventListener('click', function () {
-          if (list.children.length <= 1) return;
-          btn.parentNode.remove();
-        });
-      });
     }
 
-    renderLibraries(libraries);
-    document.getElementById('setup-add-library').addEventListener('click', function () {
-      libraries.push({name:text('init.libraryName', '资源库 {index}', { index: list.children.length + 1 }), path:''});
-      renderLibraries(Array.prototype.map.call(list.children, function (row, index) {
-        return {
-          name: row.querySelector('.setup-library-name').value || text('init.libraryName', '资源库 {index}', { index: index + 1 }),
-          path: row.querySelector('.setup-library-path').value || ''
-        };
-      }).concat([{name:text('init.libraryName', '资源库 {index}', { index: list.children.length + 1 }), path:''}]));
-    });
+    renderLibraries(libraries.slice(0, 1));
 
     document.getElementById('setup-import-transfer').addEventListener('click', function () {
       document.getElementById('setup-import-transfer-file').click();
@@ -265,6 +257,7 @@
         return;
       }
       var btn = this;
+      var originalContent = btn.innerHTML;
       btn.disabled = true;
       btn.innerHTML = renderButtonBusySpinner();
       btn.setAttribute('aria-label', text('init.saving', '保存中…'));
@@ -273,9 +266,8 @@
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
+            app_name: document.getElementById('setup-app-name').value.trim() || 'EchoGallery',
             port: parseInt(document.getElementById('setup-port').value, 10) || 8080,
-            thumbnail_dir: document.getElementById('setup-thumbnail-dir').value.trim(),
-            trash_dir: document.getElementById('setup-trash-dir').value.trim(),
             libraries: rows,
             storage_path: rows[0].path,
             username: document.getElementById('setup-username').value.trim(),
@@ -291,8 +283,8 @@
         setTimeout(function () { location.reload(); }, 2000);
       } catch (e) {
         btn.disabled = false;
-        btn.textContent = text('init.save', '保存并重启');
-        btn.removeAttribute('aria-label');
+        btn.innerHTML = originalContent;
+        btn.setAttribute('aria-label', text('init.save', '保存并重启'));
         errorEl.style.color = 'var(--danger)';
         errorEl.textContent = e.message || '初始化失败';
       }

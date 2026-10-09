@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	folderAlbumDescription = "自动从文件夹导入"
-	folderAlbumSourceKind  = "folder"
-	rootFolderAlbumKey     = "__echogallery_root__"
-	rootFolderAlbumName    = "根目录"
+	folderAlbumDescription     = "自动从文件夹导入"
+	folderAlbumSourceKind      = "folder"
+	rootFolderAlbumKey         = "__echogallery_root__"
+	rootFolderAlbumName        = "根目录"
+	libraryScanSnapshotVersion = 2
 )
 
 // ImportSummary 汇总一次启动扫描导入的结果。
@@ -69,6 +71,23 @@ func (s *PhotoService) ImportExistingPhotos(uploadedBy int64, progress func(done
 // ImportExistingPhotosContext 扫描 storagePath 中现有的图片文件并导入数据库。
 // ctx 用于让启动扫描在 Ctrl+C 或网页退出时尽快停下，避免大资源库后台任务拖住进程。
 func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploadedBy int64, progress func(done, total int)) (*ImportSummary, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.workerStop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	s.lifecycleMu.Lock()
+	closing := s.closing
+	s.lifecycleMu.Unlock()
+	if closing {
+		return nil, fmt.Errorf("资源库正在关闭，请重新进入")
+	}
 	uploadedBy = s.LibraryUserID(uploadedBy)
 	summary := &ImportSummary{}
 	if err := ctx.Err(); err != nil {
@@ -182,7 +201,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 
 		var info fs.FileInfo
 		if existing, ok := sourceIndex[sourceRelPath]; ok {
-			if existing.SourceModUnix == 0 {
+			if existing.SourceModUnix == 0 && !existing.Deleted {
 				summary.Skipped++
 				indexSkippedCandidates++
 				return nil
@@ -191,7 +210,22 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 			if err != nil {
 				return err
 			}
+			if existing.SourceModUnix == 0 {
+				if existing.Deleted && sourceFileChangedAfterDeletion(info, existing.DeletedAtUnixNano) {
+					pendingJobs = append(pendingJobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
+					return nil
+				}
+				summary.Skipped++
+				indexSkippedCandidates++
+				return nil
+			}
 			if sourceMediaUnchanged(existing, info) {
+				if existing.Deleted && sourceFileChangedAfterDeletion(info, existing.DeletedAtUnixNano) {
+					// A file deleted in the app may still be present on disk. Seeing it
+					// again during a library scan means it has been restored externally.
+					pendingJobs = append(pendingJobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
+					return nil
+				}
 				summary.Skipped++
 				indexSkippedCandidates++
 				return nil
@@ -397,6 +431,7 @@ func (s *PhotoService) saveLibraryScanSnapshot(snapshot libraryDirectorySnapshot
 		return nil
 	}
 	return s.repo.SaveLibraryScanSnapshot(storage.LibraryScanSnapshot{
+		Version:              libraryScanSnapshotVersion,
 		RootPath:             filepath.Clean(s.sourcePath),
 		RootModUnixNano:      snapshot.rootInfo.ModTime().UnixNano(),
 		DirectoryModTimes:    snapshot.directoryModTimes,
@@ -500,7 +535,7 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string) (li
 }
 
 func quickLibraryScanSnapshotMatches(ctx context.Context, snapshot *storage.LibraryScanSnapshot, sourcePath string, rootInfo fs.FileInfo) bool {
-	if snapshot == nil || rootInfo == nil || len(snapshot.DirectoryModTimes) == 0 ||
+	if snapshot == nil || snapshot.Version != libraryScanSnapshotVersion || rootInfo == nil || len(snapshot.DirectoryModTimes) == 0 ||
 		len(snapshot.DirectoryEntryHashes) != len(snapshot.DirectoryModTimes) {
 		return false
 	}
@@ -548,7 +583,7 @@ func hashDirectoryEntries(entries []fs.DirEntry) string {
 }
 
 func libraryScanSnapshotMatches(snapshot *storage.LibraryScanSnapshot, sourcePath string, current libraryDirectorySnapshot) bool {
-	if snapshot == nil || current.rootInfo == nil {
+	if snapshot == nil || snapshot.Version != libraryScanSnapshotVersion || current.rootInfo == nil {
 		return false
 	}
 	return filepath.Clean(snapshot.RootPath) == filepath.Clean(sourcePath) &&
@@ -621,10 +656,111 @@ func sourceMediaFingerprint(size int64, modUnix int64) string {
 	return fmt.Sprintf("%d:%d", size, modUnix)
 }
 
+func sourceFileChangedAfterDeletion(info fs.FileInfo, deletedAtUnixNano int64) bool {
+	if info == nil || deletedAtUnixNano <= 0 {
+		return false
+	}
+	changedAt := sourceFileChangeTime(info)
+	return !changedAt.IsZero() && changedAt.UnixNano() > deletedAtUnixNano
+}
+
+func sourceFileChangeTime(info fs.FileInfo) time.Time {
+	if info == nil || info.Sys() == nil {
+		return time.Time{}
+	}
+	value := reflect.ValueOf(info.Sys())
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return time.Time{}
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return time.Time{}
+	}
+	for _, fieldName := range []string{"Ctim", "Ctimespec", "ChangeTime"} {
+		if field := value.FieldByName(fieldName); field.IsValid() {
+			if changedAt := reflectedTimespec(field); !changedAt.IsZero() {
+				return changedAt
+			}
+		}
+	}
+	if field := value.FieldByName("CreationTime"); field.IsValid() {
+		filetime := field
+		for filetime.Kind() == reflect.Pointer || filetime.Kind() == reflect.Interface {
+			if filetime.IsNil() {
+				return time.Time{}
+			}
+			filetime = filetime.Elem()
+		}
+		if filetime.Kind() == reflect.Struct {
+			high, okHigh := reflectedUint(filetime.FieldByName("HighDateTime"))
+			low, okLow := reflectedUint(filetime.FieldByName("LowDateTime"))
+			if okHigh && okLow {
+				ticks := (high << 32) | low
+				const windowsToUnixEpoch100ns = uint64(116444736000000000)
+				if ticks >= windowsToUnixEpoch100ns {
+					return time.Unix(0, int64(ticks-windowsToUnixEpoch100ns)*100)
+				}
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func reflectedTimespec(value reflect.Value) time.Time {
+	for value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return time.Time{}
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return time.Time{}
+	}
+	sec, okSec := reflectedInt(value.FieldByName("Sec"))
+	nsec, okNsec := reflectedInt(value.FieldByName("Nsec"))
+	if !okSec || !okNsec || sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, nsec)
+}
+
+func reflectedInt(value reflect.Value) (int64, bool) {
+	if !value.IsValid() {
+		return 0, false
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return value.Int(), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return int64(value.Uint()), true
+	default:
+		return 0, false
+	}
+}
+
+func reflectedUint(value reflect.Value) (uint64, bool) {
+	if !value.IsValid() {
+		return 0, false
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return uint64(value.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return value.Uint(), true
+	default:
+		return 0, false
+	}
+}
+
 func buildMissingSourceFingerprintIndex(sourceIndex map[string]storage.SourceMediaInfo, seenSourcePaths map[string]bool) map[string][]storage.SourceMediaInfo {
 	index := make(map[string][]storage.SourceMediaInfo)
 	for sourceRelPath, item := range sourceIndex {
 		if sourceRelPath == "" || seenSourcePaths[filepath.Clean(sourceRelPath)] {
+			continue
+		}
+		if item.Deleted {
 			continue
 		}
 		if item.SourceModUnix == 0 {
@@ -704,15 +840,6 @@ func (s *PhotoService) relocateExistingSourceMedia(job sourceMoveJob, uploadedBy
 }
 
 func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) (*storage.Photo, bool, error) {
-	if existing, err := s.repo.GetPhotoBySourceRelPath(job.sourceRelPath, uploadedBy); err != nil {
-		return nil, false, err
-	} else if existing != nil {
-		if err := s.refreshExistingImportedPhotoMetadata(existing, job, uploadedBy); err != nil {
-			return nil, false, err
-		}
-		return existing, false, nil
-	}
-
 	info := job.info
 	if info == nil {
 		var err error
@@ -720,6 +847,26 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		if err != nil {
 			return nil, false, err
 		}
+	}
+	if existing, err := s.repo.GetPhotoBySourceRelPath(job.sourceRelPath, uploadedBy); err != nil {
+		return nil, false, err
+	} else if existing != nil {
+		wasDeleted := existing.DeletedAt != nil
+		if wasDeleted {
+			if !sourceFileChangedAfterDeletion(info, existing.DeletedAt.UnixNano()) {
+				return existing, false, nil
+			}
+			if err := s.repo.RestorePhoto(existing.ID, uploadedBy); err != nil {
+				return nil, false, err
+			}
+			existing.DeletedAt = nil
+			existing.DeletedBy = nil
+			existing.DeletedGroupID = ""
+		}
+		if err := s.refreshExistingImportedPhotoMetadata(existing, job, uploadedBy); err != nil {
+			return nil, false, err
+		}
+		return existing, wasDeleted, nil
 	}
 
 	file, err := os.Open(job.path)

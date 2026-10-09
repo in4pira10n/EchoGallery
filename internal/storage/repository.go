@@ -93,6 +93,8 @@ type Repository interface {
 
 	// UpdatePhotoSourceMedia 更新导入源媒体的路径与基础源信息，用于目录迁移后复用原记录与缩略图。
 	UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string, originalName string, size int64, sourceModUnix int64) error
+	// UpdatePhotoMediaPath 更新媒体文件路径与显示名称，用于显式重命名。
+	UpdatePhotoMediaPath(id int64, userID int64, sourceRelPath string, storageRelPath string, originalName string, size int64, sourceModUnix int64) error
 
 	// UpdatePhotoCapturedMetadata 更新拍摄时间与基础媒体元数据，用于重新扫描后修正旧记录。
 	UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *PhotoEXIF, width int, height int, durationMS int64) error

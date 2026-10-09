@@ -3,12 +3,16 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"html"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+
+	"echogallery/internal/config"
 
 	"github.com/gin-gonic/gin"
 )
@@ -185,49 +189,53 @@ const registerPageFallbackHTML = `<!doctype html>
   <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
-<body>
-<div class="login-wrap">
-  <div class="login-card register-card">
-    <section class="login-form-panel" aria-label="注册">
-      <div class="login-form-head">
-        <span>新用户</span>
-        <strong>注册 EchoGallery</strong>
+<body class="register-page">
+<a class="timeline-order-btn" id="register-back-btn" href="/login" aria-label="返回登录" title="返回登录">
+  <svg data-icon-source width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><use href="/static/svg/back.svg#back-icon"></use></svg>
+</a>
+<main class="auth-screen">
+  <section class="auth-stage" aria-hidden="true"></section>
+  <section class="auth-pane" aria-label="注册">
+    <div class="auth-brand">
+      <img src="/static/pwa-icon.png" alt="">
+      <p><strong id="register-form-title">注册 EchoGallery</strong></p>
+    </div>
+    <div class="auth-fields">
+      <div class="auth-field">
+        <label for="username">用户名</label>
+        <input id="username" type="text" autocomplete="username" placeholder="请输入用户名">
+      </div>
+      <div class="auth-field">
+        <label for="password">密码</label>
+        <input id="password" type="password" autocomplete="new-password" placeholder="至少 6 位">
+      </div>
+      <div class="auth-field">
+        <label for="confirm-password">确认密码</label>
+        <input id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入密码">
+      </div>
+    </div>
+    <div class="form-group register-role-group">
+      <label class="form-label" for="role">账号类型</label>
+      <select class="input" id="role">
+        <option value="visitor">访客用户</option>
+        <option value="admin">管理员账户</option>
+      </select>
+    </div>
+    <div id="register-admin-fields" hidden>
+      <div class="form-group">
+        <label class="form-label" for="admin-username">管理员用户名</label>
+        <input class="input" id="admin-username" type="text" autocomplete="username" placeholder="输入现有管理员用户名">
       </div>
       <div class="form-group">
-        <label class="form-label" for="username">用户名</label>
-        <input class="input" id="username" type="text" autocomplete="username" placeholder="请输入用户名">
+        <label class="form-label" for="admin-password">管理员密码</label>
+        <input class="input" id="admin-password" type="password" autocomplete="current-password" placeholder="输入现有管理员密码">
       </div>
-      <div class="form-group">
-        <label class="form-label" for="password">密码</label>
-        <input class="input" id="password" type="password" autocomplete="new-password" placeholder="至少 6 位">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="confirm-password">确认密码</label>
-        <input class="input" id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入密码">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="role">账号类型</label>
-        <select class="input" id="role">
-          <option value="visitor">访客用户</option>
-          <option value="admin">管理员账户</option>
-        </select>
-      </div>
-      <div id="register-admin-fields" hidden>
-        <div class="form-group">
-          <label class="form-label" for="admin-username">管理员用户名</label>
-          <input class="input" id="admin-username" type="text" autocomplete="username" placeholder="输入现有管理员用户名">
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="admin-password">管理员密码</label>
-          <input class="input" id="admin-password" type="password" autocomplete="current-password" placeholder="输入现有管理员密码">
-        </div>
-      </div>
-      <button class="btn btn-primary login-submit" id="register-btn">创建账号</button>
-      <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
-      <div class="login-error" id="register-error"></div>
-    </section>
-  </div>
-</div>
+    </div>
+    <button class="btn btn-primary login-submit" id="register-btn">创建账号</button>
+    <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
+    <div class="login-error" id="register-error"></div>
+  </section>
+</main>
 <script>
 (function() {
   var t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -364,7 +372,7 @@ func readStaticAsset(staticFS fs.FS, relPath string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func handleWebManifest(staticFS fs.FS) gin.HandlerFunc {
+func handleWebManifest(staticFS fs.FS, configs ...*config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		data, err := readStaticAsset(staticFS, "manifest.webmanifest")
 		if err != nil {
@@ -372,6 +380,13 @@ func handleWebManifest(staticFS fs.FS) gin.HandlerFunc {
 			return
 		}
 		c.Header("Cache-Control", "no-cache")
+		if len(configs) > 0 {
+			var manifest map[string]any
+			if json.Unmarshal(data, &manifest) == nil {
+				manifest["name"], manifest["short_name"] = configs[0].DisplayName(), configs[0].DisplayName()
+				data, _ = json.Marshal(manifest)
+			}
+		}
 		c.Data(http.StatusOK, "application/manifest+json; charset=utf-8", []byte(applyAssetVersionTemplate(staticFS, string(data))))
 	}
 }
@@ -389,23 +404,42 @@ func handleServiceWorker(staticFS fs.FS) gin.HandlerFunc {
 	}
 }
 
-func handleAppPage(staticFS fs.FS) gin.HandlerFunc {
+func handleAppPage(staticFS fs.FS, configs ...*config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "app.html", appPageFallbackHTML, []string{`id="app"`, `/static/app.js`})
+		html = applyGalleryName(html, configs)
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 	}
 }
 
-func handleLoginPage(staticFS fs.FS) gin.HandlerFunc {
+func handleLoginPage(staticFS fs.FS, configs ...*config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "login.html", loginPageFallbackHTML, []string{`id="login-btn"`, `/api/auth/login`})
+		html = applyGalleryName(html, configs)
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 	}
 }
 
-func handleRegisterPage(staticFS fs.FS) gin.HandlerFunc {
+func handleRegisterPage(staticFS fs.FS, configs ...*config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		html := pageHTML(staticFS, "register.html", registerPageFallbackHTML, []string{`id="register-btn"`, `/api/auth/register`})
+		html = applyGalleryName(html, configs)
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 	}
+}
+
+func applyGalleryName(content string, configs []*config.Config) string {
+	if len(configs) == 0 {
+		return content
+	}
+	name := configs[0].DisplayName()
+	encoded, _ := json.Marshal(name)
+	content = strings.Replace(content, "<head>", "<head><script>window.__GALLERY_NAME__="+string(encoded)+";</script>", 1)
+	escapedName := html.EscapeString(name)
+	content = strings.ReplaceAll(content, `content="EchoGallery"`, `content="`+escapedName+`"`)
+	content = strings.ReplaceAll(content, `id="login-library-name">EchoGallery`, `id="login-library-name">`+escapedName)
+	content = strings.ReplaceAll(content, `id="register-form-title">注册 EchoGallery`, `id="register-form-title">注册 `+escapedName)
+	content = strings.ReplaceAll(content, `<strong>登录 EchoGallery</strong>`, `<strong>登录 `+escapedName+`</strong>`)
+	content = strings.ReplaceAll(content, `<strong>注册 EchoGallery</strong>`, `<strong>注册 `+escapedName+`</strong>`)
+	return strings.ReplaceAll(content, "EchoGallery</title>", escapedName+"</title>")
 }

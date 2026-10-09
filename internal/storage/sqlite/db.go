@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
 // DB SQLite 数据库封装
 type DB struct {
+	closeMu       sync.Mutex
 	db            *sql.DB
 	libraryUserID int64
 	portableCopy  *portableCopyCoordinator
@@ -31,6 +33,11 @@ func newDirect(dsn string) (*DB, error) {
 	// 这里限制为单连接写入，并设置 busy_timeout，让短暂锁竞争自动等待。
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	// Set the timeout before journal mode: that PRAGMA can itself need a lock.
+	if _, err := db.Exec(`PRAGMA busy_timeout=10000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("设置数据库锁等待失败: %w", err)
+	}
 
 	// SQLite 最佳实践设置
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
@@ -39,10 +46,6 @@ func newDirect(dsn string) (*DB, error) {
 	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		return nil, fmt.Errorf("启用外键失败: %w", err)
 	}
-	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return nil, fmt.Errorf("设置 busy_timeout 失败: %w", err)
-	}
-
 	store := &DB{db: db}
 	if err := store.migrate(); err != nil {
 		db.Close()
@@ -67,10 +70,19 @@ func (s *DB) LibraryUserID(fallback int64) int64 {
 
 // Close 关闭数据库连接
 func (s *DB) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.portableCopy != nil {
+		if err := s.portableCopy.sync(true); err != nil {
+			return err
+		}
+	}
 	err := s.db.Close()
 	portableCopy := s.portableCopy
-	s.portableCopy = nil
 	copyErr := releasePortableCopy(portableCopy)
+	if copyErr == nil {
+		s.portableCopy = nil
+	}
 	if err != nil {
 		return err
 	}

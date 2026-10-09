@@ -125,7 +125,7 @@ func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, 
 	}
 	s.thumbBuild = task
 	s.thumbnailBuildActive.Store(true)
-	go s.runThumbnailBuild(ctx, task)
+	s.background(func() { s.runThumbnailBuild(ctx, task) })
 	return task.snapshot(), nil
 }
 

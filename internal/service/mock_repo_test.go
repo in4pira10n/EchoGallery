@@ -100,6 +100,13 @@ func (m *mockRepo) ListSourceMediaIndex(userID int64) (map[string]storage.Source
 				SourceRelPath: p.SourceRelPath,
 				Size:          p.Size,
 				SourceModUnix: p.SourceModUnix,
+				Deleted:       p.DeletedAt != nil,
+				DeletedAtUnixNano: func() int64 {
+					if p.DeletedAt == nil {
+						return 0
+					}
+					return p.DeletedAt.UnixNano()
+				}(),
 			}
 		}
 	}
@@ -411,6 +418,19 @@ func (m *mockRepo) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath 
 		return fmt.Errorf("图片不存在")
 	}
 	p.SourceRelPath = sourceRelPath
+	p.OriginalName = originalName
+	p.Size = size
+	p.SourceModUnix = sourceModUnix
+	return nil
+}
+
+func (m *mockRepo) UpdatePhotoMediaPath(id int64, userID int64, sourceRelPath string, storageRelPath string, originalName string, size int64, sourceModUnix int64) error {
+	p, ok := m.photos[id]
+	if !ok || p.UploadedBy != userID {
+		return fmt.Errorf("图片不存在")
+	}
+	p.SourceRelPath = sourceRelPath
+	p.StorageRelPath = storageRelPath
 	p.OriginalName = originalName
 	p.Size = size
 	p.SourceModUnix = sourceModUnix

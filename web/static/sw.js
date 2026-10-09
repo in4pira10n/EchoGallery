@@ -15,6 +15,8 @@ const STATIC_ASSETS = [
   `/static/app.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon.png?v=${EG_ASSET_VERSION}`,
+  `/static/pwa-icon-512.png?v=${EG_ASSET_VERSION}`,
+  `/static/pwa-icon-192.png?v=${EG_ASSET_VERSION}`,
   `/static/strings/zh-CN.json?v=${EG_ASSET_VERSION}`
 ];
 

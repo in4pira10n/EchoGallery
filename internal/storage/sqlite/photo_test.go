@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -293,6 +294,44 @@ func TestSavePhoto_VideoFieldsPersisted(t *testing.T) {
 	}
 }
 
+func TestUpdatePhotoMediaPath_PreservesEXIF(t *testing.T) {
+	db := newTestDB(t)
+	expectedEXIF := &storage.PhotoEXIF{
+		Make:         "Echo Camera",
+		Model:        "Preservation Test",
+		Orientation:  6,
+		FNumber:      "f/2.8",
+		ExposureTime: "1/125",
+		ISOSpeed:     400,
+		Latitude:     31.2304,
+		Longitude:    121.4737,
+		HasGPS:       true,
+	}
+	p := makePhoto(1, time.Now())
+	p.SourceRelPath = "before.jpg"
+	p.EXIF = expectedEXIF
+	if err := db.SavePhoto(p); err != nil {
+		t.Fatalf("保存测试媒体失败: %v", err)
+	}
+
+	if err := db.UpdatePhotoMediaPath(p.ID, 1, "after.jpg", "", "after.jpg", p.Size, p.SourceModUnix); err != nil {
+		t.Fatalf("更新媒体路径失败: %v", err)
+	}
+	updated, err := db.GetPhotoByID(p.ID, 1)
+	if err != nil {
+		t.Fatalf("读取更新后的媒体失败: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("更新后的媒体记录不存在")
+	}
+	if updated.SourceRelPath != "after.jpg" || updated.OriginalName != "after.jpg" {
+		t.Fatalf("媒体路径字段未更新: source=%q name=%q", updated.SourceRelPath, updated.OriginalName)
+	}
+	if !reflect.DeepEqual(updated.EXIF, expectedEXIF) {
+		t.Fatalf("更新媒体路径不应改变 EXIF 信息: got=%+v want=%+v", updated.EXIF, expectedEXIF)
+	}
+}
+
 func TestSavePhoto_DuplicateUUID(t *testing.T) {
 	db := newTestDB(t)
 	p := makePhoto(1, time.Now())
@@ -366,6 +405,30 @@ func TestGetPhotoByUUIDAny_IncludesDeleted(t *testing.T) {
 	}
 	if got.DeletedAt == nil {
 		t.Error("DeletedAt 应该不为 nil")
+	}
+}
+
+func TestListSourceMediaIndex_IncludesDeletionTime(t *testing.T) {
+	db := newTestDB(t)
+	p := makePhoto(1, time.Now())
+	p.SourceRelPath = "1.JPG"
+	if err := db.SavePhoto(p); err != nil {
+		t.Fatal(err)
+	}
+	deletedAt := time.Now().Add(-2 * time.Second)
+	if _, err := db.db.Exec(`UPDATE photos SET deleted_at = ? WHERE id = ?`, deletedAt, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	index, err := db.ListSourceMediaIndex(1)
+	if err != nil {
+		t.Fatalf("读取源媒体索引失败: %v", err)
+	}
+	item, ok := index[p.SourceRelPath]
+	if !ok || !item.Deleted {
+		t.Fatalf("索引应包含已删除源媒体，得到 %+v", item)
+	}
+	if item.DeletedAtUnixNano == 0 || time.Unix(0, item.DeletedAtUnixNano).Before(deletedAt.Add(-time.Second)) {
+		t.Fatalf("删除时间未正确读取: got=%d want~=%s", item.DeletedAtUnixNano, deletedAt)
 	}
 }
 

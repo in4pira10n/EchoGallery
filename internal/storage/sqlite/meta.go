@@ -70,6 +70,9 @@ func (s *DB) initializePortableMetadata() error {
 	if err != nil || s.libraryUserID <= 0 {
 		return fmt.Errorf("无效的资源库数据所有者编号: %q", owner)
 	}
+	if err := s.reconcilePortableMedia(); err != nil {
+		return err
+	}
 	_, err = s.db.Exec(`CREATE VIEW IF NOT EXISTS trash_links AS
 		SELECT uuid AS media_id, source_rel_path AS relative_path, deleted_at AS trashed_at
 		FROM photos WHERE deleted_at IS NOT NULL`)

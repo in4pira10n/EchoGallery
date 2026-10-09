@@ -46,6 +46,13 @@ type Workshop struct {
 	IconOverrides map[string]string `json:"icon_overrides,omitempty"`
 }
 
+func (c *Config) DisplayName() string {
+	if c != nil && strings.TrimSpace(c.Workshop.AppName) != "" {
+		return strings.TrimSpace(c.Workshop.AppName)
+	}
+	return "EchoGallery"
+}
+
 type Preferences struct {
 	Theme                         string `json:"theme"`
 	GridSize                      int    `json:"grid_size"`

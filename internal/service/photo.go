@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -31,6 +32,10 @@ type thumbnailWorkItem struct {
 
 // PhotoService 图片业务逻辑
 type PhotoService struct {
+	lifecycleMu          sync.Mutex
+	closing              bool
+	workerStop           chan struct{}
+	workerWG             sync.WaitGroup
 	repo                 storage.Repository
 	sourcePath           string
 	dataPath             string
@@ -49,6 +54,7 @@ type PhotoService struct {
 	thumbPriorityVideo   chan thumbnailWorkItem
 	thumbJobsVideo       chan thumbnailWorkItem
 	thumbJobsMu          sync.Mutex
+	scanMu               sync.Mutex
 	thumbPending         map[string]struct{}
 	thumbUrgent          map[string]struct{}
 	thumbBuildMu         sync.Mutex
@@ -78,6 +84,7 @@ func NewPhotoServiceWithoutWarmup(repo storage.Repository, sourcePath string, da
 
 func newPhotoService(repo storage.Repository, sourcePath string, dataPath string, startWorkers bool) *PhotoService {
 	svc := &PhotoService{
+		workerStop:    make(chan struct{}),
 		repo:          repo,
 		sourcePath:    sourcePath,
 		dataPath:      dataPath,
@@ -151,7 +158,7 @@ func (s *PhotoService) startThumbnailWorkers() {
 	s.thumbPriorityVideo = make(chan thumbnailWorkItem, 48)
 	s.thumbJobsVideo = make(chan thumbnailWorkItem, 128)
 	for i := 0; i < heavyImageThumbnailWarmupWorkerCount(); i++ {
-		go func() {
+		s.background(func() {
 			for {
 				job, ok := s.nextThumbnailJob(s.thumbPriorityHeavy, s.thumbJobsHeavy)
 				if !ok {
@@ -159,10 +166,10 @@ func (s *PhotoService) startThumbnailWorkers() {
 				}
 				s.processThumbnailJob(job)
 			}
-		}()
+		})
 	}
 	for i := 0; i < imageThumbnailWarmupWorkerCount(); i++ {
-		go func() {
+		s.background(func() {
 			for {
 				job, ok := s.nextThumbnailJob(s.thumbPriorityImage, s.thumbJobsImage)
 				if !ok {
@@ -170,10 +177,10 @@ func (s *PhotoService) startThumbnailWorkers() {
 				}
 				s.processThumbnailJob(job)
 			}
-		}()
+		})
 	}
 	for i := 0; i < videoThumbnailWarmupWorkerCount(); i++ {
-		go func() {
+		s.background(func() {
 			for {
 				job, ok := s.nextThumbnailJob(s.thumbPriorityVideo, s.thumbJobsVideo)
 				if !ok {
@@ -181,7 +188,7 @@ func (s *PhotoService) startThumbnailWorkers() {
 				}
 				s.processThumbnailJob(job)
 			}
-		}()
+		})
 	}
 }
 
@@ -202,11 +209,15 @@ func (s *PhotoService) nextThumbnailJob(priority <-chan thumbnailWorkItem, norma
 		return thumbnailWorkItem{}, false
 	}
 	select {
+	case <-s.workerStop:
+		return thumbnailWorkItem{}, false
 	case job, ok := <-priority:
 		return job, ok
 	default:
 	}
 	select {
+	case <-s.workerStop:
+		return thumbnailWorkItem{}, false
 	case job, ok := <-priority:
 		return job, ok
 	case job, ok := <-normal:
@@ -258,27 +269,25 @@ func (s *PhotoService) enqueueThumbnailJob(job thumbnailWorkItem, priority bool)
 	if job.photo == nil {
 		return
 	}
-	if job.photo.MediaKind == storage.MediaKindVideo {
-		if priority {
-			s.thumbPriorityVideo <- job
-			return
-		}
-		s.thumbJobsVideo <- job
-		return
-	}
-	if isMemoryHeavyThumbnail(job.photo) {
-		if priority {
-			s.thumbPriorityHeavy <- job
-			return
-		}
-		s.thumbJobsHeavy <- job
-		return
-	}
+	queue := s.thumbJobsImage
 	if priority {
-		s.thumbPriorityImage <- job
-		return
+		queue = s.thumbPriorityImage
 	}
-	s.thumbJobsImage <- job
+	if job.photo.MediaKind == storage.MediaKindVideo {
+		queue = s.thumbJobsVideo
+		if priority {
+			queue = s.thumbPriorityVideo
+		}
+	} else if isMemoryHeavyThumbnail(job.photo) {
+		queue = s.thumbJobsHeavy
+		if priority {
+			queue = s.thumbPriorityHeavy
+		}
+	}
+	select {
+	case <-s.workerStop:
+	case queue <- job:
+	}
 }
 
 func (s *PhotoService) enqueueThumbnailGeneration(photo *storage.Photo, priority bool) {
@@ -325,11 +334,11 @@ func (s *PhotoService) warmImportedThumbnails(photos []*storage.Photo) {
 		return ti.After(tj)
 	})
 	const firstScreenWarmCount = 180
-	go func() {
+	s.background(func() {
 		for index, photo := range photos {
 			s.enqueueThumbnailGeneration(photo, index < firstScreenWarmCount)
 		}
-	}()
+	})
 }
 
 func (s *PhotoService) WarmThumbnailsByUUIDs(uuids []string, userID int64) (int, error) {
@@ -358,6 +367,95 @@ func (s *PhotoService) WarmThumbnailsByUUIDs(uuids []string, userID int64) (int,
 		}
 	}
 	return warmed, nil
+}
+
+func (s *PhotoService) RenameMedia(id int64, userID int64, name string) (*storage.Photo, error) {
+	photo, err := s.GetPhoto(id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if photo == nil {
+		return nil, fmt.Errorf("媒体不存在")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || strings.HasSuffix(name, ".") {
+		return nil, fmt.Errorf("文件名无效")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || strings.ContainsRune(`/\\:*?"<>|`, r) {
+			return nil, fmt.Errorf("文件名包含不支持的字符")
+		}
+	}
+	upper := strings.ToUpper(strings.TrimRight(name, " ."))
+	base := upper
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || (len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9') {
+		return nil, fmt.Errorf("文件名是系统保留名称")
+	}
+	if filepath.Ext(name) != "" {
+		return nil, fmt.Errorf("请只输入文件名，不要输入扩展名")
+	}
+	oldPath := s.MediaPath(photo)
+	if _, err := os.Stat(oldPath); err != nil {
+		return nil, fmt.Errorf("读取原媒体失败: %w", err)
+	}
+	usesSourcePath := photo.SourceRelPath != ""
+	if usesSourcePath {
+		if _, err := os.Stat(filepath.Join(s.sourcePath, filepath.FromSlash(photo.SourceRelPath))); err != nil {
+			usesSourcePath = false
+		}
+	}
+	ext := filepath.Ext(photo.OriginalName)
+	newName := name + ext
+	newPath := filepath.Join(filepath.Dir(oldPath), newName)
+	if filepath.Clean(newPath) == filepath.Clean(oldPath) {
+		return photo, nil
+	}
+	if _, err := os.Lstat(newPath); err == nil {
+		return nil, fmt.Errorf("目标文件已存在")
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("检查目标文件失败: %w", err)
+	}
+	// Rename the directory entry only; never decode or rewrite media bytes and embedded metadata.
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return nil, fmt.Errorf("重命名媒体文件失败: %w", err)
+	}
+	newInfo, err := os.Stat(newPath)
+	if err != nil {
+		_ = os.Rename(newPath, oldPath)
+		return nil, fmt.Errorf("读取重命名后的媒体失败: %w", err)
+	}
+	sourceRelPath := photo.SourceRelPath
+	storageRelPath := photo.StorageRelPath
+	if usesSourcePath {
+		sourceRelPath, err = filepath.Rel(s.sourcePath, newPath)
+		sourceRelPath = filepath.ToSlash(sourceRelPath)
+	} else if storageRelPath != "" {
+		storageRelPath, err = filepath.Rel(s.dataPath, newPath)
+		storageRelPath = filepath.ToSlash(storageRelPath)
+		sourceRelPath = ""
+	}
+	if err != nil {
+		_ = os.Rename(newPath, oldPath)
+		return nil, fmt.Errorf("媒体路径无法转换为相对路径: %w", err)
+	}
+	if err := s.repo.UpdatePhotoMediaPath(photo.ID, userID, sourceRelPath, storageRelPath, newName, newInfo.Size(), newInfo.ModTime().UnixNano()); err != nil {
+		if rollbackErr := os.Rename(newPath, oldPath); rollbackErr != nil {
+			return nil, fmt.Errorf("更新媒体记录失败: %v；恢复原文件名也失败: %w", err, rollbackErr)
+		}
+		return nil, fmt.Errorf("更新媒体记录失败: %w", err)
+	}
+	photo.SourceRelPath = sourceRelPath
+	photo.StorageRelPath = storageRelPath
+	photo.OriginalName = newName
+	photo.Size = newInfo.Size()
+	photo.SourceModUnix = newInfo.ModTime().UnixNano()
+	if err := s.syncPortableDatabase(); err != nil {
+		return photo, fmt.Errorf("媒体已重命名，但同步资源库数据库失败: %w", err)
+	}
+	return photo, nil
 }
 
 func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string) bool {
@@ -560,7 +658,7 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 	if s.syncThumbnail {
 		s.generateThumbnail(photo, destPath, meta.MimeType)
 	} else {
-		go s.enqueueThumbnailGeneration(photo, true)
+		s.background(func() { s.enqueueThumbnailGeneration(photo, true) })
 	}
 
 	return &UploadResult{Photo: photo}, nil

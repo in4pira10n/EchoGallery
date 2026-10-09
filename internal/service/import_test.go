@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"echogallery/internal/storage"
 )
@@ -88,6 +89,77 @@ func TestImportExistingPhotos_Idempotent(t *testing.T) {
 	}
 	if len(page.Photos) != 1 {
 		t.Fatalf("期望最终只有 1 条记录，得到 %d", len(page.Photos))
+	}
+}
+
+func TestImportExistingPhotos_RestoresDeletedFileThatReappears(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	path := filepath.Join(svc.sourcePath, "restored.jpg")
+	if err := os.WriteFile(path, createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次扫描失败: %v", err)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil || len(page.Photos) != 1 {
+		t.Fatalf("首次扫描结果异常: page=%+v err=%v", page, err)
+	}
+	photoID := page.Photos[0].ID
+	if err := svc.DeletePhoto(photoID, 1); err != nil {
+		t.Fatalf("删除测试媒体失败: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("删除测试源文件失败: %v", err)
+	}
+	if err := os.WriteFile(path, createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatalf("复制媒体到新路径失败: %v", err)
+	}
+	rootInfo, err := os.Stat(svc.sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(svc.sourcePath, rootInfo.ModTime().Add(time.Second), rootInfo.ModTime().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := svc.ImportExistingPhotos(1, nil)
+	if err != nil {
+		t.Fatalf("文件重新出现后扫描失败: %v", err)
+	}
+	if summary.Imported != 1 {
+		t.Fatalf("重新出现的已删除媒体应恢复，得到 imported=%d", summary.Imported)
+	}
+	page, err = svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil || len(page.Photos) != 1 || page.Photos[0].ID != photoID {
+		t.Fatalf("恢复后应复用原记录，得到 page=%+v err=%v", page, err)
+	}
+}
+
+func TestImportExistingPhotos_DoesNotRestoreAppDeletedFileDuringUnrelatedScan(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	deletedPath := filepath.Join(svc.sourcePath, "kept-in-trash.jpg")
+	if err := os.WriteFile(deletedPath, createJPEGBytes(320, 240), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("首次扫描失败: %v", err)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil || len(page.Photos) != 1 {
+		t.Fatalf("首次扫描结果异常: page=%+v err=%v", page, err)
+	}
+	if err := svc.DeletePhoto(page.Photos[0].ID, 1); err != nil {
+		t.Fatalf("删除测试媒体失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(svc.sourcePath, "new.jpg"), createJPEGBytes(160, 120), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ImportExistingPhotos(1, nil); err != nil {
+		t.Fatalf("目录变化后扫描失败: %v", err)
+	}
+	page, err = svc.GetTimeline(storage.ListPhotosParams{UserID: 1, Limit: 10})
+	if err != nil || len(page.Photos) != 1 || page.Photos[0].OriginalName != "new.jpg" {
+		t.Fatalf("无关文件变化不应恢复回收站媒体: page=%+v err=%v", page, err)
 	}
 }
 

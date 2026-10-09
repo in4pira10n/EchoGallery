@@ -46,6 +46,7 @@ type TargetStatus struct {
 
 type CheckResult struct {
 	HasUpdate          bool           `json:"has_update"`
+	Blocked            bool           `json:"blocked"`
 	Compared           int            `json:"compared"`
 	Updatable          int            `json:"updatable"`
 	PackagePath        string         `json:"package_path,omitempty"`
@@ -193,23 +194,19 @@ func StartLocalUpdate(cfg LocalUpdateConfig, options StartOptions) (ApplyResult,
 		cleanup()
 		return applyResult, nil
 	}
-	targets := make([]ReplaceTarget, 0, len(result.Targets))
-	for _, target := range result.Targets {
-		if !target.Exists || !target.NeedsUpdate || strings.TrimSpace(target.CurrentBinary) == "" {
-			applyResult.Skipped++
-			continue
-		}
-		targets = append(targets, ReplaceTarget{
-			RequestedPath: target.Path,
-			MainDest:      target.CurrentBinary,
-			UpdaterDest:   target.CurrentUpdater,
-		})
-	}
+	targets := replaceTargetsFromCheckResult(result)
+	applyResult.Skipped = len(result.Targets) - len(targets)
 	if len(targets) == 0 {
 		applyResult.Message = "当前不需要更新"
 		applyResult.Skipped = len(result.Targets)
 		cleanup()
 		return applyResult, nil
+	}
+	if runtime.GOOS == "windows" {
+		if err := validateWindowsUpdateTargets(targets); err != nil {
+			cleanup()
+			return ApplyResult{}, err
+		}
 	}
 	plan := ApplyPlan{
 		WaitPID:           options.CurrentPID,
@@ -238,7 +235,7 @@ func StartLocalUpdate(cfg LocalUpdateConfig, options StartOptions) (ApplyResult,
 		_ = os.Chmod(prepared.UpdaterPath, 0755)
 	}
 	if runtime.GOOS == "windows" {
-		if err := startUpdaterElevatedWindows(prepared.UpdaterPath, planPath); err != nil {
+		if err := startUpdaterWindows(prepared.UpdaterPath, planPath, targets); err != nil {
 			cleanup()
 			return ApplyResult{}, err
 		}
@@ -270,18 +267,38 @@ func RunApplyPlan(planPath string) error {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return err
 	}
+	if runtime.GOOS == "windows" {
+		if err := validateWindowsUpdateTargets(plan.Targets); err != nil {
+			return err
+		}
+	}
 	if plan.WaitPID > 0 {
 		if err := waitForPIDExit(plan.WaitPID); err != nil {
 			return err
 		}
 	}
+	var failures []error
 	for _, target := range plan.Targets {
 		if err := replaceFileFromSource(target.MainDest, plan.MainSourcePath); err != nil {
-			return fmt.Errorf("failed to replace %s: %w", target.MainDest, err)
+			failures = append(failures, fmt.Errorf("failed to replace %s (another instance may still be running): %w", target.MainDest, err))
+			continue
 		}
 		if strings.TrimSpace(target.UpdaterDest) != "" {
 			if err := replaceFileFromSource(target.UpdaterDest, plan.UpdaterSourcePath); err != nil {
-				return fmt.Errorf("failed to replace %s: %w", target.UpdaterDest, err)
+				failures = append(failures, fmt.Errorf("failed to replace %s: %w", target.UpdaterDest, err))
+			}
+		}
+	}
+	updateErr := errors.Join(failures...)
+	if updateErr != nil {
+		// GUI-subsystem Windows updaters have no visible stderr. Keep a report
+		// beside the original application as well as in the unique staging folder.
+		report := []byte(updateErr.Error() + "\n")
+		_ = os.WriteFile(filepath.Join(filepath.Dir(planPath), "update-error.log"), report, 0644)
+		if plan.RestartExecutable != "" {
+			logDir := filepath.Join(filepath.Dir(plan.RestartExecutable), "echogallery-data")
+			if os.MkdirAll(logDir, 0755) == nil {
+				_ = os.WriteFile(filepath.Join(logDir, "update-error.log"), report, 0644)
 			}
 		}
 	}
@@ -289,10 +306,10 @@ func RunApplyPlan(planPath string) error {
 		if err := os.WriteFile(plan.RestartSignalPath, []byte("ok\n"), 0644); err != nil {
 			return fmt.Errorf("failed to signal restart readiness: %w", err)
 		}
-		return nil
+		return updateErr
 	}
 	if strings.TrimSpace(plan.RestartExecutable) == "" {
-		return nil
+		return updateErr
 	}
 	env := append([]string(nil), plan.RestartEnv...)
 	if len(env) == 0 {
@@ -304,7 +321,7 @@ func RunApplyPlan(planPath string) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Start()
+	return errors.Join(updateErr, cmd.Start())
 }
 
 func launchRestartWatcher(stageRoot string, signalPath string, options StartOptions) error {
@@ -322,7 +339,9 @@ func launchRestartWatcher(stageRoot string, signalPath string, options StartOpti
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("cmd", "/C", scriptPath)
 		cmd.Dir = strings.TrimSpace(options.WorkingDir)
-		cmd.SysProcAttr = hiddenWindowsProcessAttr()
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 		return cmd.Start()
 	}
 	cmd := exec.Command("/bin/sh", scriptPath)
@@ -385,7 +404,7 @@ func buildWindowsRestartWatcherScript(signalPath string, options StartOptions) s
 	if strings.TrimSpace(wd) != "" {
 		lines = append(lines, fmt.Sprintf("cd /d \"%s\"", wd))
 	}
-	lines = append(lines, "call "+restartCmd)
+	lines = append(lines, "start \"EchoGallery\" /b /wait "+restartCmd, "exit /b")
 	return strings.Join(lines, "\r\n") + "\r\n"
 }
 
@@ -446,12 +465,35 @@ func comparePackage(cfg LocalUpdateConfig, prepared preparedPackage) (CheckResul
 		result.Targets = append(result.Targets, status)
 	}
 	result.HasUpdate = result.Updatable > 0
+	if result.HasUpdate && runtime.GOOS == "windows" {
+		if err := validateWindowsUpdateTargets(replaceTargetsFromCheckResult(result)); err != nil {
+			result.Blocked = true
+			result.HasUpdate = false
+			result.Message = err.Error()
+			return result, nil
+		}
+	}
 	if result.HasUpdate {
 		result.Message = fmt.Sprintf("检测到 %d 个程序可更新", result.Updatable)
 	} else {
 		result.Message = "当前不需要更新"
 	}
 	return result, nil
+}
+
+func replaceTargetsFromCheckResult(result CheckResult) []ReplaceTarget {
+	targets := make([]ReplaceTarget, 0, len(result.Targets))
+	for _, target := range result.Targets {
+		if !target.Exists || !target.NeedsUpdate || strings.TrimSpace(target.CurrentBinary) == "" {
+			continue
+		}
+		targets = append(targets, ReplaceTarget{
+			RequestedPath: target.Path,
+			MainDest:      target.CurrentBinary,
+			UpdaterDest:   target.CurrentUpdater,
+		})
+	}
+	return targets
 }
 
 func preparePackage(packagePath string, keepStage bool) (preparedPackage, func(), error) {
@@ -473,6 +515,30 @@ func preparePackage(packagePath string, keepStage bool) (preparedPackage, func()
 	if err != nil {
 		cleanup()
 		return preparedPackage{}, nil, err
+	}
+	if keepStage {
+		// Never run the updater from a distribution directory: it might also be
+		// a replacement target, and separate instances need separate signals.
+		stage, err := os.MkdirTemp("", "echogallery-apply-*")
+		if err != nil {
+			cleanup()
+			return preparedPackage{}, nil, err
+		}
+		for _, file := range []struct{ source, name string }{{mainPath, mainName}, {updaterPath, updaterName}} {
+			data, err := os.ReadFile(file.source)
+			if err == nil {
+				err = os.WriteFile(filepath.Join(stage, file.name), data, 0755)
+			}
+			if err != nil {
+				_ = os.RemoveAll(stage)
+				cleanup()
+				return preparedPackage{}, nil, err
+			}
+		}
+		root, mainPath, updaterPath = stage, filepath.Join(stage, mainName), filepath.Join(stage, updaterName)
+		persistent = true
+		previousCleanup := cleanup
+		cleanup = func() { previousCleanup(); _ = os.RemoveAll(stage) }
 	}
 	return preparedPackage{
 		Root:            root,
@@ -690,6 +756,9 @@ func replaceFileFromSource(dest string, sourcePath string) error {
 }
 
 func replaceFileAtomic(dest string, src []byte) error {
+	if info, err := os.Stat(dest); err == nil && info.IsDir() {
+		return fmt.Errorf("update target is a directory: %s", dest)
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return err
 	}
@@ -709,8 +778,51 @@ func replaceFileAtomic(dest string, src []byte) error {
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(tmpName, 0755)
 	}
-	_ = os.Remove(dest)
-	return os.Rename(tmpName, dest)
+	if runtime.GOOS != "windows" {
+		return os.Rename(tmpName, dest)
+	}
+	backup := tmpName + ".previous"
+	if err := os.Rename(dest, backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		_ = os.Rename(backup, dest)
+		return err
+	}
+	_ = os.Remove(backup)
+	return nil
+}
+
+func validateWindowsUpdateTargets(targets []ReplaceTarget) error {
+	for _, target := range targets {
+		for _, path := range []string{target.MainDest, target.UpdaterDest} {
+			if strings.TrimSpace(path) == "" || !isWindowsProtectedInstallPath(path) {
+				continue
+			}
+			return fmt.Errorf("当前安装位置受 Windows UWP/MSIX 保护，无法由应用自身覆盖：%s。请使用便携版并将 EchoGallery 解压到可写目录后再更新；Microsoft Store 版本请通过 Store 更新", path)
+		}
+	}
+	return nil
+}
+
+func isWindowsProtectedInstallPath(path string) bool {
+	normalized := strings.TrimSpace(path)
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.ReplaceAll(normalized, "/", `\`)
+	for strings.HasPrefix(normalized, `\\?\`) {
+		normalized = strings.TrimPrefix(normalized, `\\?\`)
+	}
+	for _, part := range strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == '\\' || r == '/'
+	}) {
+		switch strings.ToLower(strings.TrimSpace(part)) {
+		case "windowsapps", "modifiablewindowsapps", "systemapps":
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(path string, payload any) error {

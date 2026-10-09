@@ -19,6 +19,26 @@ type portableLibraryMetadata struct {
 	AccentColor string
 }
 
+// InspectPortableLibrary validates an existing database without creating data.
+func InspectPortableLibrary(path string) (Library, bool, error) {
+	metadata, err := existingPortableLibraryMetadata(path)
+	if err != nil || metadata.ID == "" {
+		return Library{}, false, err
+	}
+	db, err := sql.Open("sqlite", sqliteReadOnlyURI(filepath.Join(LibraryDataRoot(path), "metadata.sqlite")))
+	if err != nil {
+		return Library{}, false, err
+	}
+	defer db.Close()
+	if _, err := db.Exec(`SELECT uuid, source_rel_path, is_favorite FROM photos LIMIT 0`); err != nil {
+		return Library{}, false, err
+	}
+	if _, err := db.Exec(`SELECT id, name FROM albums LIMIT 0`); err != nil {
+		return Library{}, false, err
+	}
+	return Library{ID: metadata.ID, Name: metadata.Name, Path: path, AccentColor: metadata.AccentColor}, true, nil
+}
+
 func existingPortableLibraryMetadata(storagePath string) (portableLibraryMetadata, error) {
 	var metadata portableLibraryMetadata
 	root := LibraryDataRoot(storagePath)

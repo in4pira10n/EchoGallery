@@ -59,7 +59,7 @@ func (s *PhotoService) StartVideoThumbnailRefresh(userID int64) (VideoThumbnailR
 		},
 	}
 	s.videoThumbRefresh = task
-	go s.runVideoThumbnailRefresh(ctx, task)
+	s.background(func() { s.runVideoThumbnailRefresh(ctx, task) })
 	return task.snapshot(), nil
 }
 

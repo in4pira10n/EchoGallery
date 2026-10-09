@@ -87,7 +87,7 @@ func (s *PhotoService) StartEXIFBackfill(userID int64) (EXIFBackfillStatus, erro
 		},
 	}
 	s.exifBackfill = task
-	go s.runEXIFBackfill(ctx, task)
+	s.background(func() { s.runEXIFBackfill(ctx, task) })
 	return task.snapshot(), nil
 }
 

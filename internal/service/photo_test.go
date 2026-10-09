@@ -7,6 +7,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -101,6 +102,75 @@ func TestUpload_Success(t *testing.T) {
 	}
 	if result.Photo.StorageRelPath != "" {
 		t.Fatalf("上传图片不应写入应用托管目录，得到 %s", result.Photo.StorageRelPath)
+	}
+}
+
+func TestRenameMedia_PreservesUUIDAndExtension(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	result, err := svc.Upload(UploadInput{
+		Reader:       bytes.NewReader(createJPEGBytes(80, 60)),
+		OriginalName: "before.jpg",
+		UploadedBy:   1,
+		FileModTime:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("上传测试媒体失败: %v", err)
+	}
+	oldPath := svc.MediaPath(result.Photo)
+	beforeBytes, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatalf("读取重命名前媒体失败: %v", err)
+	}
+	beforeInfo, err := os.Stat(oldPath)
+	if err != nil {
+		t.Fatalf("读取重命名前文件信息失败: %v", err)
+	}
+	expectedEXIF := &storage.PhotoEXIF{
+		Make:         "Echo Camera",
+		Model:        "Preservation Test",
+		Orientation:  6,
+		FNumber:      "f/2.8",
+		ExposureTime: "1/125",
+		ISOSpeed:     400,
+		Latitude:     31.2304,
+		Longitude:    121.4737,
+		HasGPS:       true,
+	}
+	if err := svc.repo.UpdatePhotoEXIF(result.Photo.ID, 1, expectedEXIF); err != nil {
+		t.Fatalf("设置测试 EXIF 失败: %v", err)
+	}
+	expectedEXIFValue := *expectedEXIF
+
+	updated, err := svc.RenameMedia(result.Photo.ID, 1, "after")
+	if err != nil {
+		t.Fatalf("重命名媒体失败: %v", err)
+	}
+	if updated.UUID != result.Photo.UUID || updated.OriginalName != "after.jpg" {
+		t.Fatalf("重命名不应改变 UUID 或扩展名: before=%+v after=%+v", result.Photo, updated)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("旧文件仍存在或检查失败: %v", err)
+	}
+	newPath := svc.MediaPath(updated)
+	afterInfo, err := os.Stat(newPath)
+	if err != nil {
+		t.Fatalf("新文件不存在: %v", err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("重命名应保留原文件本身，而不是复制或重建媒体文件")
+	}
+	if !beforeInfo.ModTime().Equal(afterInfo.ModTime()) || beforeInfo.Mode() != afterInfo.Mode() {
+		t.Fatalf("重命名不应改变文件修改时间或权限: before=%v/%v after=%v/%v", beforeInfo.ModTime(), beforeInfo.Mode(), afterInfo.ModTime(), afterInfo.Mode())
+	}
+	afterBytes, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("读取重命名后媒体失败: %v", err)
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatal("重命名不应改变媒体文件字节，EXIF 等内嵌信息必须原样保留")
+	}
+	if updated.EXIF == nil || !reflect.DeepEqual(*updated.EXIF, expectedEXIFValue) {
+		t.Fatalf("重命名不应改变数据库中的 EXIF 信息: got=%+v want=%+v", updated.EXIF, expectedEXIFValue)
 	}
 }
 

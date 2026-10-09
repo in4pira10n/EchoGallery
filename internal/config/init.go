@@ -12,6 +12,7 @@ import (
 )
 
 type InitialConfigParams struct {
+	AppName       string
 	Port          int
 	Libraries     []Library
 	StoragePath   string
@@ -45,6 +46,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 	}
 
 	cfg := &Config{
+		Workshop:      Workshop{AppName: strings.TrimSpace(params.AppName)},
 		Port:          params.Port,
 		ActiveProfile: user.Username,
 		StoragePath:   params.StoragePath,

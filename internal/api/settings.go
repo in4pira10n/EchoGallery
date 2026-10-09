@@ -93,6 +93,7 @@ func persistChangedPortableLibraryMetadata(previous []config.Library, cfg *confi
 }
 
 type settingsResponse struct {
+	AppName                       string            `json:"app_name"`
 	CurrentUsername               string            `json:"current_username,omitempty"`
 	Role                          string            `json:"role"`
 	CanWrite                      bool              `json:"can_write"`
@@ -137,6 +138,7 @@ type settingsResponse struct {
 }
 
 type settingsUpdateRequest struct {
+	AppName                       *string          `json:"app_name"`
 	Port                          int              `json:"port"`
 	ActiveLibraryID               string           `json:"active_library_id,omitempty"`
 	StoragePath                   string           `json:"storage_path"`
@@ -362,6 +364,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		playerKeymap = content
 	}
 	return settingsResponse{
+		AppName:                       cfg.DisplayName(),
 		CurrentUsername:               map[bool]string{true: "root", false: username}[isRootConsoleSession(username)],
 		Role:                          role,
 		CanWrite:                      role == config.UserRoleAdmin,
@@ -1104,6 +1107,9 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		}
 		requiresRestart := settingsProfileRequiresRestart(cfg, prevProfile, nextProfile, nextPort)
 		nextGlobal := *cfg
+		if req.AppName != nil {
+			nextGlobal.Workshop.AppName = strings.TrimSpace(*req.AppName)
+		}
 		nextGlobal.Port = nextPort
 		nextGlobal.ActiveProfile = username
 		nextGlobal.Users = append([]config.User(nil), cfg.Users...)
@@ -1151,6 +1157,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		}
 
 		cfg.Port = nextGlobal.Port
+		cfg.Workshop = nextGlobal.Workshop
 		cfg.ActiveProfile = nextGlobal.ActiveProfile
 		cfg.Users = append([]config.User(nil), nextGlobal.Users...)
 		cfg.Libraries = append([]config.Library(nil), nextGlobal.Libraries...)

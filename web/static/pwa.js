@@ -26,7 +26,7 @@
       var parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       if (!parsed || typeof parsed !== 'object') parsed = {};
       return {
-        name: String(parsed.name || '').trim() || DEFAULTS.name,
+        name: String(window.__GALLERY_NAME__ || parsed.name || '').trim() || DEFAULTS.name,
         iconSource: parsed.iconSource === 'svg' ? 'png' : (['favicon', 'library', 'png', 'upload'].indexOf(parsed.iconSource) >= 0 ? parsed.iconSource : DEFAULTS.iconSource),
         themeMode: ['accent', 'fixed'].indexOf(parsed.themeMode) >= 0 ? parsed.themeMode : DEFAULTS.themeMode,
         themeColor: normalizeHexColor(parsed.themeColor),
@@ -93,6 +93,25 @@
     ensureLink('apple-touch-icon', icon);
   }
 
+  function manifestIcons(icon) {
+    if (icon.indexOf('/static/pwa-icon.png') >= 0) {
+      return [192, 512].map(function (size) {
+        return {
+          src: icon.replace(/pwa-icon\.png(?=[?#]|$)/, 'pwa-icon-' + size + '.png'),
+          sizes: size + 'x' + size,
+          type: 'image/png',
+          purpose: 'any'
+        };
+      });
+    }
+    return [{
+      src: icon,
+      sizes: icon.endsWith('.svg') ? 'any' : '256x256',
+      type: icon.endsWith('.svg') ? 'image/svg+xml' : 'image/png',
+      purpose: 'any'
+    }];
+  }
+
   var dynamicManifestURL = '';
 
   function installDynamicManifest(settings) {
@@ -113,7 +132,7 @@
       theme_color: color,
       orientation: 'any',
       categories: ['photo', 'productivity', 'utilities'],
-      icons: [{ src: icon, sizes: icon.endsWith('.svg') ? 'any' : '256x256', type: icon.endsWith('.svg') ? 'image/svg+xml' : 'image/png', purpose: 'any maskable' }]
+      icons: manifestIcons(icon)
     };
     var blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
     var url = URL.createObjectURL(blob);

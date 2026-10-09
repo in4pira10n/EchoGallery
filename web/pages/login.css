@@ -1675,6 +1675,7 @@ body.dialog-open {
 }
 
 .login-page .auth-field input:focus,
+.register-page .auth-field input:focus,
 .register-page .login-card .input:focus,
 .register-page input:focus {
   outline: none;
@@ -1689,21 +1690,16 @@ body.register-page {
   overscroll-behavior: none;
 }
 
-.register-page .login-wrap {
+.register-page {
   --accent: #1976d2;
   --accent-h: #1258a8;
   --accent-strong: rgba(25, 118, 210, .30);
   --topbar-text: #103b73;
   --topbar-border-color: rgba(25, 118, 210, .22);
-  min-height: 100svh;
-  padding: 24px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
   background: var(--bg);
 }
 
-[data-theme="dark"] .register-page .login-wrap {
+[data-theme="dark"] .register-page {
   --accent: #65b7ff;
   --accent-h: #9bd2ff;
   --accent-strong: rgba(101, 183, 255, .34);
@@ -1711,56 +1707,51 @@ body.register-page {
   --topbar-border-color: rgba(155, 210, 255, .26);
 }
 
-.register-page .login-card {
-  width: min(460px, 100%);
-  min-height: auto;
-  display: block;
-  overflow: visible;
-  border-radius: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+.register-page .auth-screen,
+.register-page .auth-pane {
+  background: var(--bg);
 }
 
-.register-page .login-card::before {
-  display: none;
-  content: none;
-}
-
-.register-page .login-hero {
-  display: none;
-}
-
-.register-page .login-form-panel {
+.register-page .auth-pane {
+  position: absolute;
+  inset: 0;
   width: 100%;
-  min-height: 0;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
+  min-width: 0;
+  height: auto;
+  min-height: 100svh;
+  padding: max(32px, 6vh) 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
-.register-page .login-form-head {
-  margin-bottom: 24px;
+.register-page .auth-pane > * {
+  width: min(420px, 100%);
 }
 
-.register-page .login-form-head span {
-  display: none;
+.register-page .auth-brand {
+  width: 100%;
+  margin-bottom: 34px;
 }
 
-.register-page .login-form-head strong {
+.register-page .auth-brand p {
+  margin: 0;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.register-page .auth-brand strong {
   color: var(--text);
 }
 
-.register-page .login-card .input {
-  width: 100%;
-  color: var(--text);
-  background: color-mix(in srgb, var(--card) 88%, var(--bg2));
-  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+.register-page .auth-fields {
+  width: min(272px, 100%);
 }
 
 .register-page .register-role-group {
-  margin-top: 10px;
+  margin: 14px 0 0;
 }
 
 .register-page .login-submit {
@@ -1778,35 +1769,19 @@ body.register-page {
   z-index: 20;
 }
 
-[data-theme="dark"] .register-page .login-wrap {
-  background: var(--bg);
-}
-
-[data-theme="dark"] .register-page .login-card,
-[data-theme="dark"] .register-page .login-form-panel {
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-}
-
 [data-theme="dark"] .login-page > #register-btn > [data-icon-source],
 [data-theme="dark"] .register-page > #register-back-btn > [data-icon-source] {
   filter: invert(1);
 }
 
 @media (max-width: 780px) {
-  .register-page .login-wrap {
-    padding: 160px 24px max(96px, env(safe-area-inset-bottom));
-    place-items: start center;
-  }
-
-  .register-page .login-card {
-    width: min(460px, 100%);
-  }
-
   .register-page > #register-back-btn {
-    top: max(80px, calc(env(safe-area-inset-top) + 30px));
-    left: 36px;
+    top: max(24px, env(safe-area-inset-top) + 8px);
+    left: max(24px, env(safe-area-inset-left));
+  }
+
+  .register-page .auth-pane {
+    padding: max(64px, env(safe-area-inset-top) + 44px) 24px max(24px, env(safe-area-inset-bottom));
   }
 }
 

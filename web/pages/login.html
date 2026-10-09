@@ -100,7 +100,7 @@
     if (copy.errors && copyDefaults.errors) {
       copy.errors = Object.assign({}, copyDefaults.errors, copy.errors);
     }
-    document.title = copy.pageTitle || copyDefaults.pageTitle;
+    document.title = (copy.pageTitle || copyDefaults.pageTitle).replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery');
     var map = {
       'login-hero-title': copy.heroTitle,
       'login-hero-copy': copy.heroCopy,
@@ -180,7 +180,7 @@
   var libraryPreviewController = null;
   var libraryPreviewUsername = '';
   function clearAccountLibraryPreview() {
-    if (libraryName) libraryName.textContent = 'EchoGallery';
+    if (libraryName) libraryName.textContent = window.__GALLERY_NAME__ || 'EchoGallery';
     if (libraryAvatar) {
       libraryAvatar.src = defaultLibraryAvatar;
       libraryAvatar.alt = '';

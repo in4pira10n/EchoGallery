@@ -2023,6 +2023,10 @@ func describeLibraryAvailability(lockStore *sessionlock.Store, cfg *config.Confi
 		if id == "" {
 			continue
 		}
+		if sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite")) {
+			result[id] = api.LibraryAvailabilityState{Available: false, Status: "admin_locked", Reason: "当前由其他 Gallery 占用"}
+			continue
+		}
 		conflict, err := lockStore.LockedByOther(id, username, role, "", "browse")
 		if err != nil {
 			continue
@@ -2588,14 +2592,6 @@ func main() {
 		cfg.Port = actualPort
 	}
 
-	restartCurrentProcessFn := makeRestartCurrentProcess(func() error {
-		if lockStore != nil && strings.TrimSpace(processSessionID) != "" {
-			if err := lockStore.ReleaseSession(processSessionID); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 	runtimeProvider, err := api.NewLibraryRuntimeProvider(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to initialize per-library runtime provider: %v\n", err)
@@ -2604,7 +2600,20 @@ func main() {
 	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok && photoService != nil && repo != nil {
 		runtimeProvider.Register(bootstrapLibrary.ID, photoService, repo)
 	}
-	defer runtimeProvider.Close()
+	defer func() {
+		if err := runtimeProvider.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to sync and close library databases: %v\n", err)
+		}
+	}()
+	restartCurrentProcessFn := makeRestartCurrentProcess(func() error {
+		if err := runtimeProvider.Close(); err != nil {
+			return err
+		}
+		if lockStore != nil && strings.TrimSpace(processSessionID) != "" {
+			return lockStore.ReleaseSession(processSessionID)
+		}
+		return nil
+	})
 
 	app := api.NewRouterWithStaticWithLifecycleAndBuild(cfg, webFS, photoService, restartCurrentProcessFn, shutdownCurrentProcess, api.LibraryBuildHooks{
 		Status:               buildState.Status,
@@ -2640,10 +2649,13 @@ func main() {
 		fmt.Printf("🌐 HTTP server started: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 && photoService != nil {
-		go runLibraryBuild(rootCtx, photoService, buildState)
+		photoService.RunBackground(func() { runLibraryBuild(rootCtx, photoService, buildState) })
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: HTTP server failed: %v\n", err)
+		if closeErr := runtimeProvider.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to sync library databases: %v\n", closeErr)
+		}
 		os.Exit(1)
 	}
 }
@@ -2901,6 +2913,7 @@ func makeRestartCurrentProcess(beforeRestart func() error) func() error {
 			if runtime.GOOS == "windows" {
 				cmd := exec.Command(exe, os.Args[1:]...)
 				cmd.Dir = wd
+				cmd.Stdin = os.Stdin
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				cmd.Env = env

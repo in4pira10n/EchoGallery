@@ -1,23 +1,51 @@
-.vscode
-.playwright-cli
-build.sh
-.build
+# Local editor and operating-system metadata
+/.vscode/
+/.idea/
 .DS_Store
-.gamepad-button-assets
-GAMEPAD-CONTROLS.md
-echogallery-data
-EchoGallery
-config.json
-publish.sh
-releases
-generate_qr_code.py
-repo_qr_circle.png
-release notes
-.gitignore
-web/static/.DS_Store
-web/.DS_Store
-TO-DOs.md
-TO-DOs
-local-update.toml
-EchoGalleryUpdater
+Thumbs.db
+
+# Local browser automation state and generated screenshots
+/.playwright-cli/
+/output/playwright/
+
+# Local build and distribution artifacts
+/.build/
+/build/
+/dist/
+/releases/
+/EchoGallery
+/EchoGalleryUpdater
+/api.test
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.prof
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Local application data and machine-specific configuration
+/echogallery-data/
+/config.json
+/local-update.toml
+
+# Personal scripts and working notes intentionally kept out of the repository
+/build.sh
+/publish.sh
+/generate_qr_code.py
+/repo_qr_circle.png
+/release notes/
+/TO-DOs.md
+/TO-DOs/
+/GAMEPAD-CONTROLS.md
+/.gamepad-button-assets/
 handoff

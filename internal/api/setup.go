@@ -38,6 +38,7 @@ type setupController struct {
 }
 
 type setupInitRequest struct {
+	AppName       string           `json:"app_name"`
 	Port          int              `json:"port"`
 	Libraries     []config.Library `json:"libraries"`
 	StoragePath   string           `json:"storage_path"`
@@ -238,6 +239,7 @@ func (s *setupController) handleInitialize() gin.HandlerFunc {
 			return
 		}
 		cfg, err := config.CreateInitialConfig(config.InitialConfigParams{
+			AppName:       req.AppName,
 			Port:          req.Port,
 			Libraries:     req.Libraries,
 			StoragePath:   req.StoragePath,

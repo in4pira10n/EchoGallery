@@ -26,6 +26,7 @@ import (
 	"echogallery/internal/service"
 	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage"
+	"echogallery/internal/storage/sqlite"
 )
 
 const authCookieName = "echogallery_token"
@@ -333,15 +334,15 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 
 	r.GET("/static/*filepath", gin.WrapH(buildStaticHandler(staticFS)))
 	r.GET("/pages/*filepath", gin.WrapH(buildPagesHandler(staticFS)))
-	r.GET("/manifest.webmanifest", handleWebManifest(staticFS))
+	r.GET("/manifest.webmanifest", handleWebManifest(staticFS, cfg))
 	r.GET("/sw.js", handleServiceWorker(staticFS))
 
-	r.GET("/", pageAuthMiddleware(cfg, options), handleAppPage(staticFS))
-	r.GET("/albums", pageAuthMiddleware(cfg, options), handleAppPage(staticFS))
-	r.GET("/albums/:id", pageAuthMiddleware(cfg, options), handleAppPage(staticFS))
-	r.GET("/trash", pageAuthMiddleware(cfg, options), handleAppPage(staticFS))
-	r.GET("/login", handleLoginPage(staticFS))
-	r.GET("/register", handleRegisterPage(staticFS))
+	r.GET("/", pageAuthMiddleware(cfg, options), handleAppPage(staticFS, cfg))
+	r.GET("/albums", pageAuthMiddleware(cfg, options), handleAppPage(staticFS, cfg))
+	r.GET("/albums/:id", pageAuthMiddleware(cfg, options), handleAppPage(staticFS, cfg))
+	r.GET("/trash", pageAuthMiddleware(cfg, options), handleAppPage(staticFS, cfg))
+	r.GET("/login", handleLoginPage(staticFS, cfg))
+	r.GET("/register", handleRegisterPage(staticFS, cfg))
 	r.GET("/api/login/hero", handleLoginHero(cfg, registrar))
 	r.GET("/api/login/hero/:kind/:name", handleServeLoginHeroAsset(cfg, registrar))
 	r.GET("/api/auth/account-library", handleLoginAccountLibrary(cfg))
@@ -349,6 +350,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/auth/register", handleRegister(cfg))
 	r.POST("/api/auth/logout", handleLogout(cfg, options))
 	r.POST("/api/auth/session/ping", authRequired, handlePageSessionPing(cfg, options))
+	r.POST("/api/auth/library-fallback", authRequired, handleFallbackLibrary(cfg, options))
 	r.POST("/api/auth/session/release", handlePageSessionRelease(cfg, options))
 	r.GET("/api/settings", authRequired, handleGetSettings(cfg, libraryHooks))
 	r.PUT("/api/settings", authRequired, handleUpdateSettings(cfg, libraryHooks))
@@ -377,6 +379,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.PUT("/api/settings/libraries/thumbnails/build-all/selection", authRequired, adminOrRootRequired, handleSetLibraryBatchThumbnailBuildSelection(cfg, batchThumbnailBuildHooks))
 	r.POST("/api/settings/libraries/logos/refresh", authRequired, adminRequired, handleRefreshLibraryLogos(cfg))
 	r.POST("/api/settings/libraries/discover", authRequired, adminRequired, handleDiscoverLibraryDirectories())
+	r.POST("/api/settings/libraries/inspect", authRequired, adminRequired, handleInspectPortableLibrary())
 	r.POST("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleUploadLibraryLogo(cfg))
 	r.DELETE("/api/settings/libraries/:index/logo", authRequired, adminRequired, handleDeleteLibraryLogo(cfg))
 	r.GET("/api/settings/libraries/:index/logo", authRequired, handleServeLibraryLogo(cfg))
@@ -434,6 +437,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/:id/playback", handleGetVideoPlaybackPreference(cfg, registrar))
 		media.PUT("/:id/playback", handleSaveVideoPlaybackPreference(cfg, registrar))
 		media.POST("/:id/playback-cache", writableRequired, handleBuildBrowserPlaybackCache(cfg, registrar))
+		media.DELETE("/:id/playback-cache", writableRequired, handleDeleteMediaPlaybackCache(cfg, registrar))
+		media.PATCH("/:id/rename", writableRequired, handleRenameMedia(cfg, registrar))
 		media.GET("/:id", handleGetMedia(cfg, registrar))
 		media.GET("/:id/download", handleDownloadMedia(cfg, registrar))
 		media.POST("/:id/play", adminRequired, handlePlayMediaWithSystemPlayer(cfg, registrar))
@@ -662,6 +667,9 @@ func findAccessibleLibraryForLogin(cfg *config.Config, lockStore *sessionlock.St
 		if status == config.LibraryStatusMissing {
 			continue
 		}
+		if sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite")) {
+			continue
+		}
 		if lockStore == nil {
 			return library, true, nil
 		}
@@ -806,6 +814,11 @@ func handleRegister(cfg *config.Config) gin.HandlerFunc {
 
 func handleLogout(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if err := options.RuntimeProvider.SyncBeforeRelease(options.LockStore, pageSessionIDFromHeader(c), ""); err != nil {
+			_ = c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "资源库同步失败，暂未释放占用，请重试"})
+			return
+		}
 		if options.PageSessions != nil {
 			if cookie, err := readAuthCookie(c, cfg); err == nil {
 				if username, err := parseToken(cfg.JWTSecret, cookie); err == nil {
@@ -818,6 +831,7 @@ func handleLogout(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 			_ = options.LockStore.ReleaseSession(pageSessionIDFromHeader(c))
 		}
 		clearAuthCookies(c.Writer, cfg)
+		options.RuntimeProvider.rememberSession(pageSessionIDFromHeader(c), "")
 		c.JSON(http.StatusOK, gin.H{"message": "已退出登录"})
 	}
 }
@@ -849,6 +863,11 @@ func handlePageSessionPing(cfg *config.Config, options RouterOptions) gin.Handle
 func handlePageSessionRelease(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		sessionID := pageSessionIDFromHeader(c)
+		if err := options.RuntimeProvider.SyncBeforeRelease(options.LockStore, sessionID, ""); err != nil {
+			_ = c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "资源库同步失败，暂未释放占用，请重试"})
+			return
+		}
 		username := currentUsername(c)
 		if options.PageSessions != nil && sessionID != "" {
 			if username != "" {
@@ -860,6 +879,7 @@ func handlePageSessionRelease(cfg *config.Config, options RouterOptions) gin.Han
 		if options.LockStore != nil && sessionID != "" {
 			_ = options.LockStore.ReleaseSession(sessionID)
 		}
+		options.RuntimeProvider.rememberSession(sessionID, "")
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
@@ -3078,9 +3098,15 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 		role := currentUserRole(cfg, username)
 		sessionID := currentPageSessionID(c)
 		if options.LockStore != nil {
+			if err := options.RuntimeProvider.SyncBeforeRelease(options.LockStore, sessionID, library.ID); err != nil {
+				_ = c.Error(err)
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "旧资源库同步失败，暂未释放占用，请重试"})
+				return
+			}
 			if _, err := options.LockStore.Acquire(library, username, role, sessionID, "browse"); err != nil {
+				_ = c.Error(fmt.Errorf("library %s lock: %w", library.ID, err))
 				if _, ok := err.(*sessionlock.ConflictError); ok {
-					writeStructuredAuthError(c, http.StatusConflict, "library_occupied", "当前资源库正被其他用户占用")
+					c.JSON(http.StatusConflict, gin.H{"error": "当前资源库正被其他用户占用", "reason": "library_occupied", "library_id": library.ID})
 				} else {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "资源库占用状态检查失败"})
 				}
@@ -3096,13 +3122,21 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 		reqCfg.StoragePath = library.Path
 		c.Set(string(requestConfigContextKey), &reqCfg)
 		if options.RuntimeProvider != nil {
+			releaseRequest := options.RuntimeProvider.beginRequest()
+			defer releaseRequest()
 			registrar, err := options.RuntimeProvider.ForLibrary(&reqCfg, library)
 			if err != nil {
+				_ = c.Error(fmt.Errorf("load library %s at %s: %w", library.ID, library.Path, err))
+				if errors.Is(err, sqlite.ErrPortableLibraryOccupied) {
+					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "资源库正由其他 Gallery 使用", "reason": "library_occupied", "library_id": library.ID})
+					return
+				}
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "加载资源库服务失败"})
 				c.Abort()
 				return
 			}
 			c.Set(string(requestRegistrarContextKey), registrar)
+			options.RuntimeProvider.rememberSession(sessionID, library.ID)
 		}
 		c.Next()
 	}

@@ -128,7 +128,7 @@ func (s *PhotoService) RegisterUploadedVideo(input RegisterUploadedVideoInput) (
 	if s.syncThumbnail {
 		_ = s.generateThumbnailForPhoto(photo)
 	} else {
-		go s.enqueueThumbnailGeneration(photo, true)
+		s.background(func() { s.enqueueThumbnailGeneration(photo, true) })
 	}
 	return photo, nil
 }
@@ -358,7 +358,7 @@ func (s *PhotoService) StartPlaybackCacheBuild(userID int64) PlaybackCacheBuildS
 	task := newPlaybackCacheBuildTask()
 	s.playbackBuild = task
 	s.playbackBuildMu.Unlock()
-	go s.runPlaybackCacheBuild(task, userID)
+	s.background(func() { s.runPlaybackCacheBuild(task, userID) })
 	return task.snapshot()
 }
 

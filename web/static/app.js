@@ -151,6 +151,29 @@ function redirectToLoginForAuthFailure(reason, status) {
   location.href = next;
 }
 
+let libraryFallbackPending = false;
+async function fallbackFromOccupiedLibrary(libraryID) {
+  if (libraryFallbackPending) return;
+  libraryFallbackPending = true;
+  try {
+    const response = await fetch(withPageSessionURL('/api/auth/library-fallback'), withPageSessionRequest({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ library_id: libraryID || '' }),
+    }));
+    if (response.ok) {
+      location.reload();
+      return;
+    }
+    if (response.status === 403) {
+      redirectToLoginForAuthFailure('no_accessible_library', response.status);
+    }
+  } catch (_) {
+  } finally {
+    libraryFallbackPending = false;
+  }
+}
+
 async function buildAPIError(response) {
   const text = await response.text();
   let payload = {};
@@ -168,6 +191,10 @@ async function buildAPIError(response) {
     forbidden: response.status === 403,
   };
   const reason = String(error.reason || '').trim();
+  if (response.status === 409 && reason === 'library_occupied') {
+    error.redirecting = true;
+    void fallbackFromOccupiedLibrary(error.library_id || '');
+  }
   if (response.status === 401 || (response.status === 403 && reason === 'no_accessible_library')) {
     error.redirecting = true;
     redirectToLoginForAuthFailure(reason, response.status);
@@ -199,6 +226,16 @@ const api = {
     const { suppressForbiddenToast, ...fetchOptions } = options || {};
     const r = await fetchWithPageSession(url, {
       method: 'PUT',
+      headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      ...fetchOptions,
+    });
+    return parseAPIResponse(r, { suppressForbiddenToast: !!suppressForbiddenToast });
+  },
+  async patch(url, data, options = {}) {
+    const { suppressForbiddenToast, ...fetchOptions } = options || {};
+    const r = await fetchWithPageSession(url, {
+      method: 'PATCH',
       headers: buildPageSessionHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
       ...fetchOptions,
@@ -843,18 +880,19 @@ function interpolateCopy(template, params) {
 }
 
 function copyText(path, fallback, params) {
+  const format = value => interpolateCopy(value, params).replace(/EchoGallery/g, () => window.__GALLERY_NAME__ || 'EchoGallery');
   const segments = String(path || '').split('.');
   let current = copyCatalog;
   for (const segment of segments) {
     if (!current || typeof current !== 'object' || !(segment in current)) {
-      return interpolateCopy(fallback, params);
+      return format(fallback);
     }
     current = current[segment];
   }
   if (typeof current !== 'string') {
-    return interpolateCopy(fallback, params);
+    return format(fallback);
   }
-  return interpolateCopy(current, params);
+  return format(current);
 }
 
 function settingsText(path, fallback, params) {
@@ -1861,8 +1899,7 @@ function normalizePWASettings(raw = {}) {
   return { name, iconSource, themeMode, themeColor, startPage, cacheStrategy, uploadedIconURL };
 }
 function currentAppDisplayName() {
-  const current = normalizePWASettings(state && state.pwaSettings || {});
-  return String(current.name || '').trim() || 'EchoGallery';
+  return String(state.serverSettings?.app_name || window.__GALLERY_NAME__ || '').trim() || 'EchoGallery';
 }
 function loadPWASettings() {
   try {
@@ -5272,6 +5309,13 @@ async function setLibraryBatchThumbnailBuildSelection(selectedLibraryIDs, select
   });
 }
 function applyServerSettings(data = {}) {
+	const appName = data.app_name || window.__GALLERY_NAME__ || 'EchoGallery';
+	state.serverSettings.app_name = appName;
+	window.__GALLERY_NAME__ = appName;
+	if (state.pwaSettings.name !== appName) {
+		state.pwaSettings = normalizePWASettings({ ...state.pwaSettings, name: appName });
+		persistPWASettings();
+	}
   state.serverSettings.current_username = data.current_username || state.serverSettings.current_username || '';
   state.serverSettings.role = String(data.role || 'admin').trim().toLowerCase() || 'admin';
   state.serverSettings.can_write = data.can_write !== false;
@@ -5344,6 +5388,7 @@ function buildSettingsPayload() {
   let activePath = (activeLibrary && activeLibrary.path || state.serverSettings.storage_path || '').trim();
   if (!activePath && libraries.length) activePath = libraries[0].path;
   return {
+    app_name: state.serverSettings.app_name || currentAppDisplayName(),
     port: state.serverSettings.port || 8080,
     active_library_id: activeLibrary && activeLibrary.id || '',
     storage_path: activePath,
@@ -7203,6 +7248,7 @@ ${renderSearchOverlay()}
 ${renderUploadModal()}
 ${renderCreateAlbumModal()}
 ${renderEditAlbumModal()}
+${renderRenameMediaModal()}
 ${renderShareModal()}
 ${renderAlbumPickerModal()}
 ${renderShareListModal()}
@@ -7224,12 +7270,9 @@ ${renderLibraryLogoGuideModal()}`;
     startRoleAwareBackgroundPolling();
     void ensureSettingsViewMounted().catch(e => console.warn('预构建设置页失败', e));
 
-    const viewAtScanStart = state.view;
     void api.post('/api/library-scan/refresh', {}).then(() => {
-      state.albums = [];
-      state.albumsLoaded = false;
-      state.albumChildrenIndex = null;
-      if (state.view === viewAtScanStart && state.view !== 'settings' && !state.lightboxOpen) {
+      resetMediaFilteredViewState();
+      if (state.view !== 'settings' && !state.lightboxOpen) {
         renderView();
       }
     }).catch(e => {
@@ -9245,6 +9288,51 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   let logoAsset = draft.logo_asset || '';
   let logoPreviewUrl = draft.logo_image_url || '';
   let logoAction = editing ? row.dataset.logoAction || '' : '';
+  let portableLocked = false;
+  let inspectionGeneration = 0;
+  let inspectionTimer;
+  const inspectPortable = async () => {
+    if (editing) return;
+    const path = pathInput.value.trim();
+    const generation = ++inspectionGeneration;
+    const save = $('#library-editor-save', modal);
+    save.disabled = true;
+    try {
+      const result = path ? await api.post('/api/settings/libraries/inspect', { path }) : { existing: false };
+      if (generation !== inspectionGeneration || path !== pathInput.value.trim() || !modal.isConnected) return;
+      const previouslyLocked = portableLocked;
+      portableLocked = !!result.existing;
+      if (portableLocked) {
+        const library = result.library;
+        draft.id = library.id;
+        nameInput.value = library.name || nameInput.value;
+        accentTextInput.value = library.accent_color || draft.accent_color;
+        logoAsset = library.logo_asset || '';
+        logoPreviewUrl = result.logo_image_url || '';
+        pendingFile = null;
+        logoAction = '';
+      } else if (previouslyLocked) {
+        draft.id = '';
+        nameInput.value = draft.name;
+        accentTextInput.value = draft.accent_color;
+        logoAsset = '';
+        logoPreviewUrl = '';
+      }
+      nameInput.disabled = portableLocked;
+      accentInput.disabled = portableLocked;
+      accentTextInput.disabled = portableLocked;
+      logoTrigger.setAttribute('aria-disabled', String(portableLocked));
+      $('.library-editor-preview-copy', modal).textContent = portableLocked
+        ? '已识别已有资源库，沿用其名称、头像和主色。添加后可在编辑资源库中修改。'
+        : settingsText('libraries.editor.previewCopy', '点击头像更换图片；头像和主色会用于侧栏、资源库卡片与高亮状态。');
+      updatePreview();
+    } catch (err) {
+      if (generation === inspectionGeneration) showToast('资源库检查失败: ' + (err.error || err.message || err));
+      throw err;
+    } finally {
+      if (generation === inspectionGeneration) save.disabled = false;
+    }
+  };
 
   const currentEditorAccent = () => normalizeHexColor(accentTextInput.value) || normalizeHexColor(accentInput.value) || defaultLibraryAccentPalette[0];
   const updateActionStyles = () => {
@@ -9324,6 +9412,9 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   };
 
   const persistLibraryDraft = async (button, { activate = false, successMessage = '' } = {}) => {
+    if (!editing) {
+      try { await inspectPortable(); } catch (_) { return; }
+    }
     const nextRow = applyLibraryDraftToRow({ activate });
     if (!nextRow) return;
     try {
@@ -9336,6 +9427,12 @@ function openLibraryEditorModal(row = null, bindRow = null) {
 
   nameInput.addEventListener('input', updatePreview);
   pathInput.addEventListener('input', updatePreview);
+  pathInput.addEventListener('input', () => {
+    if (editing) return;
+    inspectionGeneration++;
+    clearTimeout(inspectionTimer);
+    inspectionTimer = setTimeout(() => inspectPortable().catch(() => {}), 450);
+  });
   accentTextInput.addEventListener('input', () => {
     const color = normalizeHexColor(accentTextInput.value);
     if (color) accentInput.value = color;
@@ -9345,7 +9442,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     accentTextInput.value = normalizeHexColor(accentInput.value) || accentInput.value;
     updatePreview();
   });
-  const openLogoPicker = () => logoInput.click();
+  const openLogoPicker = () => { if (!portableLocked) logoInput.click(); };
   logoTrigger?.addEventListener('click', openLogoPicker);
   logoTrigger?.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -10632,12 +10729,8 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
   </section>` : ''}
 
   <section class="card settings-panel settings-panel-update${showExperimentalSettings ? '' : ' settings-panel-update-full'}">
-    ${renderSettingsPanelHeader(settingsText('sections.pwa.title', 'PWA 安装体验'), settingsText('sections.pwa.copy', '这些选项保存在当前浏览器，用于生成名称、图标和离线壳。'), settingsPanelHeadIconMap.pwa)}
+    ${renderSettingsPanelHeader(settingsText('sections.pwa.title', 'PWA 安装体验'), '图标、主题颜色和离线选项仅保存在当前浏览器。', settingsPanelHeadIconMap.pwa)}
     <div class="settings-group settings-group-pwa">
-      <div class="settings-control">
-        <label for="settings-pwa-name"><span>${escapeHTML(settingsText('pwa.name', 'App 显示名'))}</span><span>${escapeHTML(settingsText('pwa.nameCopy', '安装后显示在桌面或主屏幕。'))}</span></label>
-        <input class="input" id="settings-pwa-name" type="text" value="${escapeHTML(pwa.name)}" placeholder="EchoGallery">
-      </div>
       <div class="settings-control">
         <label for="settings-pwa-icon-source"><span>${escapeHTML(settingsText('pwa.iconSource', '图标来源'))}</span><span>${escapeHTML(settingsText('pwa.iconSourceCopy', '决定优先使用哪套图标资源。'))}</span></label>
         <select class="input" id="settings-pwa-icon-source">
@@ -10675,7 +10768,13 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
   </section>
 
   <section class="card settings-panel settings-panel-app">
-    ${renderSettingsPanelHeader(settingsText('sections.app.title', '应用配置'), settingsText('sections.app.copy', '这些入口移到这里，让浏览界面更轻盈。'), settingsPanelHeadIconMap.app)}
+    ${renderSettingsPanelHeader(settingsText('sections.app.title', '基本设置'), settingsText('sections.app.copy', '管理页面的基本行为。'), settingsPanelHeadIconMap.app)}
+    <div class="settings-group">
+      <div class="settings-control">
+        <label for="settings-gallery-name"><span>Gallery 名称</span><span>用于浏览器标题、登录/注册页和已安装应用；保存后同步到所有设备。</span></label>
+        <input class="input" id="settings-gallery-name" type="text" maxlength="80" value="${escapeHTML(currentAppDisplayName())}" placeholder="EchoGallery" ${state.serverSettings.can_admin ? '' : 'disabled'}>
+      </div>
+    </div>
     <div class="settings-actions settings-app-actions settings-app-actions-${canRunServerTasksUI ? '4' : '3'}">
       <a class="btn" id="settings-github-btn" href="https://github.com/in4pira10n/EchoGallery" target="_blank" rel="noopener noreferrer">${icons.github} ${escapeHTML(settingsText('appConfig.github', '仓库'))}</a>
       <button class="btn" id="theme-btn" type="button"><span class="theme-icon">${document.documentElement.dataset.theme === 'dark' ? icons.sun : icons.moon}</span> ${escapeHTML(settingsText('appConfig.themeDark', '深色'))}</button>
@@ -10988,7 +11087,7 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
   }
   const syncPWASettings = () => {
     state.pwaSettings = normalizePWASettings({
-      name: $('#settings-pwa-name')?.value,
+      name: currentAppDisplayName(),
       iconSource: $('#settings-pwa-icon-source')?.value,
       themeMode: $('#settings-pwa-theme-mode')?.value,
       themeColor: $('#settings-pwa-theme-color')?.value,
@@ -10999,8 +11098,16 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
     const colorInput = $('#settings-pwa-theme-color');
     if (colorInput) colorInput.disabled = state.pwaSettings.themeMode !== 'fixed';
     persistPWASettings();
+    applyLibraryBranding();
   };
-  $('#settings-pwa-name')?.addEventListener('input', syncPWASettings);
+  $('#settings-gallery-name')?.addEventListener('input', () => {
+    state.serverSettings.app_name = $('#settings-gallery-name').value.trim() || 'EchoGallery';
+    window.__GALLERY_NAME__ = state.serverSettings.app_name;
+    state.pwaSettings = normalizePWASettings({ ...state.pwaSettings, name: state.serverSettings.app_name });
+    persistPWASettings();
+    applyLibraryBranding();
+    setSettingsDirty();
+  });
   $('#settings-pwa-icon-source')?.addEventListener('change', syncPWASettings);
   $('#settings-pwa-theme-mode')?.addEventListener('change', syncPWASettings);
   $('#settings-pwa-theme-color')?.addEventListener('input', syncPWASettings);
@@ -11557,6 +11664,10 @@ async function loadMoreTimeline() {
     }
   } catch (e) {
     if (!e || e.name !== 'AbortError') console.error(e);
+    if (!e || e.name !== 'AbortError') {
+      state.timelineHasMore = false;
+      showToast('媒体加载失败，请稍后重新进入资源库。', 5000);
+    }
   }
   finally {
     state.timelineLoading = false;
@@ -11765,6 +11876,8 @@ async function loadMoreFavorites() {
     requestVisibleThumbnailWarmup('favorites', photos);
   } catch (e) {
     console.error(e);
+    state.favoriteHasMore = false;
+    showToast('收藏加载失败，请稍后重新进入资源库。', 5000);
   } finally {
     state.favoriteLoading = false;
     updateLoadMoreUI('load-more', state.favoriteHasMore);
@@ -12592,7 +12705,7 @@ function filterPhotoContextMenuItemsForDevice(items, options = {}) {
   const filtered = (items || []).filter(item => {
     if (item === '-') return true;
     if (!item) return false;
-    if (!canWriteMedia() && ['favorite', 'share', 'delete', 'convert-playback'].includes(item.role)) return false;
+    if (!canWriteMedia() && ['favorite', 'share', 'delete', 'rename', 'convert-playback', 'delete-playback-cache'].includes(item.role)) return false;
     if (!canEditBookmarks() && ['bookmark'].includes(item.role)) return false;
     if (!canRevealInFileManager() && item.role === 'reveal') return false;
     return true;
@@ -12631,15 +12744,15 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     canWriteMedia() ? { role: 'album-add', icon: icons.contextAlbum, label: '添加到相册', action: () => addSinglePhotoToAlbum(photo.id) } : null,
     { role: 'reveal', icon: icons.contextReveal, label: '在文件管理器中打开', action: () => revealInFinder(photo.id) },
     { role: 'download', icon: icons.contextDownload, label: singleMediaSaveLabel(), action: () => confirmDownloadAction(`确定要${singleMediaSaveLabel()}这个媒体吗？`, () => saveOrDownloadMedia(photo)) },
+    canWriteMedia() ? { role: 'rename', icon: icons.libraryCardEdit, label: '重命名', action: () => openRenameMediaModal(photo) } : null,
   ];
   if (requiresBrowserPlaybackConversion(photo)) {
     const converted = playbackCacheExistsForPhoto(photo);
     items.push({
       role: 'convert-playback',
       icon: icons.contextConvertPlayback || icons.contextDownload,
-      label: converted ? '已转换为受支持的格式' : '转换为受支持的格式',
-      disabled: converted,
-      action: () => buildBrowserPlaybackCacheForPhoto(photo),
+      label: converted ? '删除转换的文件' : '转换为受支持的格式',
+      action: () => converted ? deleteBrowserPlaybackCacheForPhoto(photo) : buildBrowserPlaybackCacheForPhoto(photo),
     });
   }
   if (containingAlbums.length) {
@@ -14869,6 +14982,15 @@ function handleLightboxVideoAppVisible() {
   });
 }
 function bindGlobal() {
+  $('#rename-media-cancel')?.addEventListener('click', closeRenameMediaModal);
+  $('#rename-media-save')?.addEventListener('click', () => void submitRenameMedia());
+  $('#rename-media-name')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); void submitRenameMedia(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeRenameMediaModal(); }
+  });
+  $('#rename-media-modal')?.addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeRenameMediaModal();
+  });
   bindHoldAction($('#lb-favorite'), e => {
     e.preventDefault();
     e.stopPropagation();
@@ -16161,7 +16283,110 @@ async function buildBrowserPlaybackCacheForPhoto(photo) {
   }
 }
 
+async function deleteBrowserPlaybackCacheForPhoto(photo) {
+  if (!canWriteMedia()) return forbidVisitorAction();
+  if (!photo || !photo.id) return;
+  if (!(await appConfirm(`确定要删除“${photo.original_name || '这个视频'}”的转换文件吗？原视频不会被删除。`, { danger: true }))) return;
+  try {
+    const current = state.lightboxPhotos[state.lightboxIndex];
+    const isCurrent = current && Number(current.id) === Number(photo.id);
+    if (isCurrent) {
+      const video = $('#lb-video');
+      if (video && !video.classList.contains('hidden')) {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
+    }
+    await api.del(`/api/media/${photo.id}/playback-cache`);
+    state.playbackCacheItems = (state.playbackCacheItems || []).filter(item => String(item.uuid || '') !== String(photo.uuid || ''));
+    showToast('已删除转换文件，原视频保持不变');
+    if (isCurrent) lbRender();
+  } catch (e) {
+    showToast(`删除转换文件失败：${(e && e.error) || e}`, 3200);
+  }
+}
+
+let renameMediaTarget = null;
+
+function splitMediaFileName(name) {
+  const value = String(name || '');
+  const dot = value.lastIndexOf('.');
+  if (dot <= 0) return { base: value, extension: '' };
+  return { base: value.slice(0, dot), extension: value.slice(dot) };
+}
+
+function updateMediaNameInCollections(photo) {
+  if (!photo) return;
+  const collections = [state.photos, state.favoritePhotos, state.randomAlbumPhotos, state.albumPhotos, state.trashPhotos, state.lightboxPhotos, state.memoryPhotos, state.searchResults];
+  collections.forEach(list => {
+    if (!Array.isArray(list)) return;
+    list.forEach(item => {
+      if (item && Number(item.id) === Number(photo.id)) Object.assign(item, photo);
+    });
+  });
+}
+
+function openRenameMediaModal(photo) {
+  if (!canWriteMedia() || !photo) return forbidVisitorAction();
+  renameMediaTarget = photo;
+  const parts = splitMediaFileName(photo.original_name);
+  const modal = $('#rename-media-modal');
+  const input = $('#rename-media-name');
+  const extension = $('#rename-media-extension');
+  if (!modal || !input || !extension) return;
+  input.value = parts.base;
+  extension.textContent = parts.extension;
+  modal.classList.add('open');
+  requestAnimationFrame(() => { input.focus(); input.select(); });
+}
+
+function closeRenameMediaModal() {
+  $('#rename-media-modal')?.classList.remove('open');
+  renameMediaTarget = null;
+}
+
+async function submitRenameMedia() {
+  const photo = renameMediaTarget;
+  const input = $('#rename-media-name');
+  if (!photo || !input) return;
+  const name = String(input.value || '').trim();
+  if (!name) return showToast('请输入文件名');
+  const save = $('#rename-media-save');
+  if (save) save.disabled = true;
+  try {
+    const resp = await api.patch(`/api/media/${photo.id}/rename`, { name });
+    const updated = (resp && resp.data) || { ...photo, original_name: `${name}${splitMediaFileName(photo.original_name).extension}` };
+    updateMediaNameInCollections(updated);
+    closeRenameMediaModal();
+    renderView();
+    if ($('#lightbox')?.classList.contains('open')) lbRender();
+    showToast((resp && resp.message) || '媒体已重命名');
+  } catch (e) {
+    showToast(`重命名失败：${(e && e.error) || e}`, 3200);
+  } finally {
+    if (save) save.disabled = false;
+  }
+}
+
 // ── 上传模态框 ────────────────────────────────────────
+function renderRenameMediaModal() {
+  return `<div class="modal-overlay library-editor-modal" id="rename-media-modal" role="presentation">
+  <div class="modal library-editor-card rename-media-card" role="dialog" aria-modal="true" aria-labelledby="rename-media-title">
+    <div class="modal-title" id="rename-media-title">重命名媒体</div>
+    <div class="rename-media-field">
+      <label class="settings-control-label" for="rename-media-name">文件名</label>
+      <div class="rename-media-input-row"><input class="input" id="rename-media-name" type="text" maxlength="240" autocomplete="off"><span id="rename-media-extension"></span></div>
+      <small>扩展名和媒体 UUID 保持不变。</small>
+    </div>
+    <div class="modal-footer library-editor-actions rename-media-actions">
+      ${libraryEditorActionButton({ id: 'rename-media-cancel', kind: 'cancel', icon: icons.libraryEditorCancel, label: '取消' })}
+      ${libraryEditorActionButton({ id: 'rename-media-save', kind: 'save', icon: icons.libraryEditorSave, label: '保存' })}
+    </div>
+  </div>
+</div>`;
+}
+
 function renderUploadModal() {
   return `<div class="modal-overlay" id="upload-modal">
   <div class="modal" style="width:520px">

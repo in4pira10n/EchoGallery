@@ -6763,6 +6763,43 @@ body.lightbox-page-lock {
   padding: 0;
 }
 
+.rename-media-card {
+  width: min(460px, calc(100vw - 28px));
+}
+
+.rename-media-field {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.rename-media-input-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rename-media-input-row .input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rename-media-input-row > span {
+  flex: 0 0 auto;
+  color: var(--text2);
+  font-size: .92rem;
+}
+
+.rename-media-field small {
+  color: var(--text2);
+  font-size: .78rem;
+}
+
+.rename-media-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .library-editor-action-btn {
   width: 100%;
   min-width: 0;

@@ -275,6 +275,24 @@ func (s *DB) UpdatePhotoSourceMedia(id int64, userID int64, sourceRelPath string
 	return nil
 }
 
+// UpdatePhotoMediaPath 更新媒体文件路径与显示名称。
+func (s *DB) UpdatePhotoMediaPath(id int64, userID int64, sourceRelPath string, storageRelPath string, originalName string, size int64, sourceModUnix int64) error {
+	result, err := s.db.Exec(`
+		UPDATE photos
+		SET source_rel_path = ?, storage_rel_path = ?, original_name = ?, size = ?, source_mod_unix = ?
+		WHERE id = ? AND uploaded_by = ?`,
+		sourceRelPath, storageRelPath, originalName, size, sourceModUnix, id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("更新媒体路径失败: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("图片不存在")
+	}
+	return nil
+}
+
 // UpdatePhotoCapturedMetadata 更新拍摄时间与基础媒体元数据。
 func (s *DB) UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *storage.PhotoEXIF, width int, height int, durationMS int64) error {
 	result, err := s.db.Exec(`
@@ -417,7 +435,7 @@ func (s *DB) GetPhotoBySourceRelPath(sourceRelPath string, userID int64) (*stora
 // ListSourceMediaIndex 批量加载源文件索引。只读取启动扫描需要的轻量字段，避免大库启动时逐文件查库。
 func (s *DB) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaInfo, error) {
 	rows, err := s.db.Query(`
-		SELECT id, source_rel_path, size, source_mod_unix
+		SELECT id, source_rel_path, size, source_mod_unix, deleted_at
 		FROM photos
 		WHERE uploaded_by = ? AND source_rel_path <> ''`, userID)
 	if err != nil {
@@ -428,8 +446,13 @@ func (s *DB) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaI
 	index := make(map[string]storage.SourceMediaInfo)
 	for rows.Next() {
 		var item storage.SourceMediaInfo
-		if err := rows.Scan(&item.ID, &item.SourceRelPath, &item.Size, &item.SourceModUnix); err != nil {
+		var deletedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.SourceRelPath, &item.Size, &item.SourceModUnix, &deletedAt); err != nil {
 			return nil, err
+		}
+		item.Deleted = deletedAt.Valid
+		if deletedAt.Valid {
+			item.DeletedAtUnixNano = deletedAt.Time.UnixNano()
 		}
 		index[item.SourceRelPath] = item
 	}
