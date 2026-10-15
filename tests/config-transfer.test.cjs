@@ -42,6 +42,6 @@ test('portable browser settings use an explicit whitelist', () => {
 test('settings expose transfer controls and no legacy cache claims', () => {
   assert.match(source, /id="settings-export-config-btn"/);
   assert.match(source, /id="settings-import-config-btn"/);
-  assert.match(source, /资源库路径会按 ID 自动映射/);
+  assert.match(source, /copyText\('app\.interface\.runtime\.transferCopy'\)/);
   assert.doesNotMatch(source, /运行时锁.*配置包/);
 });

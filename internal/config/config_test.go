@@ -69,6 +69,12 @@ func TestLoadFromPath_Success(t *testing.T) {
 	if !cfg.Preferences.WarmEnabled {
 		t.Errorf("期望旧配置默认开启 warm_enabled")
 	}
+	if !cfg.Preferences.ExperimentalAutoplayVideo || !cfg.Preferences.VideoAutoplayNext {
+		t.Errorf("期望旧配置默认开启视频自动播放")
+	}
+	if cfg.Preferences.VideoVolumeMaxPercent != 100 {
+		t.Errorf("期望旧配置最大音量默认为 100，得到 %d", cfg.Preferences.VideoVolumeMaxPercent)
+	}
 }
 
 func TestLoadFromPath_LegacyUsersDefaultToAdminRole(t *testing.T) {
@@ -515,6 +521,12 @@ func TestRunInitWizardWithReader_CreatesDefaultUser(t *testing.T) {
 	}
 	if cfg.Users[0].Username != "admin1" {
 		t.Fatalf("期望默认用户名 admin1，得到 %s", cfg.Users[0].Username)
+	}
+	if !cfg.Preferences.ExperimentalAutoplayVideo || !cfg.Preferences.VideoAutoplayNext {
+		t.Fatal("新初始化配置应默认开启视频自动播放")
+	}
+	if cfg.Preferences.VideoVolumeMaxPercent != 100 {
+		t.Fatalf("新初始化配置的最大音量应为 100，得到 %d", cfg.Preferences.VideoVolumeMaxPercent)
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(cfg.Users[0].PasswordHash), []byte("password123")); err != nil {
 		t.Fatalf("默认用户密码哈希校验失败: %v", err)

@@ -93,84 +93,86 @@ func persistChangedPortableLibraryMetadata(previous []config.Library, cfg *confi
 }
 
 type settingsResponse struct {
-	AppName                       string            `json:"app_name"`
-	CurrentUsername               string            `json:"current_username,omitempty"`
-	Role                          string            `json:"role"`
-	CanWrite                      bool              `json:"can_write"`
-	CanAdmin                      bool              `json:"can_admin"`
-	CanRoot                       bool              `json:"can_root"`
-	Port                          int               `json:"port"`
-	ActiveLibraryID               string            `json:"active_library_id,omitempty"`
-	StoragePath                   string            `json:"storage_path"`
-	Libraries                     []libraryResponse `json:"libraries"`
-	ThumbnailDir                  string            `json:"thumbnail_dir"`
-	ThumbnailSize                 int               `json:"thumbnail_size"`
-	TrashDir                      string            `json:"trash_dir"`
-	UseSystemPlayer               bool              `json:"use_system_player"`
-	JWTSecretMasked               string            `json:"jwt_secret_masked"`
-	Users                         []string          `json:"users"`
-	Theme                         string            `json:"theme"`
-	GridSize                      int               `json:"grid_size"`
-	GridGap                       int               `json:"grid_gap"`
-	ThumbRadius                   int               `json:"thumb_radius"`
-	SidebarAutoHide               bool              `json:"sidebar_auto_hide"`
-	SlideshowMode                 string            `json:"slideshow_mode"`
-	SlideshowLoop                 bool              `json:"slideshow_loop"`
-	SlideshowInterval             int               `json:"slideshow_interval"`
-	LightboxZoom                  int               `json:"lightbox_zoom"`
-	ExperimentalAutoplayVideo     bool              `json:"experimental_autoplay_video"`
-	VideoAutoplayNext             bool              `json:"video_autoplay_next"`
-	VideoSectionMinMinutes        int               `json:"video_section_min_minutes"`
-	ExperimentalPrefetchNeighbors bool              `json:"experimental_prefetch_neighbors"`
-	ExperimentalRestoreLastView   bool              `json:"experimental_restore_last_view"`
-	ContinueLastVideoPosition     bool              `json:"continue_last_video_position"`
-	WarmEnabled                   bool              `json:"warm_enabled"`
-	LightboxUIIdleSeconds         int               `json:"lightbox_ui_idle_seconds"`
-	ThrottledVideoSeek            bool              `json:"throttled_video_seek"`
-	VideoSeekThrottleMS           int               `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int               `json:"video_volume_swipe_sensitivity"`
-	VideoVolumeMinPercent         int               `json:"video_volume_min_percent"`
-	VideoVolumeMaxPercent         int               `json:"video_volume_max_percent"`
-	LowResourceMode               bool              `json:"low_resource_mode"`
-	PlayerKeymap                  string            `json:"player_keymap"`
-	PWAIconURL                    string            `json:"pwa_icon_url,omitempty"`
-	LocalUpdateConfigText         string            `json:"local_update_config_text,omitempty"`
+	EchoFrame                     *config.EchoFramePreferences `json:"echo_frame"`
+	AppName                       string                       `json:"app_name"`
+	CurrentUsername               string                       `json:"current_username,omitempty"`
+	Role                          string                       `json:"role"`
+	CanWrite                      bool                         `json:"can_write"`
+	CanAdmin                      bool                         `json:"can_admin"`
+	CanRoot                       bool                         `json:"can_root"`
+	Port                          int                          `json:"port"`
+	ActiveLibraryID               string                       `json:"active_library_id,omitempty"`
+	StoragePath                   string                       `json:"storage_path"`
+	Libraries                     []libraryResponse            `json:"libraries"`
+	ThumbnailDir                  string                       `json:"thumbnail_dir"`
+	ThumbnailSize                 int                          `json:"thumbnail_size"`
+	TrashDir                      string                       `json:"trash_dir"`
+	UseSystemPlayer               bool                         `json:"use_system_player"`
+	JWTSecretMasked               string                       `json:"jwt_secret_masked"`
+	Users                         []string                     `json:"users"`
+	Theme                         string                       `json:"theme"`
+	GridSize                      int                          `json:"grid_size"`
+	GridGap                       int                          `json:"grid_gap"`
+	ThumbRadius                   int                          `json:"thumb_radius"`
+	SidebarAutoHide               bool                         `json:"sidebar_auto_hide"`
+	SlideshowMode                 string                       `json:"slideshow_mode"`
+	SlideshowLoop                 bool                         `json:"slideshow_loop"`
+	SlideshowInterval             int                          `json:"slideshow_interval"`
+	LightboxZoom                  int                          `json:"lightbox_zoom"`
+	ExperimentalAutoplayVideo     bool                         `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool                         `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int                          `json:"video_section_min_minutes"`
+	ExperimentalPrefetchNeighbors bool                         `json:"experimental_prefetch_neighbors"`
+	ExperimentalRestoreLastView   bool                         `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool                         `json:"continue_last_video_position"`
+	WarmEnabled                   bool                         `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int                          `json:"lightbox_ui_idle_seconds"`
+	ThrottledVideoSeek            bool                         `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int                          `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
+	LowResourceMode               bool                         `json:"low_resource_mode"`
+	PlayerKeymap                  string                       `json:"player_keymap"`
+	PWAIconURL                    string                       `json:"pwa_icon_url,omitempty"`
+	LocalUpdateConfigText         string                       `json:"local_update_config_text,omitempty"`
 }
 
 type settingsUpdateRequest struct {
-	AppName                       *string          `json:"app_name"`
-	Port                          int              `json:"port"`
-	ActiveLibraryID               string           `json:"active_library_id,omitempty"`
-	StoragePath                   string           `json:"storage_path"`
-	Libraries                     []config.Library `json:"libraries"`
-	ThumbnailDir                  string           `json:"thumbnail_dir"`
-	ThumbnailSize                 int              `json:"thumbnail_size"`
-	TrashDir                      string           `json:"trash_dir"`
-	UseSystemPlayer               bool             `json:"use_system_player"`
-	Theme                         string           `json:"theme"`
-	GridSize                      int              `json:"grid_size"`
-	GridGap                       int              `json:"grid_gap"`
-	ThumbRadius                   int              `json:"thumb_radius"`
-	SidebarAutoHide               bool             `json:"sidebar_auto_hide"`
-	SlideshowMode                 string           `json:"slideshow_mode"`
-	SlideshowLoop                 bool             `json:"slideshow_loop"`
-	SlideshowInterval             int              `json:"slideshow_interval"`
-	LightboxZoom                  int              `json:"lightbox_zoom"`
-	ExperimentalAutoplayVideo     bool             `json:"experimental_autoplay_video"`
-	VideoAutoplayNext             bool             `json:"video_autoplay_next"`
-	VideoSectionMinMinutes        int              `json:"video_section_min_minutes"`
-	ExperimentalPrefetchNeighbors bool             `json:"experimental_prefetch_neighbors"`
-	ExperimentalRestoreLastView   bool             `json:"experimental_restore_last_view"`
-	ContinueLastVideoPosition     bool             `json:"continue_last_video_position"`
-	WarmEnabled                   bool             `json:"warm_enabled"`
-	LightboxUIIdleSeconds         int              `json:"lightbox_ui_idle_seconds"`
-	ThrottledVideoSeek            bool             `json:"throttled_video_seek"`
-	VideoSeekThrottleMS           int              `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int              `json:"video_volume_swipe_sensitivity"`
-	VideoVolumeMinPercent         int              `json:"video_volume_min_percent"`
-	VideoVolumeMaxPercent         int              `json:"video_volume_max_percent"`
-	LowResourceMode               bool             `json:"low_resource_mode"`
-	PlayerKeymap                  string           `json:"player_keymap"`
+	EchoFrame                     *config.EchoFramePreferences `json:"echo_frame"`
+	AppName                       *string                      `json:"app_name"`
+	Port                          int                          `json:"port"`
+	ActiveLibraryID               string                       `json:"active_library_id,omitempty"`
+	StoragePath                   string                       `json:"storage_path"`
+	Libraries                     []config.Library             `json:"libraries"`
+	ThumbnailDir                  string                       `json:"thumbnail_dir"`
+	ThumbnailSize                 int                          `json:"thumbnail_size"`
+	TrashDir                      string                       `json:"trash_dir"`
+	UseSystemPlayer               bool                         `json:"use_system_player"`
+	Theme                         string                       `json:"theme"`
+	GridSize                      int                          `json:"grid_size"`
+	GridGap                       int                          `json:"grid_gap"`
+	ThumbRadius                   int                          `json:"thumb_radius"`
+	SidebarAutoHide               bool                         `json:"sidebar_auto_hide"`
+	SlideshowMode                 string                       `json:"slideshow_mode"`
+	SlideshowLoop                 bool                         `json:"slideshow_loop"`
+	SlideshowInterval             int                          `json:"slideshow_interval"`
+	LightboxZoom                  int                          `json:"lightbox_zoom"`
+	ExperimentalAutoplayVideo     bool                         `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool                         `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int                          `json:"video_section_min_minutes"`
+	ExperimentalPrefetchNeighbors bool                         `json:"experimental_prefetch_neighbors"`
+	ExperimentalRestoreLastView   bool                         `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool                         `json:"continue_last_video_position"`
+	WarmEnabled                   bool                         `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int                          `json:"lightbox_ui_idle_seconds"`
+	ThrottledVideoSeek            bool                         `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int                          `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
+	LowResourceMode               bool                         `json:"low_resource_mode"`
+	PlayerKeymap                  string                       `json:"player_keymap"`
 }
 
 type refreshLibraryLogosRequest struct {
@@ -388,6 +390,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		SlideshowMode:                 profile.Preferences.SlideshowMode,
 		SlideshowLoop:                 profile.Preferences.SlideshowLoop,
 		SlideshowInterval:             profile.Preferences.SlideshowInterval,
+		EchoFrame:                     config.NormalizeEchoFrame(profile.Preferences.EchoFrame),
 		LightboxZoom:                  profile.Preferences.LightboxZoom,
 		ExperimentalAutoplayVideo:     profile.Preferences.ExperimentalAutoplayVideo,
 		VideoAutoplayNext:             profile.Preferences.VideoAutoplayNext,
@@ -1045,6 +1048,9 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		role := currentUserRole(cfg, username)
 		prevThumbnailDir := strings.TrimSpace(prevProfile.ThumbnailDir)
 		prevThumbnailSize := prevProfile.ThumbnailSize
+		if req.EchoFrame == nil {
+			req.EchoFrame = prevProfile.Preferences.EchoFrame
+		}
 		nextProfile := &config.Profile{
 			ActiveLibraryID: req.ActiveLibraryID,
 			StoragePath:     req.StoragePath,
@@ -1053,6 +1059,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			TrashDir:        req.TrashDir,
 			UseSystemPlayer: req.UseSystemPlayer,
 			Preferences: config.Preferences{
+				EchoFrame:                     config.NormalizeEchoFrame(req.EchoFrame),
 				Theme:                         req.Theme,
 				GridSize:                      req.GridSize,
 				GridGap:                       req.GridGap,

@@ -1011,6 +1011,11 @@ body.dialog-open {
   box-shadow: 0 10px 26px rgba(56, 54, 68, .10);
 }
 
+.auth-brand img[src*="/pwa-icon.png"] {
+  transform: scale(1.16);
+  box-shadow: none;
+}
+
 .auth-fields {
   width: 272px;
   border-radius: 20px;
@@ -1827,27 +1832,35 @@ body.register-page {
   transition: opacity .2s ease, transform .2s ease;
 }
 
+.login-page .auth-brand p,
+.register-page .auth-brand p {
+  width: 100%;
+  margin-inline: 0;
+  text-align: center;
+  text-wrap: balance;
+}
+
 .login-page .auth-brand img {
   object-fit: cover;
   transition: opacity .2s ease, transform .24s cubic-bezier(.2, .8, .2, 1), box-shadow .24s ease;
 }
 
-.login-page .auth-brand.has-account-library img {
-  box-shadow:
-    0 10px 26px rgba(56, 54, 68, .10),
-    0 0 0 5px color-mix(in srgb, var(--accent) 18%, transparent);
+.login-page .auth-brand.has-account-library img:not([src*="/pwa-icon.png"]) {
+  box-shadow: 0 10px 26px rgba(56, 54, 68, .10);
 }
 
 .login-page .auth-brand.is-loading-account-library {
   opacity: .72;
 }
 
-.login-page .auth-brand.is-loading-account-library img {
-  transform: scale(.97);
+[data-theme="dark"] .auth-brand img {
+  box-shadow: 0 14px 30px rgba(0, 0, 0, .34);
 }
 
-[data-theme="dark"] .login-page .auth-brand.has-account-library img {
-  box-shadow:
-    0 12px 28px rgba(0, 0, 0, .28),
-    0 0 0 5px color-mix(in srgb, var(--accent) 24%, transparent);
+[data-theme="dark"] .auth-brand img[src*="/pwa-icon.png"] {
+  box-shadow: none;
+}
+
+[data-theme="dark"] .login-page .auth-brand.has-account-library img:not([src*="/pwa-icon.png"]) {
+  box-shadow: 0 14px 30px rgba(0, 0, 0, .34);
 }

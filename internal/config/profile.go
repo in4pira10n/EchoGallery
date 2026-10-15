@@ -88,6 +88,8 @@ type profileDefaultsProbe struct {
 		VideoVolumeSwipeSensitivity *int  `json:"video_volume_swipe_sensitivity"`
 		VideoVolumeMinPercent       *int  `json:"video_volume_min_percent"`
 		VideoVolumeMaxPercent       *int  `json:"video_volume_max_percent"`
+		ExperimentalAutoplayVideo   *bool `json:"experimental_autoplay_video"`
+		VideoAutoplayNext           *bool `json:"video_autoplay_next"`
 	} `json:"preferences"`
 }
 
@@ -166,6 +168,9 @@ func NewUserProfileTemplate(cfg *Config) *Profile {
 	}
 	profile.applyDefaults(template)
 	profile.Preferences.LowResourceMode = false
+	profile.Preferences.ExperimentalAutoplayVideo = true
+	profile.Preferences.VideoAutoplayNext = true
+	profile.Preferences.VideoVolumeMaxPercent = 100
 	return profile
 }
 
@@ -209,6 +214,12 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	}
 	if probe.Preferences.VideoVolumeMaxPercent == nil {
 		profile.Preferences.VideoVolumeMaxPercent = 100
+	}
+	if probe.Preferences.ExperimentalAutoplayVideo == nil {
+		profile.Preferences.ExperimentalAutoplayVideo = true
+	}
+	if probe.Preferences.VideoAutoplayNext == nil {
+		profile.Preferences.VideoAutoplayNext = true
 	}
 	if err := profile.validate(cfg); err != nil {
 		return nil, err
@@ -391,6 +402,7 @@ func (p *Profile) applyDefaults(fallback *Config) {
 	if p.Preferences.SlideshowMode == "" {
 		p.Preferences.SlideshowMode = "random"
 	}
+	p.Preferences.EchoFrame = NormalizeEchoFrame(p.Preferences.EchoFrame)
 	if p.Preferences.SlideshowInterval == 0 {
 		p.Preferences.SlideshowInterval = 5000
 	}

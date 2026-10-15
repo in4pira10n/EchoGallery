@@ -11,8 +11,9 @@ const sharePageHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>分享 - EchoGallery</title>
+  <title id="share-page-title"></title>
   <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
+  <script src="/static/i18n.js?v={{ASSET_VERSION}}"></script>
 </head>
 <body>
 <script>
@@ -34,7 +35,15 @@ const sharePageHTML = `<!doctype html>
     });
     window.EchoGalleryLightbox.createShareController({ token: token }).init();
   };
-  window.EchoGalleryLightbox.loadIcons().then(bootstrap).catch(function() { bootstrap({}); });
+  Promise.all([window.EchoGalleryLightbox.loadIcons(), window.EchoGalleryLightbox.loadCopy()])
+    .then(function(results) {
+      var catalog = results[1] || {};
+      if (catalog.locale) document.documentElement.lang = catalog.locale;
+      var title = catalog.pages && catalog.pages.share && catalog.pages.share.pageTitle || window.__GALLERY_NAME__ || 'EchoGallery';
+      document.title = String(title).replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery');
+      bootstrap(results[0]);
+    })
+    .catch(function() { bootstrap({}); });
 })();
 </script>
 </body>

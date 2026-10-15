@@ -34,6 +34,32 @@ func TestCreateAlbum_EmptyName(t *testing.T) {
 	}
 }
 
+func TestPhotoService_CreateAndUpdateSmartAlbum(t *testing.T) {
+	repo := newMockRepo()
+	svc := &PhotoService{repo: repo}
+	rules := []storage.SmartAlbumRule{{Field: "filename", Operator: "contains", Value: "trip"}}
+	created, err := svc.CreateSmartAlbum("旅行视频", "", "all", rules, 1)
+	if err != nil {
+		t.Fatalf("create smart album: %v", err)
+	}
+	if created.SourceKind != "smart" || created.SmartMatchMode != "all" || len(created.SmartRules) != 1 || created.Description != "文件名包含 trip" {
+		t.Fatalf("unexpected created smart album: %+v", created)
+	}
+
+	updated, err := svc.UpdateSmartAlbum(created.ID, "旅行素材", "只看视频", "any", []storage.SmartAlbumRule{
+		{Field: "media_type", Operator: "is", Value: "video"},
+	}, 1)
+	if err != nil {
+		t.Fatalf("update smart album: %v", err)
+	}
+	if updated.Name != "旅行素材" || updated.Description != "只看视频" || updated.SmartMatchMode != "any" || updated.SmartRules[0].Value != "video" {
+		t.Fatalf("smart album definition did not update: %+v", updated)
+	}
+	if _, err := svc.UpdateSmartAlbum(created.ID, "", "", "all", rules, 1); err == nil {
+		t.Fatal("empty smart album name should be rejected")
+	}
+}
+
 func TestListAlbums_UserIsolation(t *testing.T) {
 	svc, _ := newTestAlbumService()
 	svc.CreateAlbum("用户1的相册", "", 1)

@@ -34,6 +34,7 @@ const appPageFallbackHTML = `<!doctype html>
   <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
+  <script src="/static/i18n.js?v={{ASSET_VERSION}}"></script>
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
@@ -53,32 +54,33 @@ const loginPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-title" content="EchoGallery">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>登录 - EchoGallery</title>
+  <title></title>
   <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
   <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+  <script src="/static/i18n.js?v={{ASSET_VERSION}}"></script>
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
 <div class="login-wrap">
   <div class="login-card">
-    <section class="login-form-panel" aria-label="登录">
+    <section class="login-form-panel" aria-label="">
       <div class="login-form-head">
-        <span>本地访问</span>
-        <strong>登录 EchoGallery</strong>
+        <span id="login-local-access"></span>
+        <strong id="login-form-title"></strong>
       </div>
       <div class="form-group">
-        <label class="form-label" for="username">用户名</label>
-        <input class="input" id="username" type="text" autocomplete="username" placeholder="请输入用户名">
+        <label class="form-label" for="username" id="login-username-label"></label>
+        <input class="input" id="username" type="text" autocomplete="username" placeholder="">
       </div>
       <div class="form-group">
-        <label class="form-label" for="password">密码</label>
-        <input class="input" id="password" type="password" autocomplete="current-password" placeholder="请输入密码">
+        <label class="form-label" for="password" id="login-password-label"></label>
+        <input class="input" id="password" type="password" autocomplete="current-password" placeholder="">
       </div>
-      <button class="btn btn-primary login-submit" id="login-btn">登录</button>
-      <a class="login-secondary-link" href="/register">注册新用户</a>
+      <button class="btn btn-primary login-submit" id="login-btn"></button>
+      <a class="login-secondary-link" id="login-register-link" href="/register"></a>
       <div class="login-error" id="login-error"></div>
     </section>
   </div>
@@ -89,6 +91,32 @@ const loginPageFallbackHTML = `<!doctype html>
   document.documentElement.dataset.theme = t;
   var btn = document.getElementById('login-btn');
   var errEl = document.getElementById('login-error');
+  var copy = {};
+  function applyCopy(remote) {
+    copy = remote || {};
+    document.title = String(copy.pageTitle || '').replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery');
+    var pane = document.querySelector('.login-form-panel');
+    if (pane) pane.setAttribute('aria-label', copy.formTitle || '');
+    var map = {
+      'login-local-access': copy.localAccess,
+      'login-form-title': copy.formTitle,
+      'login-username-label': copy.usernameLabel,
+      'login-password-label': copy.passwordLabel,
+      'login-btn': copy.submit,
+      'login-register-link': copy.registerLink
+    };
+    Object.keys(map).forEach(function(id) {
+      var node = document.getElementById(id);
+      if (node && typeof map[id] === 'string') node.textContent = map[id];
+    });
+    var username = document.getElementById('username');
+    var password = document.getElementById('password');
+    if (username) username.placeholder = copy.usernamePlaceholder || '';
+    if (password) password.placeholder = copy.passwordPlaceholder || '';
+  }
+  var copyReady = window.EchoGalleryI18n.load()
+    .then(function(catalog) { applyCopy(catalog && catalog.pages && catalog.pages.login); })
+    .catch(function() { applyCopy({}); });
   function ensurePageSessionID() {
     try {
       var key = 'echogallery_page_session_id_v1';
@@ -123,20 +151,26 @@ const loginPageFallbackHTML = `<!doctype html>
   function loginReasonMessage(reason) {
     switch (String(reason || '').trim()) {
       case 'duplicate':
-        return '该账号已在新页面登录，当前页面已退出';
+        return copy.reasons && copy.reasons.duplicate || '';
       case 'expired':
-        return '页面会话已过期，请重新登录';
+        return copy.reasons && copy.reasons.expired || '';
       case 'no-library':
-        return '当前没有可进入的资源库，请稍后再试';
+        return copy.reasons && copy.reasons.noLibrary || '';
       default:
         return '';
     }
   }
+  function responseCopy(payload, field, fallback) {
+    var key = payload && payload[field + '_key'];
+    var localized = key && window.EchoGalleryI18n.text(key);
+    return localized || (payload && payload[field]) || fallback || '';
+  }
   async function doLogin() {
+    await copyReady;
     var u = document.getElementById('username').value.trim();
     var p = document.getElementById('password').value;
-    if (!u || !p) { errEl.textContent = '请输入用户名和密码'; return; }
-    btn.disabled = true; btn.textContent = '登录中…';
+    if (!u || !p) { errEl.textContent = copy.errors && copy.errors.missingFields || ''; return; }
+    btn.disabled = true; btn.textContent = (copy.submit || '') + (copy.submittingSuffix || '');
     var pageSessionID = resetPageSessionID();
     try {
       var r = await fetch('/api/auth/login', {
@@ -150,20 +184,24 @@ const loginPageFallbackHTML = `<!doctype html>
       var d = await r.json().catch(function () { return {}; });
       if (r.ok) {
         errEl.style.color = 'var(--accent)';
-        errEl.textContent = d.message || '';
+        errEl.textContent = responseCopy(d, 'message', '');
         markPageSessionTransfer(pageSessionID);
         var target = d.redirect || '/';
         var delay = Math.max(0, Number(d.delay_ms) || 0);
         setTimeout(function () { location.href = target; }, delay);
         return;
       }
-      errEl.textContent = d.error || loginReasonMessage(d.reason) || '登录失败';
-    } catch(e) { errEl.textContent = '网络错误'; }
-    btn.disabled = false; btn.textContent = '登录';
+      errEl.textContent = responseCopy(d, 'error', loginReasonMessage(d.reason) || copy.errors && copy.errors.failed || '');
+    } catch(e) { errEl.textContent = copy.errors && copy.errors.network || ''; }
+    btn.disabled = false; btn.textContent = copy.submit || '';
   }
   var initialReason = new URLSearchParams(location.search).get('reason');
   var reasonCopy = loginReasonMessage(initialReason);
   if (reasonCopy) errEl.textContent = reasonCopy;
+  copyReady.then(function() {
+    var reason = loginReasonMessage(initialReason);
+    if (reason) errEl.textContent = reason;
+  });
   btn.addEventListener('click', doLogin);
   document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doLogin(); });
 })();
@@ -181,58 +219,59 @@ const registerPageFallbackHTML = `<!doctype html>
   <meta name="apple-mobile-web-app-title" content="EchoGallery">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>注册 - EchoGallery</title>
+  <title></title>
   <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
   <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/common.css?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
+  <script src="/static/i18n.js?v={{ASSET_VERSION}}"></script>
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body class="register-page">
-<a class="timeline-order-btn" id="register-back-btn" href="/login" aria-label="返回登录" title="返回登录">
+<a class="timeline-order-btn" id="register-back-btn" href="/login" aria-label="" title="">
   <svg data-icon-source width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><use href="/static/svg/back.svg#back-icon"></use></svg>
 </a>
 <main class="auth-screen">
   <section class="auth-stage" aria-hidden="true"></section>
-  <section class="auth-pane" aria-label="注册">
+  <section class="auth-pane" aria-label="">
     <div class="auth-brand">
       <img src="/static/pwa-icon.png" alt="">
-      <p><strong id="register-form-title">注册 EchoGallery</strong></p>
+      <p><strong id="register-form-title"></strong></p>
     </div>
     <div class="auth-fields">
       <div class="auth-field">
-        <label for="username">用户名</label>
-        <input id="username" type="text" autocomplete="username" placeholder="请输入用户名">
+        <label for="username" id="register-username-label"></label>
+        <input id="username" type="text" autocomplete="username" placeholder="">
       </div>
       <div class="auth-field">
-        <label for="password">密码</label>
-        <input id="password" type="password" autocomplete="new-password" placeholder="至少 6 位">
+        <label for="password" id="register-password-label"></label>
+        <input id="password" type="password" autocomplete="new-password" placeholder="">
       </div>
       <div class="auth-field">
-        <label for="confirm-password">确认密码</label>
-        <input id="confirm-password" type="password" autocomplete="new-password" placeholder="再次输入密码">
+        <label for="confirm-password" id="register-confirm-label"></label>
+        <input id="confirm-password" type="password" autocomplete="new-password" placeholder="">
       </div>
     </div>
     <div class="form-group register-role-group">
-      <label class="form-label" for="role">账号类型</label>
+      <label class="form-label" for="role" id="register-role-label"></label>
       <select class="input" id="role">
-        <option value="visitor">访客用户</option>
-        <option value="admin">管理员账户</option>
+        <option value="visitor" id="register-visitor-option"></option>
+        <option value="admin" id="register-admin-option"></option>
       </select>
     </div>
     <div id="register-admin-fields" hidden>
       <div class="form-group">
-        <label class="form-label" for="admin-username">管理员用户名</label>
-        <input class="input" id="admin-username" type="text" autocomplete="username" placeholder="输入现有管理员用户名">
+        <label class="form-label" for="admin-username" id="register-admin-username-label"></label>
+        <input class="input" id="admin-username" type="text" autocomplete="username" placeholder="">
       </div>
       <div class="form-group">
-        <label class="form-label" for="admin-password">管理员密码</label>
-        <input class="input" id="admin-password" type="password" autocomplete="current-password" placeholder="输入现有管理员密码">
+        <label class="form-label" for="admin-password" id="register-admin-password-label"></label>
+        <input class="input" id="admin-password" type="password" autocomplete="current-password" placeholder="">
       </div>
     </div>
-    <button class="btn btn-primary login-submit" id="register-btn">创建账号</button>
-    <a class="login-secondary-link" href="/login">已有账号？返回登录</a>
+    <button class="btn btn-primary login-submit" id="register-btn"></button>
+    <a class="login-secondary-link" id="register-login-link" href="/login"></a>
     <div class="login-error" id="register-error"></div>
   </section>
 </main>
@@ -244,24 +283,68 @@ const registerPageFallbackHTML = `<!doctype html>
   var errEl = document.getElementById('register-error');
   var roleEl = document.getElementById('role');
   var adminFieldsEl = document.getElementById('register-admin-fields');
+  var copy = {};
+  function applyCopy(remote) {
+    copy = remote || {};
+    document.title = String(copy.pageTitle || '').replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery');
+    var pane = document.querySelector('.auth-pane');
+    if (pane) pane.setAttribute('aria-label', copy.paneLabel || '');
+    var map = {
+      'register-form-title': String(copy.formTitle || '').replace(/EchoGallery/g, window.__GALLERY_NAME__ || 'EchoGallery'),
+      'register-username-label': copy.usernameLabel,
+      'register-password-label': copy.passwordLabel,
+      'register-confirm-label': copy.confirmLabel,
+      'register-role-label': copy.roleLabel,
+      'register-visitor-option': copy.visitorRoleTitle,
+      'register-admin-option': copy.adminRoleTitle,
+      'register-admin-username-label': copy.adminUsernameLabel,
+      'register-admin-password-label': copy.adminPasswordLabel,
+      'register-login-link': copy.loginLink
+    };
+    Object.keys(map).forEach(function(id) {
+      var node = document.getElementById(id);
+      if (node && typeof map[id] === 'string') node.textContent = map[id];
+    });
+    var username = document.getElementById('username');
+    var password = document.getElementById('password');
+    var confirm = document.getElementById('confirm-password');
+    var adminUsername = document.getElementById('admin-username');
+    var adminPassword = document.getElementById('admin-password');
+    if (username) username.placeholder = copy.usernamePlaceholder || '';
+    if (password) password.placeholder = copy.passwordPlaceholder || '';
+    if (confirm) confirm.placeholder = copy.confirmPlaceholder || '';
+    if (adminUsername) adminUsername.placeholder = copy.adminUsernamePlaceholder || '';
+    if (adminPassword) adminPassword.placeholder = copy.adminPasswordPlaceholder || '';
+    var back = document.getElementById('register-back-btn');
+    if (back) { back.setAttribute('aria-label', copy.backLabel || ''); back.title = copy.backLabel || ''; }
+  }
+  function responseError(payload, fallback) {
+    var key = payload && payload.error_key;
+    var localized = key && window.EchoGalleryI18n.text(key);
+    return localized || (payload && payload.error) || fallback || '';
+  }
+  var copyReady = window.EchoGalleryI18n.load()
+    .then(function(catalog) { applyCopy(catalog && catalog.pages && catalog.pages.register); syncRole(); })
+    .catch(function() { applyCopy({}); });
   function syncRole() {
     var isAdmin = roleEl && roleEl.value === 'admin';
     if (adminFieldsEl) adminFieldsEl.hidden = !isAdmin;
-    btn.textContent = isAdmin ? '创建管理员账号' : '创建访客账号';
+    btn.textContent = isAdmin ? (copy.adminSubmit || '') : (copy.visitorSubmit || '');
   }
   syncRole();
   if (roleEl) roleEl.addEventListener('change', syncRole);
   async function doRegister() {
+    await copyReady;
     var u = document.getElementById('username').value.trim();
     var p = document.getElementById('password').value;
     var c = document.getElementById('confirm-password').value;
     var role = roleEl && roleEl.value === 'admin' ? 'admin' : 'visitor';
     var adminUsername = document.getElementById('admin-username') ? document.getElementById('admin-username').value.trim() : '';
     var adminPassword = document.getElementById('admin-password') ? document.getElementById('admin-password').value : '';
-    if (!u || !p || !c) { errEl.textContent = '请完整填写注册信息'; return; }
-    if (p !== c) { errEl.textContent = '两次输入的密码不一致'; return; }
-    if (role === 'admin' && (!adminUsername || !adminPassword)) { errEl.textContent = '请填写管理员用户名和密码'; return; }
-    btn.disabled = true; btn.textContent = '创建中…';
+    if (!u || !p || !c) { errEl.textContent = copy.errors && copy.errors.missingFields || ''; return; }
+    if (p !== c) { errEl.textContent = copy.errors && copy.errors.passwordMismatch || ''; return; }
+    if (role === 'admin' && (!adminUsername || !adminPassword)) { errEl.textContent = copy.errors && copy.errors.missingAdminFields || ''; return; }
+    btn.disabled = true; btn.textContent = (role === 'admin' ? copy.adminSubmit : copy.visitorSubmit || '') + (copy.submittingSuffix || '');
     try {
       var r = await fetch('/api/auth/register', {
         method: 'POST',
@@ -270,9 +353,9 @@ const registerPageFallbackHTML = `<!doctype html>
       });
       if (r.ok) { location.href = '/'; return; }
       var d = await r.json();
-      errEl.textContent = d.error || '注册失败';
-    } catch(e) { errEl.textContent = '网络错误'; }
-    btn.disabled = false; btn.textContent = '创建账号';
+      errEl.textContent = responseError(d, copy.errors && copy.errors.failed);
+    } catch(e) { errEl.textContent = copy.errors && copy.errors.network || ''; }
+    btn.disabled = false; syncRole();
   }
   btn.addEventListener('click', doRegister);
   document.addEventListener('keydown', function(e){ if(e.key === 'Enter') doRegister(); });

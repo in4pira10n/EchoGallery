@@ -220,7 +220,7 @@
 }
 
 .setup-init-advanced summary::after {
-  content: "展开";
+  content: attr(data-closed-label);
   margin-left: 10px;
   padding: 4px 9px;
   border-radius: 999px;
@@ -234,7 +234,7 @@
 }
 
 .setup-init-advanced[open] summary::after {
-  content: "收起";
+  content: attr(data-open-label);
 }
 
 .setup-init-submit {
@@ -384,13 +384,11 @@
 .setup-recovery-mark {
   width: 36px;
   height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  color: #fff;
-  background: linear-gradient(135deg, #67c4ff, #1a55d2);
-  box-shadow: 0 10px 24px rgba(54, 149, 255, .36);
+  flex: 0 0 auto;
+  display: block;
+  border-radius: 10px;
+  object-fit: contain;
+  transform: scale(1.16);
 }
 
 .setup-recovery-status {

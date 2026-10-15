@@ -130,6 +130,12 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("albums", "source_rel_path", `ALTER TABLE albums ADD COLUMN source_rel_path TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("albums", "smart_match_mode", `ALTER TABLE albums ADD COLUMN smart_match_mode TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("albums", "smart_rules_json", `ALTER TABLE albums ADD COLUMN smart_rules_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("albums", "deleted_at", `ALTER TABLE albums ADD COLUMN deleted_at DATETIME`); err != nil {
 		return err
 	}
@@ -188,6 +194,12 @@ func (s *DB) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_photos_active_kind_taken
 		ON photos(uploaded_by, media_kind, taken_at DESC, id DESC)
 		WHERE deleted_at IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_photos_active_video_duration
+		ON photos(uploaded_by, duration_ms, taken_at DESC, id DESC)
+		WHERE deleted_at IS NULL AND media_kind = 'video'`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`
@@ -365,6 +377,8 @@ CREATE TABLE IF NOT EXISTS albums (
     cover_photo_id INTEGER,
     source_kind    TEXT    NOT NULL DEFAULT '',
     source_rel_path TEXT   NOT NULL DEFAULT '',
+    smart_match_mode TEXT NOT NULL DEFAULT '',
+    smart_rules_json TEXT NOT NULL DEFAULT '[]',
     created_by     INTEGER NOT NULL,
     created_at     DATETIME NOT NULL,
     deleted_at     DATETIME,

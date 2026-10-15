@@ -12,12 +12,14 @@ const STATIC_ASSETS = [
   `/pages/login.css?v=${EG_ASSET_VERSION}`,
   `/pages/setup.css?v=${EG_ASSET_VERSION}`,
   `/pages/app.css?v=${EG_ASSET_VERSION}`,
+  `/static/i18n.js?v=${EG_ASSET_VERSION}`,
   `/static/app.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon.png?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon-512.png?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon-192.png?v=${EG_ASSET_VERSION}`,
-  `/static/strings/zh-CN.json?v=${EG_ASSET_VERSION}`
+  '/static/strings/zh-CN.json',
+  '/static/strings/locales.json'
 ];
 
 self.addEventListener('install', event => {
@@ -51,7 +53,6 @@ function shouldBypass(request) {
   if (url.pathname.startsWith('/api/')) return true;
   if (url.pathname.startsWith('/media/')) return true;
   if (url.pathname.includes('/thumbnails/')) return true;
-  if (url.pathname.startsWith('/static/strings/')) return true;
   return false;
 }
 

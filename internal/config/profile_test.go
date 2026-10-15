@@ -28,6 +28,7 @@ func TestEnsureProfile_CreatesDefaultFromConfig(t *testing.T) {
 	cfg.ThumbnailSize = 512
 	cfg.UseSystemPlayer = true
 	cfg.Preferences.GridGap = 2
+	cfg.Preferences.VideoVolumeMaxPercent = 100
 
 	profile, err := EnsureProfile(cfg, "alice")
 	if err != nil {
@@ -39,12 +40,63 @@ func TestEnsureProfile_CreatesDefaultFromConfig(t *testing.T) {
 	if !profile.UseSystemPlayer {
 		t.Fatalf("期望继承 UseSystemPlayer")
 	}
+	if profile.Preferences.VideoVolumeMaxPercent != 100 {
+		t.Fatalf("新 Profile 的最大音量应默认为 100，得到 %d", profile.Preferences.VideoVolumeMaxPercent)
+	}
 	path, err := cfg.ProfilePath("alice")
 	if err != nil {
 		t.Fatalf("获取 Profile 路径失败: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("期望 Profile 文件已写入: %v", err)
+	}
+}
+
+func TestNewUserProfileTemplate_DefaultsVideoPreferences(t *testing.T) {
+	profile := NewUserProfileTemplate(validConfig())
+	if !profile.Preferences.ExperimentalAutoplayVideo || !profile.Preferences.VideoAutoplayNext {
+		t.Fatal("新用户 Profile 应默认开启视频自动播放")
+	}
+	if profile.Preferences.VideoVolumeMaxPercent != 100 {
+		t.Fatalf("新用户 Profile 的最大音量应为 100，得到 %d", profile.Preferences.VideoVolumeMaxPercent)
+	}
+}
+
+func TestLoadProfile_DefaultsMissingVideoPreferencesButPreservesExplicitValues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := validConfig()
+	cfg.AppDataDir = dir
+
+	writeProfile := func(username, contents string) {
+		t.Helper()
+		path, err := cfg.ProfilePath(username)
+		if err != nil {
+			t.Fatalf("获取 Profile 路径失败: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("创建 Profile 目录失败: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatalf("写入 Profile 失败: %v", err)
+		}
+	}
+
+	writeProfile("missing", `{"storage_path":"/tmp/photos","preferences":{}}`)
+	missing, err := LoadProfile(cfg, "missing")
+	if err != nil {
+		t.Fatalf("加载缺少视频偏好字段的 Profile 失败: %v", err)
+	}
+	if !missing.Preferences.ExperimentalAutoplayVideo || !missing.Preferences.VideoAutoplayNext || missing.Preferences.VideoVolumeMaxPercent != 100 {
+		t.Fatalf("缺失字段未应用默认值: autoplay=%v autoplay_next=%v max_volume=%d", missing.Preferences.ExperimentalAutoplayVideo, missing.Preferences.VideoAutoplayNext, missing.Preferences.VideoVolumeMaxPercent)
+	}
+
+	writeProfile("explicit", `{"storage_path":"/tmp/photos","preferences":{"experimental_autoplay_video":false,"video_autoplay_next":false,"video_volume_max_percent":0}}`)
+	explicit, err := LoadProfile(cfg, "explicit")
+	if err != nil {
+		t.Fatalf("加载显式视频偏好字段的 Profile 失败: %v", err)
+	}
+	if explicit.Preferences.ExperimentalAutoplayVideo || explicit.Preferences.VideoAutoplayNext || explicit.Preferences.VideoVolumeMaxPercent != 0 {
+		t.Fatalf("加载时不应覆盖用户显式值: autoplay=%v autoplay_next=%v max_volume=%d", explicit.Preferences.ExperimentalAutoplayVideo, explicit.Preferences.VideoAutoplayNext, explicit.Preferences.VideoVolumeMaxPercent)
 	}
 }
 

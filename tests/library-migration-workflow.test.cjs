@@ -128,6 +128,14 @@ test('summary shows only scan and thumbnail build counters', () => {
   const match = source.match(/^function renderLibraryBatchWorkflowSummary\([^]*?^}/m);
   assert.ok(match);
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_83f794b00a': '检查并构建',
+      'app.interface.s_073957fea3': '本阶段',
+      'app.interface.s_562d1d2725': '总进度',
+      'app.interface.s_e7ad34645a': '扫描新增',
+      'app.interface.s_60248e225f': '缩略图已存在',
+      'app.interface.s_cfc54766b7': '新生成缩略图',
+    }[key] || ''),
     state: {
       libraryBatchBuildStatus: { libraries: [{ imported: 12, skipped: 640, failed: 0 }] },
       libraryBatchThumbnailBuildStatus: { libraries: [{ skipped: 600, generated: 40, failed: 0 }] },

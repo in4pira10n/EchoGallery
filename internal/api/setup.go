@@ -59,7 +59,7 @@ type setupSelectLibraryRequest struct {
 func NewSetupRouterWithStatic(staticFS fs.FS, state SetupState, restart func() error) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(compactGinLogger(), gin.Recovery())
+	r.Use(compactGinLogger(), gin.Recovery(), apiResponseKeyMiddleware())
 	r.GET("/static/*filepath", gin.WrapH(buildStaticHandler(staticFS)))
 	r.GET("/pages/*filepath", gin.WrapH(buildPagesHandler(staticFS)))
 	r.GET("/manifest.webmanifest", handleWebManifest(staticFS))

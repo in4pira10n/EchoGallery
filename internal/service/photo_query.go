@@ -234,6 +234,78 @@ func (s *PhotoService) CreateAlbum(name, description string, userID int64) (*sto
 	return album, nil
 }
 
+// CreateSmartAlbum persists a dynamic album definition without materializing its media membership.
+func (s *PhotoService) CreateSmartAlbum(name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len([]rune(name)) > 50 {
+		return nil, fmt.Errorf("智能相册名称须为 1 到 50 个字符")
+	}
+	matchMode, rules, err := storage.NormalizeSmartAlbumDefinition(matchMode, rules)
+	if err != nil {
+		return nil, err
+	}
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = storage.DescribeSmartAlbumRules(rules)
+	}
+	if len([]rune(description)) > 2000 {
+		return nil, fmt.Errorf("智能相册简介不能超过 2000 个字符")
+	}
+	album := &storage.Album{
+		Name:           name,
+		Description:    description,
+		SourceKind:     "smart",
+		SmartMatchMode: matchMode,
+		SmartRules:     rules,
+		CreatedBy:      userID,
+		CreatedAt:      time.Now(),
+	}
+	if err := s.repo.CreateAlbum(album); err != nil {
+		return nil, err
+	}
+	if err := s.syncPortableDatabase(); err != nil {
+		return nil, fmt.Errorf("保存智能相册到资源库数据库失败: %w", err)
+	}
+	return s.repo.GetAlbumByID(album.ID, userID)
+}
+
+// UpdateSmartAlbum changes a smart album's name and matching definition.
+func (s *PhotoService) UpdateSmartAlbum(id int64, name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len([]rune(name)) > 50 {
+		return nil, fmt.Errorf("智能相册名称须为 1 到 50 个字符")
+	}
+	matchMode, rules, err := storage.NormalizeSmartAlbumDefinition(matchMode, rules)
+	if err != nil {
+		return nil, err
+	}
+	description = strings.TrimSpace(description)
+	if description == "" {
+		description = storage.DescribeSmartAlbumRules(rules)
+	}
+	if len([]rune(description)) > 2000 {
+		return nil, fmt.Errorf("智能相册简介不能超过 2000 个字符")
+	}
+	album, err := s.repo.GetAlbumByID(id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if album == nil || album.SourceKind != "smart" {
+		return nil, fmt.Errorf("智能相册不存在")
+	}
+	album.Name = name
+	album.Description = description
+	album.SmartMatchMode = matchMode
+	album.SmartRules = rules
+	if err := s.repo.UpdateAlbum(album); err != nil {
+		return nil, err
+	}
+	if err := s.syncPortableDatabase(); err != nil {
+		return nil, fmt.Errorf("保存智能相册到资源库数据库失败: %w", err)
+	}
+	return s.repo.GetAlbumByID(id, userID)
+}
+
 // UpdateAlbum 更新相册。
 func (s *PhotoService) UpdateAlbum(id int64, name, description string, coverPhotoID *int64, userID int64) (*storage.Album, error) {
 	album, err := s.repo.GetAlbumByID(id, userID)
@@ -292,19 +364,31 @@ func (s *PhotoService) GetAlbumDownloadEntries(albumID int64, userID int64) (str
 		return "", nil, fmt.Errorf("相册不存在")
 	}
 
-	page, err := s.repo.ListAlbumPhotos(storage.ListAlbumPhotosParams{
-		AlbumID: albumID,
-		UserID:  userID,
-		Limit:   10000,
-	})
-	if err != nil {
-		return "", nil, err
+	photos := make([]*storage.Photo, 0, album.PhotoCount)
+	cursor := ""
+	for {
+		page, err := s.repo.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+			AlbumID: albumID,
+			UserID:  userID,
+			Cursor:  cursor,
+			Limit:   500,
+		})
+		if err != nil {
+			return "", nil, err
+		}
+		photos = append(photos, s.filterExistingMediaPage(page).Photos...)
+		if !page.HasMore {
+			break
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return "", nil, fmt.Errorf("读取相册媒体分页时游标未前进")
+		}
+		cursor = page.NextCursor
 	}
-	page = s.filterExistingMediaPage(page)
 
-	entries := make([]DownloadEntry, 0, len(page.Photos))
+	entries := make([]DownloadEntry, 0, len(photos))
 	usedNames := map[string]int{}
-	for _, photo := range page.Photos {
+	for _, photo := range photos {
 		name := makeUniqueDownloadName(photo.OriginalName, usedNames)
 		entries = append(entries, DownloadEntry{
 			FileName: name,
@@ -318,6 +402,24 @@ func (s *PhotoService) GetAlbumDownloadEntries(albumID int64, userID int64) (str
 		albumName = "album"
 	}
 	return albumName, entries, nil
+}
+
+// AlbumContainsMedia checks whether a media record currently belongs to an album.
+func (s *PhotoService) AlbumContainsMedia(albumID, photoID, userID int64) (bool, error) {
+	if checker, ok := s.repo.(interface {
+		IsMediaInAlbum(albumID, photoID, userID int64) (bool, error)
+	}); ok {
+		return checker.IsMediaInAlbum(albumID, photoID, userID)
+	}
+	album, err := s.repo.GetAlbumByID(albumID, userID)
+	if err != nil || album == nil {
+		return false, err
+	}
+	photo, err := s.repo.GetPhotoByID(photoID, userID)
+	if err != nil || photo == nil {
+		return false, err
+	}
+	return s.repo.IsPhotoInAlbum(albumID, photoID)
 }
 
 // AddPhoto 将媒体添加到相册。

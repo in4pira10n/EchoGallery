@@ -73,19 +73,30 @@ const (
 
 // Album 相册模型
 type Album struct {
-	ID             int64      `json:"id"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description"`
-	CoverPhotoID   *int64     `json:"cover_photo_id"` // nil 时自动取最新图片
-	CoverUUID      string     `json:"cover_uuid"`     // 封面图片 UUID，查询时填充，前端用于显示缩略图
-	SourceKind     string     `json:"source_kind,omitempty"`
-	SourceRelPath  string     `json:"source_rel_path,omitempty"`
-	CreatedBy      int64      `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	PhotoCount     int        `json:"photo_count"` // 非数据库字段，查询时聚合
-	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
-	DeletedBy      *int64     `json:"deleted_by,omitempty"`
-	DeletedGroupID string     `json:"-"`
+	ID             int64            `json:"id"`
+	Name           string           `json:"name"`
+	Description    string           `json:"description"`
+	CoverPhotoID   *int64           `json:"cover_photo_id"` // nil 时自动取最新图片
+	CoverUUID      string           `json:"cover_uuid"`     // 封面图片 UUID，查询时填充，前端用于显示缩略图
+	SourceKind     string           `json:"source_kind,omitempty"`
+	SourceRelPath  string           `json:"source_rel_path,omitempty"`
+	SmartMatchMode string           `json:"smart_match_mode,omitempty"`
+	SmartRules     []SmartAlbumRule `json:"smart_rules,omitempty"`
+	CreatedBy      int64            `json:"created_by"`
+	CreatedAt      time.Time        `json:"created_at"`
+	PhotoCount     int              `json:"photo_count"` // 非数据库字段，查询时聚合
+	DeletedAt      *time.Time       `json:"deleted_at,omitempty"`
+	DeletedBy      *int64           `json:"deleted_by,omitempty"`
+	DeletedGroupID string           `json:"-"`
+}
+
+// SmartAlbumRule is a validated rule used to build a dynamic smart-album query.
+type SmartAlbumRule struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value,omitempty"`
+	Min      string `json:"min,omitempty"`
+	Max      string `json:"max,omitempty"`
 }
 
 // FolderAlbumTrashEntry 表示一次文件夹相册删除操作在回收站中的聚合条目。
@@ -215,12 +226,14 @@ type SearchPhotosParams struct {
 
 // RandomPhotosParams 查询乱序相册媒体参数。
 type RandomPhotosParams struct {
-	UserID    int64
-	Seed      int64
-	Cursor    string
-	Limit     int
-	SkipTotal bool
-	MediaKind string
+	OnlyFavorite bool
+	AlbumIDs     []int64
+	UserID       int64
+	Seed         int64
+	Cursor       string
+	Limit        int
+	SkipTotal    bool
+	MediaKind    string
 }
 
 // SourceMediaInfo 是启动扫描使用的轻量索引，避免为每个源文件做一次完整查询。

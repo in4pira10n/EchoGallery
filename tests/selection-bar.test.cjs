@@ -14,6 +14,13 @@ function loadFunction(context, name) {
 
 test('selection bar exposes the deselect-favorite action', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.d_45360bd7f1': '下载 {v0}',
+      'app.interface.s_3e6dbf75b7': '不选个人收藏',
+      'app.interface.s_f02e943954': '清空选择',
+      'app.interface.runtime.selectedCountAria': '已选择媒体数',
+      'app.interface.d_d223fbc99b': '已取消选择 {v0} 个个人收藏',
+    }[key] || ''),
     icons: {
       selectionDownload: '<svg data-icon="download"></svg>',
       selectionDeselectFavorite: '<svg data-icon="deselect-favorite"></svg>',
@@ -41,6 +48,10 @@ test('deselect-favorite action only removes favorite media from the current sele
     [3, { id: 3, is_favorite: false, is_super_favorite: true }],
   ]);
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_cf04bfa78b': '当前选择中没有个人收藏',
+      'app.interface.d_d223fbc99b': '已取消选择 2 个个人收藏',
+    }[key] || ''),
     state: { selected: new Set([1, 2, 3]), selectionAnchorID: 3 },
     findKnownPhotoByID: id => photos.get(Number(id)) || null,
     setThumbSelectedState: (id, selected) => deselectedThumbs.push([id, selected]),

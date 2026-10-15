@@ -108,9 +108,16 @@ func TestNew_MigratesLegacyPhotoColumns(t *testing.T) {
 	}
 	defer db.Close()
 
-	for _, column := range []string{"media_kind", "duration_ms", "storage_rel_path", "source_rel_path"} {
+	for _, tableColumn := range []struct{ table, column string }{
+		{table: "photos", column: "media_kind"},
+		{table: "photos", column: "duration_ms"},
+		{table: "photos", column: "storage_rel_path"},
+		{table: "photos", column: "source_rel_path"},
+		{table: "albums", column: "smart_match_mode"},
+		{table: "albums", column: "smart_rules_json"},
+	} {
 		var found bool
-		rows, err := db.db.Query(`PRAGMA table_info(photos)`)
+		rows, err := db.db.Query(`PRAGMA table_info(` + tableColumn.table + `)`)
 		if err != nil {
 			t.Fatalf("查询表结构失败: %v", err)
 		}
@@ -125,13 +132,13 @@ func TestNew_MigratesLegacyPhotoColumns(t *testing.T) {
 				rows.Close()
 				t.Fatalf("扫描表结构失败: %v", err)
 			}
-			if name == column {
+			if name == tableColumn.column {
 				found = true
 			}
 		}
 		rows.Close()
 		if !found {
-			t.Fatalf("迁移后缺少列 %s", column)
+			t.Fatalf("迁移后 %s 表缺少列 %s", tableColumn.table, tableColumn.column)
 		}
 	}
 }

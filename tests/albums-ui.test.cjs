@@ -17,6 +17,10 @@ function loadFunctions(context, names) {
 
 test('root album listing keeps user albums and folders side by side and filters each kind', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_326155a897': '自动从文件夹导入',
+      'app.interface.s_18755acbbb': '根目录',
+    }[key] || ''),
     state: {
       albumKindFilter: 'all',
       albumChildrenIndex: null,
@@ -47,6 +51,9 @@ test('root album listing keeps user albums and folders side by side and filters 
 
 test('user album detail does not render the root album grid as child folders', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_326155a897': '自动从文件夹导入',
+    }[key] || ''),
     state: {
       albumKindFilter: 'all',
       albumChildrenIndex: null,
@@ -66,8 +73,15 @@ test('user album detail does not render the root album grid as child folders', (
   assert.equal(context.albumChildAlbumsForDetail(context.state.albums[1]).length, 0);
 });
 
-test('album kind filter exposes user/folder choices and keeps smart albums disabled', () => {
+test('album kind filter exposes user/folder/smart choices', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_aea579df06': '全部相册',
+      'app.interface.s_05b503551a': '用户相册',
+      'app.interface.s_46ecac2910': '文件夹',
+      'app.interface.s_354205a5b1': '智能相册',
+    }[key] || ''),
+    escapeHTML: value => String(value),
     state: { albumKindFilter: 'all' },
     icons: { album: '<svg></svg>', albumCardUser: '<svg><path /></svg>', albumCardFolder: '<svg><path /></svg>', albumIntelligence: '<svg><path /></svg>' },
   });
@@ -75,7 +89,8 @@ test('album kind filter exposes user/folder choices and keeps smart albums disab
   const markup = context.renderAlbumKindFilterControl();
   assert.match(markup, /data-album-kind-filter="user"/);
   assert.match(markup, /data-album-kind-filter="folder"/);
-  assert.match(markup, /data-album-kind-filter="smart"[^>]*disabled aria-disabled="true"/);
+  assert.match(markup, /data-album-kind-filter="smart"/);
+  assert.doesNotMatch(markup, /data-album-kind-filter="smart"[^>]*disabled/);
   assert.match(source, /albumIntelligence:\s*'album-intelligence\.svg'/);
   assert.match(source, /\{ key: 'smart', icon: icons\.albumIntelligence \|\| icons\.album/);
   assert.doesNotMatch(markup, /<span>/);
@@ -83,6 +98,17 @@ test('album kind filter exposes user/folder choices and keeps smart albums disab
 
 test('album picker uses the shared modal and modal button structure', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_f7acefd2d4': '在相册中查看',
+      'app.interface.s_cf4d216eca': '在文件管理器中打开',
+      'app.interface.s_2d639385ba': '添加到相册',
+      'app.interface.s_13794d2141': '编辑',
+      'app.interface.s_a7f814c0a4': '编辑',
+      'app.interface.s_3755f56f2f': '删除',
+      'app.interface.s_326155a897': '自动从文件夹导入',
+      'app.interface.s_326155a897': '自动从文件夹导入',
+    }[key] || ''),
+    copyText: () => '',
     icons: { album: '<svg></svg>' },
     escapeHTML: value => String(value),
   });
@@ -113,6 +139,15 @@ test('create album modal reuses the library editor modal and its action buttons'
 
 test('edit album modal reuses the library editor modal and its action buttons', () => {
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.runtime.editAlbum': '编辑相册',
+      'app.interface.runtime.smartAlbumNameSection': '名称',
+      'app.interface.runtime.editAlbumNamePlaceholder': '相册名称',
+      'app.interface.runtime.editAlbumDescriptionLabel': '简介',
+      'app.interface.runtime.editAlbumDescriptionPlaceholder': '相册简介',
+      'app.interface.s_4d0b4688c7': '取消',
+      'app.interface.s_fadf24dbc5': '保存',
+    }[key] || ''),
     icons: { libraryEditorCancel: '<svg></svg>', libraryEditorSave: '<svg></svg>' },
     escapeHTML: value => String(value),
   });
@@ -140,6 +175,7 @@ test('album picker builds cards from the shared album card structure', () => {
 
 test('empty dedicated add-to-album SVG falls back to a visible icon', () => {
   const context = vm.createContext({
+    copyText: () => '',
     icons: {
       albumContextAdd: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
       contextAlbum: '<svg><path d="M1 1" /></svg>',
@@ -155,6 +191,15 @@ test('empty dedicated add-to-album SVG falls back to a visible icon', () => {
 test('album context menu only offers adding selected media to user albums', () => {
   const added = [];
   const context = vm.createContext({
+    copyText: key => ({
+      'app.interface.s_f7acefd2d4': '在相册中查看',
+      'app.interface.s_cf4d216eca': '在文件管理器中打开',
+      'app.interface.s_2d639385ba': '添加到相册',
+      'app.interface.s_13794d2141': '编辑',
+      'app.interface.s_a7f814c0a4': '编辑',
+      'app.interface.s_3755f56f2f': '删除',
+      'app.interface.s_326155a897': '自动从文件夹导入',
+    }[key] || ''),
     state: { selected: new Set([10]) },
     icons: {
       albumContextAdd: '<svg></svg>',
@@ -174,7 +219,10 @@ test('album context menu only offers adding selected media to user albums', () =
     openEditAlbumModal() {},
     deleteAlbum() {},
   });
-  loadFunctions(context, ['compactContextMenuItems', 'albumAddIconMarkup', 'albumContextMenuItems']);
+  loadFunctions(context, [
+    'compactContextMenuItems', 'albumAddIconMarkup', 'normalizeAlbumPath',
+    'isFolderAlbum', 'isRootFolderAlbum', 'albumContextMenuItems',
+  ]);
 
   const userAlbum = context.albumContextMenuItems({ id: 2, source_kind: '' });
   const addAction = userAlbum.find(item => item.role === 'album-add');
@@ -196,7 +244,7 @@ test('album context menu only offers adding selected media to user albums', () =
 });
 
 test('empty album covers use different icons for folders and user albums', () => {
-  assert.match(source, /const emptyCoverIcon = albumKind === 'folder' \? icons\.albumCardFolder : icons\.albumCardUser;/);
+  assert.match(source, /const emptyCoverIcon = albumKind === 'folder' \? icons\.albumCardFolder : albumKind === 'smart' \? icons\.albumIntelligence : icons\.albumCardUser;/);
   assert.match(source, /album-cover-empty album-cover-empty-\$\{albumKind\}/);
   assert.match(source, /emptyCoverIcon \|\| icons\.photo/);
 });

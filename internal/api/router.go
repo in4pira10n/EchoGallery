@@ -230,9 +230,12 @@ type loginHeroResponse struct {
 }
 
 type albumRequest struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	CoverPhotoID *int64 `json:"cover_photo_id"`
+	Name           string                   `json:"name"`
+	Description    string                   `json:"description"`
+	CoverPhotoID   *int64                   `json:"cover_photo_id"`
+	SourceKind     string                   `json:"source_kind"`
+	SmartMatchMode string                   `json:"smart_match_mode"`
+	SmartRules     []storage.SmartAlbumRule `json:"smart_rules"`
 }
 
 type shareRequest struct {
@@ -324,7 +327,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
-	r.Use(compactGinLogger(), gin.Recovery())
+	r.Use(compactGinLogger(), gin.Recovery(), apiResponseKeyMiddleware())
 	authRequired := authMiddleware(cfg, options)
 	libraryRuntimeRequired := libraryRuntimeMiddleware(cfg, options)
 	adminRequired := requireAdmin(cfg)
@@ -633,10 +636,23 @@ func requestRegistrar(c *gin.Context, fallback videoRegistrar) videoRegistrar {
 }
 
 func writeStructuredAuthError(c *gin.Context, status int, reason string, message string) {
-	c.JSON(status, gin.H{
+	payload := gin.H{
 		"error":  message,
 		"reason": strings.TrimSpace(reason),
-	})
+	}
+	switch strings.TrimSpace(reason) {
+	case "duplicate_page_session", "user_already_online":
+		payload["error_key"] = "pages.login.reasons.duplicate"
+	case "session_missing", "session_expired":
+		payload["error_key"] = "pages.login.reasons.expired"
+	case "no_accessible_library":
+		payload["error_key"] = "pages.login.reasons.noLibrary"
+	}
+	c.JSON(status, payload)
+}
+
+func writeAuthError(c *gin.Context, status int, key, message string) {
+	c.JSON(status, gin.H{"error": message, "error_key": key})
 }
 
 func findAccessibleLibraryForLogin(cfg *config.Config, lockStore *sessionlock.Store, username, role, pageSessionID string, profile *config.Profile) (config.Library, bool, error) {
@@ -688,13 +704,13 @@ func handleLogin(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req authLoginRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			writeAuthError(c, http.StatusBadRequest, "pages.login.errors.invalidRequest", "无效的请求体")
 			return
 		}
 		verifyCfg := &config.Config{Users: cfg.Users}
 		user, err := config.VerifyPassword(verifyCfg, req.Username, req.Password)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "用户名或密码错误"})
+			writeAuthError(c, http.StatusUnauthorized, "pages.login.errors.invalidCredentials", "用户名或密码错误")
 			return
 		}
 		pageSessionID := pageSessionIDFromHeader(c)
@@ -703,7 +719,7 @@ func handleLogin(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 			return
 		}
 		if config.UserIsRoot(user) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "root 仅可通过 ./EchoGallery root 进入控制台"})
+			writeAuthError(c, http.StatusForbidden, "pages.login.errors.rootConsoleOnly", "root 仅可通过 ./EchoGallery root 进入控制台")
 			return
 		}
 		role := config.NormalizeUserRole(user.Role)
@@ -717,18 +733,18 @@ func handleLogin(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 					writeStructuredAuthError(c, http.StatusUnauthorized, "user_already_online", "当前用户已在其他页面登录，请先关闭原页面")
 					return
 				}
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "页面会话登记失败"})
+				writeAuthError(c, http.StatusInternalServerError, "pages.login.errors.sessionRegisterFailed", "页面会话登记失败")
 				return
 			}
 		}
 		profile, err := config.EnsureProfile(cfg, user.Username)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "加载用户配置失败"})
+			writeAuthError(c, http.StatusInternalServerError, "pages.login.errors.profileLoadFailed", "加载用户配置失败")
 			return
 		}
 		library, ok, err := findAccessibleLibraryForLogin(cfg, options.LockStore, user.Username, role, pageSessionID, profile)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "检查资源库占用失败"})
+			writeAuthError(c, http.StatusInternalServerError, "pages.login.errors.libraryCheckFailed", "检查资源库占用失败")
 			return
 		}
 		if !ok {
@@ -748,7 +764,7 @@ func handleLogin(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 				if options.PageSessions != nil {
 					_ = options.PageSessions.Release(user.Username, pageSessionID)
 				}
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "保存登录资源库失败"})
+				writeAuthError(c, http.StatusInternalServerError, "pages.login.errors.librarySaveFailed", "保存登录资源库失败")
 				return
 			}
 		}
@@ -757,12 +773,13 @@ func handleLogin(cfg *config.Config, options RouterOptions) gin.HandlerFunc {
 			if options.PageSessions != nil {
 				_ = options.PageSessions.Release(user.Username, pageSessionID)
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "生成令牌失败"})
+			writeAuthError(c, http.StatusInternalServerError, "pages.login.errors.tokenGenerationFailed", "生成令牌失败")
 			return
 		}
 		setAuthCookie(c.Writer, cfg, token)
 		c.JSON(http.StatusOK, gin.H{
 			"message":           "登录成功",
+			"message_key":       "pages.login.messages.loginSuccess",
 			"active_library_id": library.ID,
 		})
 	}
@@ -772,7 +789,7 @@ func handleRegister(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req authRegisterRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			writeAuthError(c, http.StatusBadRequest, "pages.register.errors.invalidRequest", "无效的请求体")
 			return
 		}
 		req.Username = strings.TrimSpace(req.Username)
@@ -781,22 +798,22 @@ func handleRegister(cfg *config.Config) gin.HandlerFunc {
 			role = config.UserRoleVisitor
 		}
 		if role != config.UserRoleVisitor && role != config.UserRoleAdmin {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的用户角色"})
+			writeAuthError(c, http.StatusBadRequest, "pages.register.errors.invalidRole", "无效的用户角色")
 			return
 		}
 		if strings.EqualFold(req.Username, "root") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "root 用户名已保留"})
+			writeAuthError(c, http.StatusBadRequest, "pages.register.errors.reservedUsername", "root 用户名已保留")
 			return
 		}
 		if req.Password != req.ConfirmPassword {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "两次输入的密码不一致"})
+			writeAuthError(c, http.StatusBadRequest, "pages.register.errors.passwordMismatch", "两次输入的密码不一致")
 			return
 		}
 		if role == config.UserRoleAdmin && config.HasAdminUser(cfg) {
 			verifyCfg := &config.Config{Users: cfg.Users}
 			adminUser, err := config.VerifyPassword(verifyCfg, req.AdminUsername, req.AdminPassword)
 			if err != nil || !config.UserIsAdmin(adminUser) {
-				c.JSON(http.StatusForbidden, gin.H{"error": "创建管理员账户需要现有管理员授权"})
+				writeAuthError(c, http.StatusForbidden, "pages.register.errors.adminAuthorizationRequired", "创建管理员账户需要现有管理员授权")
 				return
 			}
 		}
@@ -1190,11 +1207,18 @@ func handleListFavoriteMedia(cfg *config.Config, registrar videoRegistrar) gin.H
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
-		page, err := registrar.GetFavorites(storage.ListPhotosParams{
-			UserID:    userID,
-			Cursor:    c.Query("cursor"),
-			Limit:     mediaPageLimit(c),
-			MediaKind: mediaSearchKind(c),
+		list := registrar.GetFavorites
+		if c.Query("echo_frame") == "1" {
+			list = registrar.GetTimeline
+		}
+		page, err := list(storage.ListPhotosParams{
+			UserID:       userID,
+			Reverse:      mediaPageReverse(c),
+			OnlyFavorite: true,
+			SkipTotal:    strings.TrimSpace(c.Query("cursor")) != "",
+			Cursor:       c.Query("cursor"),
+			Limit:        mediaPageLimit(c),
+			MediaKind:    mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1655,6 +1679,22 @@ func handleCreateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
 			return
 		}
+		if req.SourceKind == "smart" {
+			smartRegistrar, ok := registrar.(interface {
+				CreateSmartAlbum(name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error)
+			})
+			if !ok {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "当前媒体服务不支持智能相册"})
+				return
+			}
+			album, err := smartRegistrar.CreateSmartAlbum(req.Name, req.Description, req.SmartMatchMode, req.SmartRules, userID)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusCreated, album)
+			return
+		}
 		album, err := registrar.CreateAlbum(req.Name, req.Description, userID)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1684,6 +1724,22 @@ func handleUpdateAlbumMedia(cfg *config.Config, registrar videoRegistrar) gin.Ha
 		var req albumRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		if req.SourceKind == "smart" {
+			smartRegistrar, ok := registrar.(interface {
+				UpdateSmartAlbum(id int64, name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error)
+			})
+			if !ok {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "当前媒体服务不支持智能相册"})
+				return
+			}
+			album, err := smartRegistrar.UpdateSmartAlbum(albumID, req.Name, req.Description, req.SmartMatchMode, req.SmartRules, userID)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, album)
 			return
 		}
 		album, err := registrar.UpdateAlbum(albumID, req.Name, req.Description, req.CoverPhotoID, userID)
@@ -2070,6 +2126,26 @@ func handleServeSharedMediaFile(cfg *config.Config, registrar videoRegistrar) gi
 			c.File(registrar.MediaPath(photo))
 		case storage.ShareTypeAlbum:
 			uuid := strings.TrimSuffix(c.Param("uuid"), filepath.Ext(c.Param("uuid")))
+			if checker, ok := registrar.(interface {
+				AlbumContainsMedia(albumID, photoID, userID int64) (bool, error)
+			}); ok {
+				photo, err := registrar.GetPhotoByUUIDAny(uuid, link.CreatedBy)
+				if err != nil || photo == nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
+					return
+				}
+				belongs, err := checker.AlbumContainsMedia(link.TargetID, photo.ID, link.CreatedBy)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				if !belongs {
+					c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
+					return
+				}
+				c.File(registrar.MediaPath(photo))
+				return
+			}
 			page, err := registrar.GetAlbumMedia(storage.ListAlbumPhotosParams{AlbumID: link.TargetID, UserID: link.CreatedBy, Limit: 10000})
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -2617,13 +2693,31 @@ func handleListRandomMedia(cfg *config.Config, registrar videoRegistrar) gin.Han
 				seed = parsed
 			}
 		}
+		var albumIDs []int64
+		if raw := strings.TrimSpace(c.Query("album_ids")); raw != "" {
+			parts := strings.Split(raw, ",")
+			if len(parts) > 32 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "最多选择 32 个相册"})
+				return
+			}
+			for _, part := range parts {
+				id, parseErr := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+				if parseErr != nil || id <= 0 {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "相册 ID 无效"})
+					return
+				}
+				albumIDs = append(albumIDs, id)
+			}
+		}
 		page, err := registrar.GetRandomMedia(storage.RandomPhotosParams{
-			UserID:    userID,
-			Seed:      seed,
-			Cursor:    c.Query("cursor"),
-			Limit:     mediaPageLimit(c),
-			SkipTotal: strings.TrimSpace(c.Query("cursor")) != "",
-			MediaKind: mediaSearchKind(c),
+			OnlyFavorite: mediaSearchFavorite(c),
+			AlbumIDs:     albumIDs,
+			UserID:       userID,
+			Seed:         seed,
+			Cursor:       c.Query("cursor"),
+			Limit:        mediaPageLimit(c),
+			SkipTotal:    strings.TrimSpace(c.Query("cursor")) != "",
+			MediaKind:    mediaSearchKind(c),
 		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

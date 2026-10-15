@@ -88,6 +88,20 @@ type stubRegistrar struct {
 	thumbnailPath                  func(photo *storage.Photo) string
 }
 
+type smartAlbumRegistrarStub struct {
+	stubRegistrar
+	createSmartAlbum func(name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error)
+	updateSmartAlbum func(id int64, name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error)
+}
+
+func (s smartAlbumRegistrarStub) CreateSmartAlbum(name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+	return s.createSmartAlbum(name, description, matchMode, rules, userID)
+}
+
+func (s smartAlbumRegistrarStub) UpdateSmartAlbum(id int64, name, description, matchMode string, rules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+	return s.updateSmartAlbum(id, name, description, matchMode, rules, userID)
+}
+
 func (s stubRegistrar) RegisterUploadedVideo(input service.RegisterUploadedVideoInput) (*storage.Photo, error) {
 	return s.register(input)
 }
@@ -1856,6 +1870,49 @@ func TestCreateAlbumMedia_Success(t *testing.T) {
 	}
 }
 
+func TestCreateAndUpdateSmartAlbumMedia(t *testing.T) {
+	cfg := testConfig()
+	base := okRegistrar()
+	calledCreate, calledUpdate := false, false
+	registrar := smartAlbumRegistrarStub{
+		stubRegistrar: base,
+		createSmartAlbum: func(name, description, matchMode string, gotRules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+			calledCreate = true
+			if name != "旅行片段" || description != "旅行素材" || matchMode != "any" || userID != 1 || len(gotRules) != 1 || gotRules[0].Value != "trip" {
+				return nil, fmt.Errorf("unexpected smart create request: %q %q %q %+v user=%d", name, description, matchMode, gotRules, userID)
+			}
+			return &storage.Album{ID: 41, Name: name, Description: description, SourceKind: "smart", SmartMatchMode: matchMode, SmartRules: gotRules, CreatedBy: userID}, nil
+		},
+		updateSmartAlbum: func(id int64, name, description, matchMode string, gotRules []storage.SmartAlbumRule, userID int64) (*storage.Album, error) {
+			calledUpdate = true
+			if id != 41 || name != "旅行片段 2" || description != "新的简介" || matchMode != "all" || userID != 1 || len(gotRules) != 1 {
+				return nil, fmt.Errorf("unexpected smart update request")
+			}
+			return &storage.Album{ID: id, Name: name, Description: description, SourceKind: "smart", SmartMatchMode: matchMode, SmartRules: gotRules, CreatedBy: userID}, nil
+		},
+	}
+	router := NewRouter(cfg, registrar)
+	token := testToken(t, cfg.JWTSecret, "alice")
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/media/albums", strings.NewReader(`{"name":"旅行片段","description":"旅行素材","source_kind":"smart","smart_match_mode":"any","smart_rules":[{"field":"filename","operator":"contains","value":"trip"}]}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusCreated || !calledCreate {
+		t.Fatalf("smart album create failed: status=%d body=%s called=%v", createRes.Code, createRes.Body.String(), calledCreate)
+	}
+
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/media/albums/41", strings.NewReader(`{"name":"旅行片段 2","description":"新的简介","source_kind":"smart","smart_match_mode":"all","smart_rules":[{"field":"filename","operator":"contains","value":"trip"}]}`))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	updateRes := httptest.NewRecorder()
+	router.ServeHTTP(updateRes, updateReq)
+	if updateRes.Code != http.StatusOK || !calledUpdate {
+		t.Fatalf("smart album update failed: status=%d body=%s called=%v", updateRes.Code, updateRes.Body.String(), calledUpdate)
+	}
+}
+
 func TestCreateAlbumMedia_UsesLibraryOwnerRecord(t *testing.T) {
 	cfg := testConfig()
 	cfg.Users = []config.User{
@@ -2577,7 +2634,7 @@ func TestHandleSharePage_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，得到 %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "分享 - EchoGallery") {
+	if !strings.Contains(w.Body.String(), `<title id="share-page-title"></title>`) || !strings.Contains(w.Body.String(), `catalog.pages.share.pageTitle`) {
 		t.Fatalf("分享页内容不正确")
 	}
 	if !strings.Contains(w.Body.String(), `/static/lightbox.js`) || !strings.Contains(w.Body.String(), `createShareController`) {

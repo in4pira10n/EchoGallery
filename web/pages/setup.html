@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="EchoGallery">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
-  <title>EchoGallery 设置</title>
+  <title></title>
   <link rel="manifest" href="/manifest.webmanifest?v={{ASSET_VERSION}}">
   <link rel="icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}" type="image/png">
   <link rel="apple-touch-icon" href="/static/pwa-icon.png?v={{ASSET_VERSION}}">
@@ -16,6 +16,7 @@
   <link rel="stylesheet" href="/pages/app.css?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/login.css?v={{ASSET_VERSION}}">
   <link rel="stylesheet" href="/pages/setup.css?v={{ASSET_VERSION}}">
+  <script src="/static/i18n.js?v={{ASSET_VERSION}}"></script>
   <script src="/static/pwa.js?v={{ASSET_VERSION}}" defer></script>
 </head>
 <body>
@@ -33,65 +34,7 @@
 (function () {
   var state = window.__SETUP__ || {};
   var root = document.getElementById('setup-root');
-  var copyDefaults = {
-    init: {
-      kicker: '首次启动',
-      title: '网页初始化',
-      copy: '首次启动不再使用命令行向导，请在这里完成端口、资源库和管理员账号配置。',
-      panelLabel: '网页初始化配置',
-      serviceTitle: '服务配置',
-      serviceHint: '启动后即可访问',
-      portLabel: '服务端口',
-      usernameLabel: '管理员用户名',
-      passwordLabel: '管理员密码',
-      passwordPlaceholder: '至少 6 位',
-      libraryTitle: '资源库',
-      libraryHint: '可添加多个路径',
-      addLibrary: '添加资源库',
-      advanced: '高级路径设置',
-      thumbLabel: '缩略图目录（可选）',
-      thumbPlaceholder: '默认使用应用数据目录下的 thumbnails',
-      trashLabel: '回收站目录（可选）',
-      trashPlaceholder: '默认使用应用数据目录下的 Trash',
-      save: '保存并重启',
-      importTransfer: '导入换机配置包',
-      importingTransfer: '正在导入配置…',
-      saving: '保存中…',
-      restarting: '正在重启…',
-      switchUser: '切换用户',
-      namePlaceholder: '资源库名称',
-      pathPlaceholder: '资源库路径',
-      remove: '删除',
-      missingLibrary: '请至少填写一个资源库路径',
-      libraryName: '资源库 {index}'
-    },
-    recovery: {
-      status: '需要选择资源库',
-      title: '资源库恢复',
-      message: '当前资源库不可用，请选择其他资源库后重启。',
-      currentPath: '当前路径',
-      unknownPath: '未记录',
-      existingTitle: '编辑已有资源库',
-      existingCount: '{count} 个记录',
-      currentInvalid: '当前不可用',
-      useExisting: '使用',
-      editTitle: '编辑资源库',
-      editHint: '保存名称与路径',
-      empty: 'config.json 中还没有可切换的资源库记录。',
-      createTitle: '新建资源库',
-      createHint: '自动创建目录',
-      newNameLabel: '资源库名称',
-      newNamePlaceholder: '例如：新资源库',
-      newPathLabel: '资源库路径',
-      newPathPlaceholder: '输入新路径后会自动创建目录',
-      select: '切换资源库并重启',
-      switching: '切换中…',
-      restarting: '正在重启…',
-      missingTarget: '请先选择一个资源库，或填写新的资源库路径',
-      libraryName: '资源库 {index}'
-    }
-  };
-  var copy = JSON.parse(JSON.stringify(copyDefaults));
+  var copy = {};
 
   function esc(text) {
     return String(text || '').replace(/[&<>"]/g, function (m) {
@@ -132,16 +75,23 @@
     return target;
   }
 
-  function text(path, fallback, params) {
+  function text(path, params) {
     var current = copy;
     String(path || '').split('.').forEach(function (segment) {
       if (current && typeof current === 'object' && segment in current) current = current[segment];
       else current = undefined;
     });
-    var value = typeof current === 'string' ? current : fallback;
+    var value = typeof current === 'string' ? current : '';
     return String(value || '').replace(/\{(\w+)\}/g, function (_, key) {
       return params && key in params ? String(params[key]) : '{' + key + '}';
     });
+  }
+
+  function responseText(payload, field, fallback) {
+    var key = payload && payload[field + '_key'];
+    var params = payload && payload[field + '_params'];
+    var localized = key && window.EchoGalleryI18n && window.EchoGalleryI18n.text(key, params || {});
+    return localized || (payload && payload[field]) || fallback || '';
   }
 
   function renderButtonBusySpinner() {
@@ -151,34 +101,34 @@
   function renderInit() {
     document.body.className = 'register-page setup-init-page';
     root.className = 'login-card setup-card setup-init-card';
-    var libraries = (state.libraries || []).length ? state.libraries : [{name:text('init.libraryName', '资源库 {index}', { index: 1 }), path:''}];
+    var libraries = (state.libraries || []).length ? state.libraries : [{name:text('init.libraryName', { index: 1 }), path:''}];
     root.innerHTML =
-      '<section class="login-form-panel setup-init-panel" aria-label="' + esc(text('init.panelLabel', '网页初始化配置')) + '">' +
-        '<div class="auth-brand"><img src="/static/pwa-icon.png?v={{ASSET_VERSION}}" alt=""><p><span id="setup-gallery-title">EchoGallery</span> <b>初始化</b></p></div>' +
-        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>EchoGallery 名称</strong></div>' +
-          '<div class="auth-fields"><div class="auth-field"><label for="setup-app-name">EchoGallery 名称</label><input id="setup-app-name" type="text" maxlength="80" placeholder="EchoGallery" value="EchoGallery"></div></div>' +
-          '<p class="setup-desc">为不同的 Gallery 设置独立名称，如「家庭照片」「iCloud 备份」。</p></div>' +
+      '<section class="login-form-panel setup-init-panel" aria-label="' + esc(text('init.panelLabel')) + '">' +
+        '<div class="auth-brand"><img src="/static/pwa-icon.png?v={{ASSET_VERSION}}" alt=""><p><span id="setup-gallery-title">' + esc(text('init.galleryNameDefault')) + '</span> <b>' + esc(text('init.brandSuffix')) + '</b></p></div>' +
+        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>' + esc(text('init.galleryNameTitle')) + '</strong></div>' +
+          '<div class="auth-fields"><div class="auth-field"><label for="setup-app-name">' + esc(text('init.galleryNameLabel')) + '</label><input id="setup-app-name" type="text" maxlength="80" placeholder="' + esc(text('init.galleryNameDefault')) + '" value="' + esc(state.app_name || text('init.galleryNameDefault')) + '"></div></div>' +
+          '<p class="setup-desc">' + esc(text('init.galleryNameCopy')) + '</p></div>' +
         '<div class="setup-init-section">' +
-          '<div class="setup-init-section-head"><strong>服务端配置</strong></div>' +
-          '<div class="form-group"><label class="form-label" for="setup-port">服务端口</label><input class="input" id="setup-port" type="number" min="1" max="65535" value="' + (state.port || 8080) + '"></div>' +
-          '<p class="setup-desc">默认端口为 8080；多个 Gallery 建议使用不同端口。</p>' +
+          '<div class="setup-init-section-head"><strong>' + esc(text('init.serviceTitle')) + '</strong></div>' +
+          '<div class="form-group"><label class="form-label" for="setup-port">' + esc(text('init.portLabel')) + '</label><input class="input" id="setup-port" type="number" min="1" max="65535" value="' + (state.port || 8080) + '"></div>' +
+          '<p class="setup-desc">' + esc(text('init.serviceCopy')) + '</p>' +
         '</div>' +
-        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>用户名及密码</strong></div>' +
-          '<div class="auth-fields"><div class="auth-field"><label for="setup-username">管理员用户名</label><input id="setup-username" type="text" autocomplete="username" placeholder="用户名" value="admin"></div>' +
-          '<div class="auth-field"><label for="setup-password">管理员密码</label><input id="setup-password" type="password" autocomplete="new-password" placeholder="密码（至少 6 位）"></div></div>' +
-          '<p class="setup-desc">此账户用于管理 Gallery。密码至少 6 位。</p>' +
+        '<div class="setup-init-section"><div class="setup-init-section-head"><strong>' + esc(text('init.accountTitle')) + '</strong></div>' +
+          '<div class="auth-fields"><div class="auth-field"><label for="setup-username">' + esc(text('init.usernameLabel')) + '</label><input id="setup-username" type="text" autocomplete="username" placeholder="' + esc(text('init.usernamePlaceholder')) + '" value="admin"></div>' +
+          '<div class="auth-field"><label for="setup-password">' + esc(text('init.passwordLabel')) + '</label><input id="setup-password" type="password" autocomplete="new-password" placeholder="' + esc(text('init.passwordPlaceholder')) + '"></div></div>' +
+          '<p class="setup-desc">' + esc(text('init.accountCopy')) + '</p>' +
         '</div>' +
         '<div class="setup-init-section">' +
-          '<div class="setup-init-section-head"><strong>资源库配置</strong></div>' +
+          '<div class="setup-init-section-head"><strong>' + esc(text('init.libraryTitle')) + '</strong></div>' +
           '<div id="setup-libraries" class="setup-init-libraries"></div>' +
-          '<p class="setup-desc">您可以以后在「设置」页详细配置资源库。</p>' +
+          '<p class="setup-desc">' + esc(text('init.libraryCopy')) + '</p>' +
         '</div>' +
         '<div class="settings-actions settings-actions-fill">' +
-          '<button class="btn" id="setup-import-transfer" type="button"><img src="/static/svg/down.svg" alt="" aria-hidden="true">' + esc(text('init.importTransfer', '导入过往 EchoGallery 备份包（*.zip）')) + '</button>' +
+          '<button class="btn" id="setup-import-transfer" type="button"><img src="/static/svg/down.svg" alt="" aria-hidden="true">' + esc(text('init.importTransfer')) + '</button>' +
           '<input id="setup-import-transfer-file" type="file" accept=".zip,application/zip" hidden>' +
         '</div>' +
-        '<button class="timeline-order-btn" id="setup-submit" aria-label="保存并重启" title="保存并重启"><img src="/static/svg/check.svg" width="24" height="24" alt=""></button>' +
-        '<a class="timeline-order-btn" href="/login" id="setup-switch-user" aria-label="返回登录" title="返回登录"><img src="/static/svg/back.svg" width="24" height="24" alt=""></a>' +
+        '<button class="timeline-order-btn" id="setup-submit" aria-label="' + esc(text('init.save')) + '" title="' + esc(text('init.save')) + '"><img src="/static/svg/check.svg" width="24" height="24" alt=""></button>' +
+        '<a class="timeline-order-btn" href="/login" id="setup-switch-user" aria-label="' + esc(text('init.backToLogin')) + '" title="' + esc(text('init.backToLogin')) + '"><img src="/static/svg/back.svg" width="24" height="24" alt=""></a>' +
         '<div class="login-error" id="setup-error"></div>' +
       '</section>';
     Array.prototype.forEach.call(root.querySelectorAll('.form-group'), function (group) {
@@ -192,17 +142,18 @@
       input.placeholder = input.placeholder || field.querySelector('label').textContent;
     });
     document.getElementById('setup-app-name').addEventListener('input', function () {
-      var name = this.value.trim() || 'EchoGallery';
+      var name = this.value.trim() || text('init.galleryNameDefault');
       document.getElementById('setup-gallery-title').textContent = name;
-      document.title = name + ' 初始化';
+      document.title = text('init.pageTitle', { name: name });
     });
+    document.title = text('init.pageTitle', { name: document.getElementById('setup-app-name').value.trim() || text('init.galleryNameDefault') });
     var list = document.getElementById('setup-libraries');
 
     function renderLibraries(items) {
       list.innerHTML = items.map(function (library, index) {
         return '<div class="setup-library-row">' +
-          '<div class="auth-fields"><div class="auth-field"><input class="setup-library-name" aria-label="' + esc(text('init.namePlaceholder', '资源库名称')) + '" type="text" maxlength="32" placeholder="' + esc(text('init.namePlaceholder', '资源库名称')) + '" value="' + esc(library.name || text('init.libraryName', '资源库 {index}', { index: index + 1 })) + '"></div>' +
-          '<div class="auth-field"><input class="setup-library-path" aria-label="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" type="text" placeholder="' + esc(text('init.pathPlaceholder', '资源库路径')) + '" value="' + esc(library.path || '') + '"></div></div>' +
+          '<div class="auth-fields"><div class="auth-field"><input class="setup-library-name" aria-label="' + esc(text('init.namePlaceholder')) + '" type="text" maxlength="32" placeholder="' + esc(text('init.namePlaceholder')) + '" value="' + esc(library.name || text('init.libraryName', { index: index + 1 })) + '"></div>' +
+          '<div class="auth-field"><input class="setup-library-path" aria-label="' + esc(text('init.pathPlaceholder')) + '" type="text" placeholder="' + esc(text('init.pathPlaceholder')) + '" value="' + esc(library.path || '') + '"></div></div>' +
         '</div>';
       }).join('');
     }
@@ -219,25 +170,25 @@
       var errorEl = document.getElementById('setup-error');
       btn.disabled = true;
       btn.innerHTML = renderButtonBusySpinner();
-      btn.setAttribute('aria-label', text('init.importingTransfer', '正在导入配置…'));
+      btn.setAttribute('aria-label', text('init.importingTransfer'));
       errorEl.textContent = '';
       try {
         var form = new FormData();
         form.append('file', file);
         var resp = await fetch('/api/setup/import', {method:'POST', body:form});
         var data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || '导入失败');
+        if (!resp.ok) throw new Error(responseText(data, 'error', text('init.importFailed')));
         var browser = data.browser_settings;
         var allowed = ['echogallery_pwa_settings_v1','echogallery_media_kind_filter_v1','echogallery_timeline_order_v1','echogallery_album_detail_sort_v1','echogallery_global_video_volume_v1','echogallery_library_batch_workflow_enabled_v1','echogallery_library_batch_workflow_aggressive_v1','echogallery_sidebar_compact'];
         if (browser && typeof browser === 'object') allowed.forEach(function (key) {
           if (typeof browser[key] === 'string') localStorage.setItem(key, browser[key]);
         });
-        btn.textContent = text('init.restarting', '正在重启…');
+        btn.textContent = text('init.restarting');
         setTimeout(function () { location.href = '/login'; }, 1800);
       } catch (err) {
         errorEl.textContent = err.message || String(err);
         btn.disabled = false;
-        btn.textContent = text('init.importTransfer', '导入换机配置包');
+        btn.textContent = text('init.importTransfer');
       } finally {
         this.value = '';
       }
@@ -248,25 +199,25 @@
       errorEl.textContent = '';
       var rows = Array.prototype.map.call(list.querySelectorAll('.setup-library-row'), function (row, index) {
         return {
-          name: row.querySelector('.setup-library-name').value.trim() || text('init.libraryName', '资源库 {index}', { index: index + 1 }),
+          name: row.querySelector('.setup-library-name').value.trim() || text('init.libraryName', { index: index + 1 }),
           path: row.querySelector('.setup-library-path').value.trim()
         };
       }).filter(function (item) { return item.path; });
       if (!rows.length) {
-        errorEl.textContent = text('init.missingLibrary', '请至少填写一个资源库路径');
+        errorEl.textContent = text('init.missingLibrary');
         return;
       }
       var btn = this;
       var originalContent = btn.innerHTML;
       btn.disabled = true;
       btn.innerHTML = renderButtonBusySpinner();
-      btn.setAttribute('aria-label', text('init.saving', '保存中…'));
+      btn.setAttribute('aria-label', text('init.saving'));
       try {
         var resp = await fetch('/api/setup/init', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            app_name: document.getElementById('setup-app-name').value.trim() || 'EchoGallery',
+            app_name: document.getElementById('setup-app-name').value.trim() || text('init.galleryNameDefault'),
             port: parseInt(document.getElementById('setup-port').value, 10) || 8080,
             libraries: rows,
             storage_path: rows[0].path,
@@ -275,18 +226,18 @@
           })
         });
         var data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || '初始化失败');
+        if (!resp.ok) throw new Error(responseText(data, 'error', text('init.initializationFailed')));
         btn.innerHTML = renderButtonBusySpinner();
-        btn.setAttribute('aria-label', text('init.restarting', '正在重启…'));
+        btn.setAttribute('aria-label', text('init.restarting'));
         errorEl.style.color = 'var(--accent)';
-        errorEl.textContent = data.message || text('init.restarting', '正在重启…');
+        errorEl.textContent = responseText(data, 'message', text('init.restarting'));
         setTimeout(function () { location.reload(); }, 2000);
       } catch (e) {
         btn.disabled = false;
         btn.innerHTML = originalContent;
-        btn.setAttribute('aria-label', text('init.save', '保存并重启'));
+        btn.setAttribute('aria-label', text('init.save'));
         errorEl.style.color = 'var(--danger)';
-        errorEl.textContent = e.message || '初始化失败';
+        errorEl.textContent = e.message || text('init.initializationFailed');
       }
     });
     document.getElementById('setup-switch-user').addEventListener('click', async function (event) {
@@ -299,28 +250,29 @@
   }
 
   function renderRecovery() {
+    document.title = text('recovery.pageTitle');
     root.className = 'login-card setup-card setup-recovery-card';
     var recoveryLibraries = (state.libraries || []).map(function (library, index) {
       return {
         id: library.id || '',
-        name: library.name || text('recovery.libraryName', '资源库 {index}', { index: index + 1 }),
+        name: library.name || text('recovery.libraryName', { index: index + 1 }),
         path: library.path || ''
       };
     });
     root.innerHTML =
       '<div class="setup-recovery-hero">' +
-        '<div class="setup-recovery-brand"><span class="setup-recovery-mark">E</span><span>EchoGallery</span></div>' +
-        '<span class="setup-recovery-status">' + esc(text('recovery.status', '需要选择资源库')) + '</span>' +
-        '<h1>' + esc(text('recovery.title', '资源库恢复')) + '</h1>' +
-        '<p>' + esc(state.message || text('recovery.message', '当前资源库不可用，请选择其他资源库后重启。')) + '</p>' +
-        '<div class="setup-recovery-current"><span>' + esc(text('recovery.currentPath', '当前路径')) + '</span><strong>' + esc(state.current_storage_path || text('recovery.unknownPath', '未记录')) + '</strong></div>' +
+        '<div class="setup-recovery-brand"><img class="setup-recovery-mark" src="/static/pwa-icon.png?v={{ASSET_VERSION}}" alt=""><span>' + esc(state.app_name || text('init.galleryNameDefault')) + '</span></div>' +
+        '<span class="setup-recovery-status">' + esc(text('recovery.status')) + '</span>' +
+        '<h1>' + esc(text('recovery.title')) + '</h1>' +
+        '<p>' + esc(state.message || text('recovery.message')) + '</p>' +
+        '<div class="setup-recovery-current"><span>' + esc(text('recovery.currentPath')) + '</span><strong>' + esc(state.current_storage_path || text('recovery.unknownPath')) + '</strong></div>' +
       '</div>' +
       '<div class="setup-recovery-grid">' +
         '<section class="setup-recovery-section">' +
-          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.existingTitle', '编辑已有资源库')) + '</strong><span>' + esc(text('recovery.existingCount', '{count} 个记录', { count: recoveryLibraries.length })) + '</span></div>' +
+          '<div class="setup-recovery-section-head"><strong>' + esc(text('recovery.existingTitle')) + '</strong><span>' + esc(text('recovery.existingCount', { count: recoveryLibraries.length })) + '</span></div>' +
           '<div class="setup-library-chooser" id="setup-library-chooser">' + (recoveryLibraries.length ? recoveryLibraries.map(function (library, index) {
             var currentClass = library.path === state.current_storage_path ? ' current' : '';
-            var current = library.path === state.current_storage_path ? '<em>' + esc(text('recovery.currentInvalid', '当前不可用')) + '</em>' : '';
+            var current = library.path === state.current_storage_path ? '<em>' + esc(text('recovery.currentInvalid')) + '</em>' : '';
             return '<div class="setup-library-option setup-library-edit-option' + currentClass + '" data-index="' + index + '">' +
               '<span class="setup-library-option-dot">' + (index + 1) + '</span>' +
               '<span class="setup-library-option-main">' +
@@ -329,13 +281,13 @@
               '</span>' +
               current +
             '</div>';
-          }).join('') : '<div class="setup-recovery-empty">' + esc(text('recovery.empty', 'config.json 中还没有可切换的资源库记录。')) + '</div>') + '</div>' +
+          }).join('') : '<div class="setup-recovery-empty">' + esc(text('recovery.empty')) + '</div>') + '</div>' +
         '</section>' +
         '<section class="setup-recovery-section setup-recovery-create" id="setup-recovery-editor">' +
         '</section>' +
       '</div>' +
       '<div class="setup-recovery-footer">' +
-        '<button class="btn btn-primary" id="setup-select-library">' + esc(text('recovery.select', '切换资源库并重启')) + '</button>' +
+        '<button class="btn btn-primary" id="setup-select-library">' + esc(text('recovery.select')) + '</button>' +
         '<div class="login-error" id="setup-error"></div>' +
       '</div>';
 
@@ -346,14 +298,14 @@
       var editing = selectedIndex >= 0 && selectedIndex < recoveryLibraries.length;
       var library = editing ? recoveryLibraries[selectedIndex] : {};
       editor.innerHTML =
-        '<div class="setup-recovery-section-head"><strong>' + esc(editing ? text('recovery.editTitle', '编辑资源库') : text('recovery.createTitle', '新建资源库')) + '</strong><span>' + esc(editing ? text('recovery.editHint', '保存名称与路径') : text('recovery.createHint', '自动创建目录')) + '</span></div>' +
-        '<div class="form-group"><label class="form-label" for="setup-new-library-name">' + esc(text('recovery.newNameLabel', '资源库名称')) + '</label><input class="input" id="setup-new-library-name" type="text" value="' + esc(library.name || '') + '" placeholder="' + esc(text('recovery.newNamePlaceholder', '例如：新资源库')) + '"></div>' +
-        '<div class="form-group"><label class="form-label" for="setup-new-library-path">' + esc(text('recovery.newPathLabel', '资源库路径')) + '</label><input class="input" id="setup-new-library-path" type="text" value="' + esc(library.path || '') + '" placeholder="' + esc(text('recovery.newPathPlaceholder', '输入新路径后会自动创建目录')) + '"></div>';
+        '<div class="setup-recovery-section-head"><strong>' + esc(editing ? text('recovery.editTitle') : text('recovery.createTitle')) + '</strong><span>' + esc(editing ? text('recovery.editHint') : text('recovery.createHint')) + '</span></div>' +
+        '<div class="form-group"><label class="form-label" for="setup-new-library-name">' + esc(text('recovery.newNameLabel')) + '</label><input class="input" id="setup-new-library-name" type="text" value="' + esc(library.name || '') + '" placeholder="' + esc(text('recovery.newNamePlaceholder')) + '"></div>' +
+        '<div class="form-group"><label class="form-label" for="setup-new-library-path">' + esc(text('recovery.newPathLabel')) + '</label><input class="input" id="setup-new-library-path" type="text" value="' + esc(library.path || '') + '" placeholder="' + esc(text('recovery.newPathPlaceholder')) + '"></div>';
     }
     function syncRecoveryEditor() {
       if (selectedIndex < 0 || selectedIndex >= recoveryLibraries.length) return;
       recoveryLibraries[selectedIndex] = {
-        name: document.getElementById('setup-new-library-name').value.trim() || text('recovery.libraryName', '资源库 {index}', { index: selectedIndex + 1 }),
+        name: document.getElementById('setup-new-library-name').value.trim() || text('recovery.libraryName', { index: selectedIndex + 1 }),
         path: document.getElementById('setup-new-library-path').value.trim()
       };
     }
@@ -382,7 +334,7 @@
       return recoveryLibraries.map(function (library, index) {
         return {
           id: library.id || '',
-          name: library.name || text('recovery.libraryName', '资源库 {index}', { index: index + 1 }),
+          name: library.name || text('recovery.libraryName', { index: index + 1 }),
           path: library.path || ''
         };
       });
@@ -397,13 +349,13 @@
       var selectedLibrary = selectedIndex >= 0 ? editedLibraries[selectedIndex] : null;
       var targetPath = newPath || (selectedLibrary && selectedLibrary.path) || '';
       if (!targetPath) {
-        errorEl.textContent = text('recovery.missingTarget', '请先选择一个资源库，或填写新的资源库路径');
+        errorEl.textContent = text('recovery.missingTarget');
         return;
       }
       var btn = this;
       btn.disabled = true;
       btn.innerHTML = renderButtonBusySpinner();
-      btn.setAttribute('aria-label', text('recovery.switching', '切换中…'));
+      btn.setAttribute('aria-label', text('recovery.switching'));
       try {
         var resp = await fetch('/api/setup/select-library', {
           method: 'POST',
@@ -411,24 +363,23 @@
           body: JSON.stringify({name: newName, storage_path: targetPath, selected_index: selectedIndex, libraries: editedLibraries})
         });
         var data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || '切换失败');
+        if (!resp.ok) throw new Error(responseText(data, 'error', text('recovery.switchFailed')));
         btn.innerHTML = renderButtonBusySpinner();
-        btn.setAttribute('aria-label', text('recovery.restarting', '正在重启…'));
+        btn.setAttribute('aria-label', text('recovery.restarting'));
         errorEl.style.color = 'var(--accent)';
-        errorEl.textContent = data.message || '服务正在重启';
+        errorEl.textContent = responseText(data, 'message', text('recovery.serviceRestarting'));
         setTimeout(function () { location.reload(); }, 2000);
       } catch (e) {
         btn.disabled = false;
-        btn.textContent = text('recovery.select', '切换资源库并重启');
+        btn.textContent = text('recovery.select');
         btn.removeAttribute('aria-label');
         errorEl.style.color = 'var(--danger)';
-        errorEl.textContent = e.message || '切换失败';
+        errorEl.textContent = e.message || text('recovery.switchFailed');
       }
     });
   }
 
-  fetch('/static/strings/zh-CN.json', { cache: 'no-store' })
-    .then(function (response) { return response.ok ? response.json() : null; })
+  window.EchoGalleryI18n.load()
     .then(function (catalog) {
       if (catalog && catalog.pages && catalog.pages.setup) {
         mergeCopy(copy, catalog.pages.setup);

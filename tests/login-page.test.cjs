@@ -8,138 +8,109 @@ const html = fs.readFileSync(path.join(__dirname, '../web/pages/login.html'), 'u
 const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '../web/static/strings/zh-CN.json'), 'utf8'));
 const css = fs.readFileSync(path.join(__dirname, '../web/pages/login.css'), 'utf8');
 
-function openPage(storage = new Map(), offline = false, random = () => 0) {
+function openPage(offline = false) {
   const nodes = new Map();
   const events = new Map();
   const requests = [];
   function node(id) {
-    if (!nodes.has(id)) nodes.set(id, { textContent: '', value: '', style: {}, addEventListener() {}, setAttribute() {} });
+    if (!nodes.has(id)) {
+      nodes.set(id, {
+        textContent: '',
+        value: '',
+        src: '/static/pwa-icon.png',
+        style: {},
+        attributes: {},
+        classList: { add() {}, remove() {}, toggle() {} },
+        addEventListener() {},
+        setAttribute(name, value) { this.attributes[name] = String(value); },
+        removeAttribute(name) { delete this.attributes[name]; },
+        getAttribute(name) { return name === 'src' ? this.src : this.attributes[name] || ''; },
+      });
+    }
     return nodes.get(id);
   }
-  const context = vm.createContext({
-    document: {
-      documentElement: { dataset: {} },
-      getElementById: node,
-      querySelector: node,
-      addEventListener() {},
+  const document = {
+    title: '',
+    documentElement: { dataset: {} },
+    getElementById: node,
+    querySelector(selector) {
+      if (selector === '.auth-pane') return node('login-auth-pane');
+      if (selector === '.auth-brand') return node('login-auth-brand');
+      if (selector === '.auth-recovery') return node('login-register-link');
+      return node(selector);
     },
+    addEventListener() {},
+  };
+  const context = vm.createContext({
+    document,
     window: {
       matchMedia: () => ({ matches: false, addEventListener() {} }),
       addEventListener: (event, listener) => events.set(event, listener),
+      clearTimeout() {},
+      setTimeout() { return 0; },
     },
     localStorage: {
-      getItem: (key) => storage.get(key),
-      setItem: (key, value) => storage.set(key, value),
+      getItem() { return null; },
+      setItem() {},
     },
-    Math: Object.assign(Object.create(Math), { random }),
-    location: { search: '' },
-    URLSearchParams,
+    sessionStorage: {
+      getItem() { return null; },
+      setItem() {},
+    },
     fetch: async (url) => {
       requests.push(url);
       if (offline) throw new Error('offline');
-      return { ok: true, json: async () => catalog };
+      return { ok: true, json: async () => ({ pages: { login: catalog.pages.login } }) };
     },
+    URLSearchParams,
+    location: { search: '' },
   });
   for (const match of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) {
     vm.runInContext(match[1], context);
   }
   return {
-    motto: () => node('login-hero-summary-text').textContent,
-    author: () => node('login-hero-summary-author').textContent,
+    node,
+    document,
     pageshow: (persisted) => events.get('pageshow')({ persisted }),
     requests,
   };
 }
 
-test('each opening excludes the previous motto, even with identical random values', () => {
-  const storage = new Map();
-  let previous = '';
-  for (let i = 0; i < 20; i++) {
-    const page = openPage(storage);
-    assert.ok(page.motto());
-    assert.notEqual(page.motto(), previous);
-    previous = page.motto();
-  }
-});
-
-test('author appears separately with a double em dash instead of parentheses', () => {
-  let random = 0.65;
-  const page = openPage(new Map(), false, () => random);
-  assert.equal(page.motto(), 'Well done is better than well said.');
-  assert.equal(page.author(), '\u2014\u2014 Benjamin Franklin');
-  random = 0.7;
-  page.pageshow(true);
-  assert.equal(page.motto(), 'Nothing will come of nothing.');
-  assert.equal(page.author(), '\u2014\u2014 William Shakespeare');
-});
-
-test('previously stored quotes still prevent consecutive repeats', () => {
-  const storage = new Map([['echogallery_login_motto_v1', 'Well done is better than well said. (Benjamin Franklin)']]);
-  const page = openPage(storage, false, () => 0.65);
-  assert.notEqual(page.motto(), 'Well done is better than well said.');
-  assert.notEqual(page.author(), '\u2014\u2014 Benjamin Franklin');
-});
-
-test('loading localized copy does not overwrite the motto or request an external API', async () => {
+test('login copy is loaded from the local zh-CN catalog', async () => {
   const page = openPage();
-  const initial = page.motto();
   await new Promise(setImmediate);
-  assert.equal(page.motto(), initial);
   assert.deepEqual(page.requests, ['/static/strings/zh-CN.json']);
+  assert.equal(page.node('login-username-label').textContent, catalog.pages.login.usernameLabel);
+  assert.equal(page.node('login-password-label').textContent, catalog.pages.login.passwordLabel);
+  assert.equal(page.node('username').placeholder, catalog.pages.login.usernamePlaceholder);
+  assert.equal(page.node('password').placeholder, catalog.pages.login.passwordPlaceholder);
+  assert.equal(page.node('register-btn').attributes.title, catalog.pages.login.registerAria);
 });
 
-test('restoring from browser back-forward cache changes the motto', () => {
-  const page = openPage();
-  const initial = page.motto();
-  page.pageshow(false);
-  assert.equal(page.motto(), initial);
-  page.pageshow(true);
-  assert.notEqual(page.motto(), initial);
-});
-
-test('offline mode and blocked browser storage do not break the welcome page', async () => {
-  const blockedStorage = { get() { throw new Error('blocked'); }, set() { throw new Error('blocked'); } };
-  const page = openPage(blockedStorage, true);
-  const initial = page.motto();
-  assert.ok(initial);
+test('offline catalog loading leaves the login shell usable', async () => {
+  const page = openPage(true);
   await new Promise(setImmediate);
-  assert.equal(page.motto(), initial);
+  assert.deepEqual(page.requests, ['/static/strings/zh-CN.json']);
+  assert.equal(page.node('login-username-label').textContent, '');
   page.pageshow(true);
-  assert.notEqual(page.motto(), initial);
 });
 
-test('gallery art is decorative, local, and does not restore the photo carousel', () => {
-  assert.match(html, /class="login-hero-art" aria-hidden="true"/);
-  assert.match(html, /<svg[^>]*focusable="false"/);
-  assert.match(html, /class="login-art-moon-cutout"/);
-  assert.doesNotMatch(html, /\/api\/login\/hero|login-hero-media|<image\b/);
+test('login layout keeps the local auth shell and avoids the old photo carousel', () => {
+  assert.match(html, /class="auth-screen"/);
+  assert.match(html, /class="auth-pane"/);
+  assert.match(html, /class="auth-stage" aria-hidden="true"/);
+  assert.doesNotMatch(html, /login-hero-media|login-hero-summary|<image\b/);
 });
 
-test('hero text colors meet AA contrast against both theme backgrounds', () => {
-  function luminance(hex) {
-    const channels = hex.match(/[a-f\d]{2}/gi).map((value) => {
-      const c = parseInt(value, 16) / 255;
-      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-    });
-    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
-  }
-  const themes = [...css.matchAll(/(?:\[data-theme="dark"\] )?\.login-page \{([^}]+)\}/g)];
-  assert.equal(themes.length, 2);
-  for (const [, declarations] of themes) {
-    const color = (name) => declarations.match(new RegExp('--login-' + name + ': (#[a-f\\d]{6})'))[1];
-    const background = luminance(color('hero-bg'));
-    for (const name of ['ink', 'muted']) {
-      const foreground = luminance(color(name));
-      const contrast = (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05);
-      assert.ok(contrast >= 4.5, name + ' contrast: ' + contrast);
-    }
-  }
+test('login styles keep separate light and dark surfaces', () => {
+  assert.match(css, /\.login-page \{/);
+  assert.match(css, /\[data-theme="dark"\] \.login-page \{/);
+  assert.match(css, /\[data-theme="dark"\] \.auth-screen[\s\S]*background:/);
 });
 
-test('gallery styles include reduced-motion and narrow-screen fallbacks', () => {
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.login-page \.login-hero-art \{ animation: none;/);
+test('login styles include reduced-motion and narrow-screen fallbacks', () => {
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.auth-stage \{\s*animation: none;/);
   assert.match(css, /@media \(max-width: 780px\)/);
-  assert.match(css, /\.login-page \.login-card \{ width: min\(100%, 460px\);/);
-  assert.match(css, /\.login-page \.login-hero-art \{\s*position: absolute;[\s\S]*?animation: none;/);
+  assert.match(css, /\.auth-pane[\s\S]*padding:/);
   assert.match(css, /env\(safe-area-inset-bottom\)/);
 });

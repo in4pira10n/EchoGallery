@@ -6,6 +6,22 @@
   "trash_dir": "Trash",
   "use_system_player": false,
   "preferences": {
+    "echo_frame": {
+      "source": "library",
+      "album_ids": [],
+      "album_library_id": "",
+      "order": "random",
+      "interval": 30000,
+      "interval_custom": false,
+      "end": "reshuffle",
+      "transition": "crossfade",
+      "text_opacity": 60,
+      "videos": true,
+      "muted": true,
+      "clock": true,
+      "date": true,
+      "wake_lock": true
+    },
     "theme": "light",
     "grid_size": 180,
     "grid_gap": 2,

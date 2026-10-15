@@ -475,6 +475,9 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	}
 	where := "uploaded_by = ? AND deleted_at IS NULL"
 	args := []interface{}{params.UserID}
+	if params.OnlyFavorite {
+		where += " AND is_favorite = 1"
+	}
 	if params.MediaKind != "" {
 		where += " AND media_kind = ?"
 		args = append(args, params.MediaKind)
@@ -861,15 +864,37 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 		state = *c
 	}
 
+	baseWhere := "uploaded_by = ? AND deleted_at IS NULL"
+	baseArgs := []interface{}{params.UserID}
+	if params.MediaKind != "" {
+		baseWhere += " AND media_kind = ?"
+		baseArgs = append(baseArgs, params.MediaKind)
+	}
+	if params.OnlyFavorite {
+		baseWhere += " AND is_favorite = 1"
+	}
+	if len(params.AlbumIDs) > 0 {
+		// Reuse authorized album predicates; IN deduplicates overlapping albums.
+		scopes := make([]string, 0, len(params.AlbumIDs))
+		for _, id := range params.AlbumIDs {
+			where, join, args, err := s.buildAlbumPhotoScope(id, params.UserID, params.MediaKind)
+			if err != nil {
+				return nil, err
+			}
+			if where == "" {
+				continue
+			}
+			scopes = append(scopes, "SELECT p.id FROM photos p "+join+" WHERE "+where)
+			baseArgs = append(baseArgs, args...)
+		}
+		if len(scopes) == 0 {
+			return &storage.PhotoPage{}, nil
+		}
+		baseWhere += " AND id IN (" + strings.Join(scopes, " UNION ") + ")"
+	}
 	var total int
 	if !params.SkipTotal {
-		where := "uploaded_by = ? AND deleted_at IS NULL"
-		args := []interface{}{params.UserID}
-		if params.MediaKind != "" {
-			where += " AND media_kind = ?"
-			args = append(args, params.MediaKind)
-		}
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+baseWhere, baseArgs...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("统计乱序相册失败: %w", err)
 		}
 	}
@@ -884,14 +909,10 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 		if remaining <= 0 {
 			return nil
 		}
-		where := `uploaded_by = ? AND deleted_at IS NULL
-			  AND random_sort_key <= ?
+		where := baseWhere + ` AND random_sort_key <= ?
 			  AND (random_sort_key > ? OR (random_sort_key = ? AND id > ?))`
-		args := []interface{}{params.UserID, maxKey, afterKey, afterKey, afterID}
-		if params.MediaKind != "" {
-			where += " AND media_kind = ?"
-			args = append(args, params.MediaKind)
-		}
+		args := append([]interface{}{}, baseArgs...)
+		args = append(args, maxKey, afterKey, afterKey, afterID)
 		args = append(args, remaining)
 		rows, err := s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,

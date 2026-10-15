@@ -54,30 +54,31 @@ func (c *Config) DisplayName() string {
 }
 
 type Preferences struct {
-	Theme                         string `json:"theme"`
-	GridSize                      int    `json:"grid_size"`
-	GridGap                       int    `json:"grid_gap"`
-	ThumbRadius                   int    `json:"thumb_radius"`
-	SidebarAutoHide               bool   `json:"sidebar_auto_hide"`
-	SlideshowMode                 string `json:"slideshow_mode"`
-	SlideshowLoop                 bool   `json:"slideshow_loop"`
-	SlideshowInterval             int    `json:"slideshow_interval"`
-	LightboxZoom                  int    `json:"lightbox_zoom"`
-	ExperimentalAutoplayVideo     bool   `json:"experimental_autoplay_video"`
-	VideoAutoplayNext             bool   `json:"video_autoplay_next"`
-	VideoSectionMinMinutes        int    `json:"video_section_min_minutes"`
-	ExperimentalPrefetchNeighbors bool   `json:"experimental_prefetch_neighbors"`
-	ExperimentalRestoreLastView   bool   `json:"experimental_restore_last_view"`
-	ContinueLastVideoPosition     bool   `json:"continue_last_video_position"`
-	WarmEnabled                   bool   `json:"warm_enabled"`
-	LightboxUIIdleSeconds         int    `json:"lightbox_ui_idle_seconds"`
-	ThrottledVideoSeek            bool   `json:"throttled_video_seek"`
-	VideoSeekThrottleMS           int    `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int    `json:"video_volume_swipe_sensitivity"`
-	VideoVolumeMinPercent         int    `json:"video_volume_min_percent"`
-	VideoVolumeMaxPercent         int    `json:"video_volume_max_percent"`
-	LowResourceMode               bool   `json:"low_resource_mode"`
-	PlayerKeymap                  string `json:"player_keymap"`
+	EchoFrame                     *EchoFramePreferences `json:"echo_frame,omitempty"`
+	Theme                         string                `json:"theme"`
+	GridSize                      int                   `json:"grid_size"`
+	GridGap                       int                   `json:"grid_gap"`
+	ThumbRadius                   int                   `json:"thumb_radius"`
+	SidebarAutoHide               bool                  `json:"sidebar_auto_hide"`
+	SlideshowMode                 string                `json:"slideshow_mode"`
+	SlideshowLoop                 bool                  `json:"slideshow_loop"`
+	SlideshowInterval             int                   `json:"slideshow_interval"`
+	LightboxZoom                  int                   `json:"lightbox_zoom"`
+	ExperimentalAutoplayVideo     bool                  `json:"experimental_autoplay_video"`
+	VideoAutoplayNext             bool                  `json:"video_autoplay_next"`
+	VideoSectionMinMinutes        int                   `json:"video_section_min_minutes"`
+	ExperimentalPrefetchNeighbors bool                  `json:"experimental_prefetch_neighbors"`
+	ExperimentalRestoreLastView   bool                  `json:"experimental_restore_last_view"`
+	ContinueLastVideoPosition     bool                  `json:"continue_last_video_position"`
+	WarmEnabled                   bool                  `json:"warm_enabled"`
+	LightboxUIIdleSeconds         int                   `json:"lightbox_ui_idle_seconds"`
+	ThrottledVideoSeek            bool                  `json:"throttled_video_seek"`
+	VideoSeekThrottleMS           int                   `json:"video_seek_throttle_ms"`
+	VideoVolumeSwipeSensitivity   int                   `json:"video_volume_swipe_sensitivity"`
+	VideoVolumeMinPercent         int                   `json:"video_volume_min_percent"`
+	VideoVolumeMaxPercent         int                   `json:"video_volume_max_percent"`
+	LowResourceMode               bool                  `json:"low_resource_mode"`
+	PlayerKeymap                  string                `json:"player_keymap"`
 }
 
 type configDefaultsProbe struct {
@@ -838,6 +839,12 @@ func (c *Config) ResolveUserLibrarySelection(username string, activeLibraryID st
 
 func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	c.applyDefaults()
+	if probe.Preferences.ExperimentalAutoplayVideo == nil {
+		c.Preferences.ExperimentalAutoplayVideo = true
+	}
+	if probe.Preferences.VideoAutoplayNext == nil {
+		c.Preferences.VideoAutoplayNext = true
+	}
 	if probe.Preferences.SlideshowLoop == nil {
 		c.Preferences.SlideshowLoop = true
 	}

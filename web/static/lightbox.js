@@ -11,6 +11,25 @@
     prev: 'prev.svg',
     next: 'next.svg',
   };
+  let lightboxCopy = {};
+  let lightboxLocale = navigator.language || 'en';
+
+  function loadCopy() {
+    return window.EchoGalleryI18n.load()
+      .then(catalog => {
+        lightboxLocale = catalog.locale || lightboxLocale;
+        lightboxCopy = catalog.app && catalog.app.lightbox || {};
+        return lightboxCopy;
+      })
+      .catch(() => lightboxCopy);
+  }
+
+  function copyText(key, params) {
+    const value = typeof window.copyText === 'function'
+      ? window.copyText(`app.lightbox.${key}`, params)
+      : (lightboxCopy[key] || '');
+    return String(value).replace(/\{(\w+)\}/g, (_, name) => params && name in params ? String(params[name]) : `{${name}}`);
+  }
 
   function normalizeIcon(svg) {
     return String(svg || '')
@@ -55,7 +74,7 @@
     if (!value) return '';
     const date = new Date(value);
     if (!Number.isFinite(date.getTime())) return '';
-    return date.toLocaleString('zh-CN', {
+    return date.toLocaleString(lightboxLocale, {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
@@ -106,37 +125,37 @@
     const rootStyle = isShare ? ' style="display:flex"' : '';
     const headerClass = `lightbox-header${isShare ? ' lightbox-hide-slideshow-controls' : ''}`;
     const closeClass = `btn-icon lightbox-back-btn${isShare ? ' hidden' : ''}`;
-    const videoBookmark = isShare ? '' : `<button class="btn-icon hidden" id="lb-video-bookmark" title="视频书签" aria-label="视频书签">${icons.bookmarkBlank || icons.bookmark || ''}</button>`;
-    const favorite = isShare ? '' : `<button class="btn-icon${canWriteMedia ? '' : ' hidden'}" id="lb-favorite" title="收藏" aria-label="收藏">${icons.favorite || ''}</button>`;
-    const share = isShare ? '' : `<button class="btn-icon${canManageShareLinks ? '' : ' hidden'}" id="lb-share" title="分享" aria-label="分享">${icons.share || ''}</button>`;
-    const more = isShare ? '' : `<button class="btn-icon" id="lb-more" title="更多操作" aria-label="更多操作">${icons.more || ''}</button>`;
+    const videoBookmark = isShare ? '' : `<button class="btn-icon hidden" id="lb-video-bookmark" title="${copyText('videoBookmark')}" aria-label="${copyText('videoBookmark')}">${icons.bookmarkBlank || icons.bookmark || ''}</button>`;
+    const favorite = isShare ? '' : `<button class="btn-icon${canWriteMedia ? '' : ' hidden'}" id="lb-favorite" title="${copyText('favorite')}" aria-label="${copyText('favorite')}">${icons.favorite || ''}</button>`;
+    const share = isShare ? '' : `<button class="btn-icon${canManageShareLinks ? '' : ' hidden'}" id="lb-share" title="${copyText('share')}" aria-label="${copyText('share')}">${icons.share || ''}</button>`;
+    const more = isShare ? '' : `<button class="btn-icon" id="lb-more" title="${copyText('more')}" aria-label="${copyText('more')}">${icons.more || ''}</button>`;
     const slideshowToggle = isShare ? '' : `<button class="btn-icon lightbox-play-btn" id="lb-slideshow-toggle"><span class="lightbox-play-icon"></span></button>`;
-    const download = isShare ? `<a class="btn-icon hidden" id="lb-download" href="#" aria-label="下载" title="下载" download></a>` : '';
+    const download = isShare ? `<a class="btn-icon hidden" id="lb-download" href="#" aria-label="${copyText('download')}" title="${copyText('download')}" download></a>` : '';
     const slideshowClass = `lightbox-control-pill lightbox-slideshow-controls${isShare ? ' hidden' : ''}`;
     const imgStyle = isShare ? ' style="display:block"' : '';
     const bodyID = isShare ? ' id="share-body"' : '';
     return `<div class="${rootClass}" id="lightbox" tabindex="-1"${rootStyle}>
   <div class="${headerClass}" id="lightbox-header">
     <div class="lightbox-header-main">
-      <button class="${closeClass}" id="lb-close" title="返回" aria-label="返回">${icons.back || ''}</button>
+      <button class="${closeClass}" id="lb-close" title="${copyText('back')}" aria-label="${copyText('back')}">${icons.back || ''}</button>
       <span class="lb-title" id="lb-title"></span>
     </div>
     <div class="lightbox-header-controls">
       <div class="lightbox-control-pill lightbox-zoom-panel">
         <label class="lightbox-zoom-wrap" for="lb-zoom">
-          <span class="lightbox-zoom-step" role="button" tabindex="0" data-lightbox-zoom-step="-10" aria-label="缩小 10%">-</span>
-          <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="500" step="10" value="100" aria-label="媒体缩放">
-          <span class="lightbox-zoom-step" role="button" tabindex="0" data-lightbox-zoom-step="10" aria-label="放大 10%">+</span>
+          <span class="lightbox-zoom-step" role="button" tabindex="0" data-lightbox-zoom-step="-10" aria-label="${copyText('zoomOut10')}">-</span>
+          <input class="lightbox-slider" id="lb-zoom" type="range" min="50" max="500" step="10" value="100" aria-label="${copyText('mediaZoom')}">
+          <span class="lightbox-zoom-step" role="button" tabindex="0" data-lightbox-zoom-step="10" aria-label="${copyText('zoomIn10')}">+</span>
           <span id="lb-zoom-value">100%</span>
         </label>
-        <button class="btn-icon lightbox-fit-height" id="lb-fit-height" title="适应（Alt + 0）" aria-label="适应">${icons.fit || ''}</button>
+        <button class="btn-icon lightbox-fit-height" id="lb-fit-height" title="${copyText('fitAlt')}" aria-label="${copyText('fit')}">${icons.fit || ''}</button>
       </div>
       <div class="${slideshowClass}">
         <label class="lightbox-slider-wrap" for="lb-slideshow-interval">
-          <span id="lb-slideshow-interval-value">5 秒</span>
-          <input class="lightbox-slider" id="lb-slideshow-interval" type="range" min="1" max="30" step="1" aria-label="播放间隔">
+          <span id="lb-slideshow-interval-value">${copyText('seconds', { count: 5 })}</span>
+          <input class="lightbox-slider" id="lb-slideshow-interval" type="range" min="1" max="30" step="1" aria-label="${copyText('playInterval')}">
         </label>
-        <button class="btn-icon lightbox-fit-height lightbox-loop-toggle" id="lb-slideshow-loop" type="button" title="开启循环" aria-label="开启循环" aria-pressed="false"></button>
+        <button class="btn-icon lightbox-fit-height lightbox-loop-toggle" id="lb-slideshow-loop" type="button" title="${copyText('enableLoop')}" aria-label="${copyText('enableLoop')}" aria-pressed="false"></button>
       </div>
     </div>
     <div class="lightbox-action-group">
@@ -149,7 +168,7 @@
     </div>
   </div>
   <div class="lightbox-body"${bodyID}>
-    <div class="lightbox-loading${isShare ? ' show' : ''}" id="lb-loading"><div class="spinner"></div><span>${isShare ? '加载中…' : '媒体加载中…'}</span></div>
+    <div class="lightbox-loading${isShare ? ' show' : ''}" id="lb-loading"><div class="spinner"></div><span>${isShare ? copyText('loading') : copyText('mediaLoading')}</span></div>
     <div class="lightbox-media-frame" id="lb-frame">
       <img class="lightbox-img${isShare ? ' hidden' : ''}" id="lb-img" src="" alt="" draggable="false"${imgStyle}>
       <video class="lightbox-video hidden" id="lb-video" ${isShare ? 'controls ' : ''}playsinline preload="metadata"></video>
@@ -169,7 +188,7 @@
       <span class="lightbox-video-progress-time" id="lb-video-progress-duration">0:00</span>
     </div>
     <div class="lightbox-volume-feedback" id="lb-volume-feedback"><div class="lightbox-volume-fill" id="lb-volume-fill"></div><span id="lb-volume-label">100%</span></div>
-    <button class="lb-touch-playback-toggle hidden" id="lb-touch-playback-toggle" type="button" title="播放视频" aria-label="播放视频" aria-pressed="false">
+    <button class="lb-touch-playback-toggle hidden" id="lb-touch-playback-toggle" type="button" title="${copyText('playVideo')}" aria-label="${copyText('playVideo')}" aria-pressed="false">
       <span id="lb-touch-playback-icon">${icons.play || ''}</span>
     </button>
     <button class="lb-nav lb-prev${isShare ? ' hidden' : ''}" id="lb-prev">${icons.prev || ''}</button>
@@ -199,7 +218,7 @@
       if (byID('lb-info')) byID('lb-info').innerHTML = '';
       byID('lb-loading')?.classList.add('show');
       const label = document.querySelector('#lb-loading span');
-      if (label) label.textContent = text || '加载中…';
+      if (label) label.textContent = text || copyText('loading');
     }
 
     function cssPx(value) {
@@ -366,12 +385,12 @@
       }
       byID('lb-title').textContent = name;
       byID('lb-info').innerHTML = renderInfoItems([
-        [isVideo ? icons.video : icons.image, '类型', isVideo ? '视频' : '图片'],
+        [isVideo ? icons.video : icons.image, copyText('type'), isVideo ? copyText('video') : copyText('image')],
         [icons.mime, 'MIME', item.mime_type || item.target_mime_type || ''],
-        [icons.date, '拍摄时间', formatMediaDateTime(item.taken_at || item.created_at)],
-        [icons.dimensions, '尺寸', item.width && item.height ? `${item.width} × ${item.height}` : ''],
-        [icons.dimensions, '宽高比（近似）', isVideo ? '' : aspectRatioLabel(item.width, item.height)],
-        [icons.fileSize, '大小（MB）', formatSizeMB(item.size)],
+        [icons.date, copyText('takenAt'), formatMediaDateTime(item.taken_at || item.created_at)],
+        [icons.dimensions, copyText('dimensions'), item.width && item.height ? `${item.width} × ${item.height}` : ''],
+        [icons.dimensions, copyText('aspectRatio'), isVideo ? '' : aspectRatioLabel(item.width, item.height)],
+        [icons.fileSize, copyText('sizeMB'), formatSizeMB(item.size)],
       ]);
       applyFit();
       updateDownload(item);
@@ -383,7 +402,7 @@
       albumMode = true;
       currentItems = items || [];
       ['lb-download', 'lb-prev', 'lb-next', 'lb-img', 'lb-video'].forEach(id => byID(id)?.classList.add('hidden'));
-      byID('lb-title').textContent = '分享的相册';
+      byID('lb-title').textContent = copyText('sharedAlbum');
       byID('lb-info').innerHTML = '';
       byID('lb-loading')?.classList.remove('show');
       clearAlbumGrid();
@@ -412,11 +431,11 @@
     }
 
     async function load() {
-      setLoading('加载中…');
+      setLoading(copyText('loading'));
       try {
         const response = await fetch(`/api/s/${encodeURIComponent(token)}`);
         if (!response.ok) {
-          setLoading('链接无效或已过期');
+          setLoading(copyText('invalidOrExpired'));
           return;
         }
         const link = await response.json();
@@ -440,16 +459,16 @@
         if (link.type === 'album') {
           const pageResponse = await fetch(`/api/s/${encodeURIComponent(token)}/photos`);
           if (!pageResponse.ok) {
-            setLoading('相册加载失败');
+            setLoading(copyText('albumLoadFailed'));
             return;
           }
           const page = await pageResponse.json();
           renderAlbum(page.photos || []);
           return;
         }
-        setLoading('当前分享类型暂不支持');
+        setLoading(copyText('unsupportedShareType'));
       } catch (_) {
-        setLoading('加载失败');
+        setLoading(copyText('loadFailed'));
       }
     }
 
@@ -489,7 +508,7 @@
         setShareZoom(100);
       };
       byID('lb-download')?.addEventListener('click', () => {
-        window.alert('即将开始下载。');
+        window.alert(copyText('downloadStarting'));
       });
       const body = byID('share-body');
       body?.addEventListener('touchstart', event => {
@@ -548,5 +567,6 @@
     loadIcons,
     renderInfoItems,
     normalizeIcon,
+    loadCopy,
   };
 }());
