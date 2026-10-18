@@ -768,6 +768,49 @@ body.setup-init-page {
   background: var(--bg);
 }
 
+/* The first-run page is a full-page surface, not a floating login card. */
+.setup-init-page .login-card,
+.setup-init-page .setup-card,
+.setup-init-page .setup-init-card,
+.setup-init-page .setup-init-panel,
+.setup-init-page #setup-root > section {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.register-page.setup-init-page .login-card::before,
+.register-page.setup-init-page #setup-root > section::before,
+.register-page.setup-init-page #setup-root > section::after {
+  content: none;
+  display: none;
+  background: transparent;
+  opacity: 0;
+}
+
+[data-theme="dark"] .setup-init-page .login-wrap,
+[data-theme="dark"] .setup-init-page .login-card,
+[data-theme="dark"] .setup-init-page .setup-card,
+[data-theme="dark"] .setup-init-page .setup-init-card,
+[data-theme="dark"] .setup-init-page .setup-init-panel,
+[data-theme="dark"] .setup-init-page #setup-root > section {
+  background: var(--bg);
+}
+
+/* Override the more specific dark login-card rule loaded from login.css. */
+html[data-theme="dark"] body.register-page.setup-init-page #setup-root,
+html[data-theme="dark"] body.register-page.setup-init-page #setup-root > section {
+  background: var(--bg);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .setup-init-page .setup-init-card {
   width: min(640px, 100%);
   min-height: 0;

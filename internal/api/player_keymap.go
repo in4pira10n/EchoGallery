@@ -17,16 +17,11 @@ type playerKeymapResponse struct {
 func handleGetPlayerKeymap(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := requestConfig(c, cfg)
-		content, err := loadPlayerKeymapContent()
-		if err != nil {
-			if cfg != nil && cfg.Preferences.PlayerKeymap != "" {
-				c.JSON(200, playerKeymapResponse{Content: cfg.Preferences.PlayerKeymap})
-				return
-			}
-			c.JSON(200, playerKeymapResponse{Content: ""})
-			return
+		profileKeymap := ""
+		if cfg != nil {
+			profileKeymap = cfg.Preferences.PlayerKeymap
 		}
-		c.JSON(200, playerKeymapResponse{Content: content})
+		c.JSON(200, playerKeymapResponse{Content: effectivePlayerKeymapContent(profileKeymap)})
 	}
 }
 
@@ -45,14 +40,24 @@ func loadPlayerKeymapContent() (string, error) {
 	for _, path := range playerKeymapFileCandidates() {
 		data, err := os.ReadFile(path)
 		if err == nil {
-			return strings.ReplaceAll(string(data), "\r\n", "\n"), nil
+			return normalizePlayerKeymapContent(string(data)), nil
 		}
 	}
 	return "", os.ErrNotExist
 }
 
+func effectivePlayerKeymapContent(profileKeymap string) string {
+	if content, err := loadPlayerKeymapContent(); err == nil && strings.TrimSpace(content) != "" {
+		return content
+	}
+	if content := normalizePlayerKeymapContent(profileKeymap); content != "" {
+		return content
+	}
+	return defaultPlayerKeymapContent()
+}
+
 func savePlayerKeymapContent(content string) error {
-	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized := normalizePlayerKeymapContent(content)
 	target := ""
 	for _, path := range playerKeymapFileCandidates() {
 		if _, err := os.Stat(path); err == nil {

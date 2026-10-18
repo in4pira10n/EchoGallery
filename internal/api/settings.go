@@ -361,10 +361,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 			localUpdateText = text
 		}
 	}
-	playerKeymap := profile.Preferences.PlayerKeymap
-	if content, err := loadPlayerKeymapContent(); err == nil {
-		playerKeymap = content
-	}
+	playerKeymap := effectivePlayerKeymapContent(profile.Preferences.PlayerKeymap)
 	return settingsResponse{
 		AppName:                       cfg.DisplayName(),
 		CurrentUsername:               map[bool]string{true: "root", false: username}[isRootConsoleSession(username)],
