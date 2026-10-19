@@ -8,6 +8,7 @@ const root = path.join(__dirname, '..');
 const catalog = JSON.parse(fs.readFileSync(path.join(root, 'web/static/strings/zh-CN.json'), 'utf8'));
 const englishCatalog = JSON.parse(fs.readFileSync(path.join(root, 'web/static/strings/en-US.json'), 'utf8'));
 const appSource = fs.readFileSync(path.join(root, 'web/static/app.js'), 'utf8');
+const appCss = fs.readFileSync(path.join(root, 'web/pages/app.css'), 'utf8');
 const echoFrameSource = fs.readFileSync(path.join(root, 'web/static/echo-frame.js'), 'utf8');
 const lightboxSource = fs.readFileSync(path.join(root, 'web/static/lightbox.js'), 'utf8');
 const setupSource = fs.readFileSync(path.join(root, 'web/pages/setup.html'), 'utf8');
@@ -48,6 +49,15 @@ test('app copyText literal keys are present in zh-CN', () => {
     .map(match => match[1]).filter(key => !key.includes('${')));
   const missing = [...keys].filter(key => typeof valueAt(catalog.app, key.replace(/^app\./, '')) !== 'string');
   assert.deepEqual(missing, [], `Missing app copy keys: ${missing.join(', ')}`);
+});
+
+test('danmaku manager exposes a visible localized title', () => {
+  const render = appSource.match(/^function renderDanmakuManager\([^]*?^}/m)?.[0] || '';
+  assert.match(render, /copyText\('app\.danmaku\.manageTitle'\) \|\| copyText\('app\.danmaku\.manage'\)/);
+  assert.match(render, /<h2 class="danmaku-manage-heading-title" id="danmaku-manage-title">\$\{escapeHTML\(title\)\}<\/h2>/);
+  assert.match(appCss, /\.danmaku-modal-banner \.danmaku-manage-heading-title \{[^}]*display:\s*block;[^}]*visibility:\s*visible;[^}]*opacity:\s*1;/);
+  assert.equal(catalog.app.danmaku.manageTitle, '管理弹幕记录');
+  assert.equal(englishCatalog.app.danmaku.manageTitle, 'Manage danmaku records');
 });
 
 test('every App interface copy entry is referenced by UI code', () => {

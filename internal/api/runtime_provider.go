@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"echogallery/internal/config"
+	"echogallery/internal/danmaku"
 	"echogallery/internal/service"
 	"echogallery/internal/sessionlock"
 	"echogallery/internal/storage/sqlite"
@@ -28,6 +29,7 @@ type libraryRuntimeProvider struct {
 	requests sync.RWMutex
 	services map[string]videoRegistrar
 	repos    map[string]*sqlite.DB
+	danmaku  map[string]*danmaku.Manager
 	sessions map[string]string
 }
 
@@ -39,6 +41,7 @@ func NewLibraryRuntimeProvider(cfg *config.Config) (*libraryRuntimeProvider, err
 		cfg:      cfg,
 		services: make(map[string]videoRegistrar),
 		repos:    make(map[string]*sqlite.DB),
+		danmaku:  make(map[string]*danmaku.Manager),
 		sessions: make(map[string]string),
 	}, nil
 }
@@ -51,6 +54,20 @@ func (p *libraryRuntimeProvider) Register(libraryID string, registrar videoRegis
 	defer p.mu.Unlock()
 	p.services[strings.TrimSpace(libraryID)] = registrar
 	p.repos[strings.TrimSpace(libraryID)] = repo
+}
+
+func (p *libraryRuntimeProvider) Danmaku(libraryID string) *danmaku.Manager {
+	if p == nil || strings.TrimSpace(libraryID) == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if manager := p.danmaku[libraryID]; manager != nil {
+		return manager
+	}
+	manager := danmaku.NewManager(danmaku.NewClient(nil))
+	p.danmaku[libraryID] = manager
+	return manager
 }
 
 func (p *libraryRuntimeProvider) Close() error {
@@ -66,6 +83,8 @@ func (p *libraryRuntimeProvider) Close() error {
 	services := p.services
 	p.repos = make(map[string]*sqlite.DB)
 	p.services = make(map[string]videoRegistrar)
+	danmakuManagers := p.danmaku
+	p.danmaku = make(map[string]*danmaku.Manager)
 	p.sessions = make(map[string]string)
 	p.mu.Unlock()
 	var firstErr error
@@ -73,6 +92,9 @@ func (p *libraryRuntimeProvider) Close() error {
 		if stopper, ok := registrar.(interface{ StopBackground() }); ok {
 			stopper.StopBackground()
 		}
+	}
+	for _, manager := range danmakuManagers {
+		manager.Stop()
 	}
 	for _, repo := range repos {
 		if err := repo.Close(); err != nil && firstErr == nil {
@@ -141,6 +163,10 @@ func (p *libraryRuntimeProvider) SyncBeforeRelease(locks *sessionlock.Store, ses
 						return fmt.Errorf("close library %s: %w", id, err)
 					}
 					p.mu.Lock()
+					if manager := p.danmaku[id]; manager != nil {
+						manager.Stop()
+						delete(p.danmaku, id)
+					}
 					delete(p.repos, id)
 					delete(p.services, id)
 					p.mu.Unlock()

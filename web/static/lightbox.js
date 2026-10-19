@@ -180,6 +180,9 @@
       </div>
     </div>
     <div class="lightbox-video-progress hidden" id="lb-video-progress" aria-hidden="true">
+      <button class="lb-desktop-playback-toggle" id="lb-desktop-playback-toggle" type="button" title="${copyText('playVideo')}" aria-label="${copyText('playVideo')}" aria-pressed="false">
+        <span id="lb-desktop-playback-icon">${icons.play || ''}</span>
+      </button>
       <span class="lightbox-video-progress-time" id="lb-video-progress-current">0:00</span>
       <div class="lightbox-video-progress-track">
         <div class="lightbox-video-progress-fill" id="lb-video-progress-fill"></div>
@@ -188,12 +191,12 @@
       <span class="lightbox-video-progress-time" id="lb-video-progress-duration">0:00</span>
     </div>
     <div class="lightbox-volume-feedback" id="lb-volume-feedback"><div class="lightbox-volume-fill" id="lb-volume-fill"></div><span id="lb-volume-label">100%</span></div>
-    <button class="lb-touch-playback-toggle hidden" id="lb-touch-playback-toggle" type="button" title="${copyText('playVideo')}" aria-label="${copyText('playVideo')}" aria-pressed="false">
-      <span id="lb-touch-playback-icon">${icons.play || ''}</span>
-    </button>
     <button class="lb-nav lb-prev${isShare ? ' hidden' : ''}" id="lb-prev">${icons.prev || ''}</button>
     <button class="lb-nav lb-next${isShare ? ' hidden' : ''}" id="lb-next">${icons.next || ''}</button>
   </div>
+  <button class="lb-touch-playback-toggle hidden" id="lb-touch-playback-toggle" type="button" title="${copyText('playVideo')}" aria-label="${copyText('playVideo')}" aria-pressed="false">
+    <span id="lb-touch-playback-icon">${icons.play || ''}</span>
+  </button>
   <div class="lightbox-info" id="lb-info"></div>
 </div>`;
   }

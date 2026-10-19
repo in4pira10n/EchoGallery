@@ -77,6 +77,7 @@ type Preferences struct {
 	VideoVolumeSwipeSensitivity   int                   `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                   `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                   `json:"video_volume_max_percent"`
+	Danmaku                       *DanmakuPreferences   `json:"danmaku,omitempty"`
 	LowResourceMode               bool                  `json:"low_resource_mode"`
 	PlayerKeymap                  string                `json:"player_keymap"`
 }
@@ -450,6 +451,7 @@ func (c *Config) applyDefaults() {
 	if c.Preferences.SlideshowMode == "" {
 		c.Preferences.SlideshowMode = "random"
 	}
+	c.Preferences.Danmaku = NormalizeDanmaku(c.Preferences.Danmaku)
 	if c.Preferences.SlideshowInterval == 0 {
 		c.Preferences.SlideshowInterval = 5000
 	}

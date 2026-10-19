@@ -1383,6 +1383,10 @@ select.input {
 
 @media (hover: none) and (pointer: coarse) {
 
+  .context-menu-icon {
+    transform: translateY(-1px);
+  }
+
   input:not([type="range"]):not([type="color"]),
   textarea,
   select,
@@ -1516,6 +1520,9 @@ html.fixed-touch-grid .photo-grid {
 }
 
 .photo-thumb .media-duration-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   position: absolute;
   right: 12px;
   bottom: 4px;
@@ -1531,6 +1538,10 @@ html.fixed-touch-grid .photo-grid {
   z-index: 3;
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.44);
 }
+
+.photo-thumb .media-duration-badge[hidden] { display: none; }
+.media-danmaku-icon { display: inline-flex; align-items: center; }
+.media-danmaku-icon svg { display: block; width: 1.15em; height: 1.15em; fill: currentColor; }
 
 .photo-thumb .check {
   position: absolute;
@@ -2597,6 +2608,16 @@ body.selection-mode .date-select-all {
     opacity .24s cubic-bezier(.22, 1, .36, 1);
 }
 
+/* The media body is below the header and information pills (z-index: 4). */
+.lightbox-danmaku {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+
 .lightbox-img,
 .lightbox-video {
   transform: scale(1);
@@ -2773,7 +2794,7 @@ body.selection-mode .date-select-all {
   z-index: 5;
   height: 24px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   pointer-events: none;
@@ -2783,6 +2804,46 @@ body.selection-mode .date-select-all {
     opacity var(--lightbox-progress-transition),
     transform var(--lightbox-progress-transition);
   opacity: var(--lightbox-underzoom-controls-opacity);
+}
+
+.lb-desktop-playback-toggle {
+  display: inline-flex;
+  width: 28px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, .82);
+  background: transparent;
+  box-shadow: none;
+  pointer-events: auto;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lb-desktop-playback-toggle span,
+.lb-desktop-playback-toggle svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.lb-desktop-playback-toggle:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, .1);
+}
+
+.lb-desktop-playback-toggle:active {
+  transform: scale(.94);
+}
+
+.lb-desktop-playback-toggle:focus,
+.lb-desktop-playback-toggle:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .lightbox-video-progress-time {
@@ -3035,6 +3096,14 @@ body.selection-mode .date-select-all {
 
 @media (hover: none), (pointer: coarse) {
 
+  .lb-desktop-playback-toggle {
+    display: none;
+  }
+
+  .lightbox-video-progress {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
   .lb-nav:hover,
   .lb-nav:focus,
   .lb-nav:focus-visible,
@@ -3066,6 +3135,14 @@ body.selection-mode .date-select-all {
   -webkit-tap-highlight-color: transparent;
   opacity: .26;
   pointer-events: auto;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lightbox-video-progress {
+    gap: 2px;
+  }
+
+  .lb-touch-playback-toggle { display: none; }
 }
 
 .lightbox.ui-idle .lb-touch-playback-toggle:not(.active) {
@@ -3330,6 +3407,29 @@ body.selection-mode .date-select-all {
   width: 18px;
   height: 18px;
   display: block;
+}
+
+.lb-info-avatar {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.lb-info-avatar[hidden] {
+  display: none;
+}
+
+.lb-info-avatar-fallback,
+.lb-info-avatar-fallback svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
+
+.lb-info-avatar-fallback[hidden] {
+  display: none;
 }
 
 .lb-info-value {
@@ -4000,6 +4100,141 @@ html.echo-frame-open { overflow: hidden; }
   .echo-frame .echo-frame-media { transition-duration: 200ms; transition-delay: 0ms; }
   .echo-frame-surface, .echo-frame .echo-frame-date-item { transition-duration: 200ms; transition-delay: 0ms; }
   .echo-frame-zoom .echo-frame-media.is-visible:not(video) { animation: none; }
+}
+
+.modal-overlay.danmaku-modal-overlay {
+  z-index: 1400;
+}
+
+.modal.library-editor-card.danmaku-modal-card {
+  display: flex;
+  flex-direction: column;
+  width: 800px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+  padding: 0;
+  border-radius: 52px;
+}
+
+.danmaku-modal-banner {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 32px 24px 0;
+  color: var(--text);
+  text-align: center;
+}
+
+.danmaku-modal-banner > span {
+  display: grid;
+  width: 88px;
+  height: 88px;
+  place-items: center;
+  flex: none;
+  border-radius: 16px;
+  color: rgba(255, 255, 255, .8);
+  background: var(--danmaku-accent, var(--accent));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--danmaku-accent, var(--accent)) 60%, #fff), var(--danmaku-accent, var(--accent)));
+}
+
+.danmaku-modal-banner svg { width: 56px; height: 56px; }
+.danmaku-modal-banner svg path { fill: currentColor; }
+.danmaku-modal-banner h2, .danmaku-modal-banner p { margin: 0; }
+.danmaku-modal-banner h2 { font-size: 20px; line-height: 1.3; font-weight: 700; overflow-wrap: anywhere; }
+.danmaku-modal-banner .danmaku-manage-heading-title { display: block; visibility: visible; opacity: 1; color: var(--text); }
+.danmaku-modal-banner p { margin-top: 10px; color: var(--text2); font-size: 12px; line-height: 1.5; }
+.danmaku-modal-content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 44px 24px 0; scrollbar-width: none; }
+.danmaku-modal-content::-webkit-scrollbar { display: none; }
+.danmaku-label { display: block; margin: 0 0 12px; font-size: 12px; font-weight: 600; color: var(--text2); }
+.danmaku-modal-card .input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 11px 16px; border: 0; border-radius: 999px; background: var(--bg); color: var(--text); font-family: inherit; font-size: 16px; }
+.danmaku-modal-card .input:focus { outline: none; box-shadow: none; }
+.danmaku-modal-card .input::placeholder { color: var(--text3, var(--text2)); }
+.danmaku-results-section { margin-top: 20px; }
+.danmaku-result-empty { display: grid; place-items: center; box-sizing: border-box; min-height: 120px; margin: 0; padding: 20px; border: 2px dashed var(--text3, var(--border)); border-radius: 12px; color: var(--text2); font-size: 18px; text-align: center; }
+.danmaku-video-result { display: grid; grid-template-columns: calc(88px * 16 / 9) minmax(0, 1fr); align-items: center; gap: 24px; }
+.danmaku-search-result { width: 100%; padding: 12px 0; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; border-radius: 12px; }
+.danmaku-search-result:hover, .danmaku-search-result:focus-visible { background: var(--bg); }
+.danmaku-search-result:active { opacity: .7; }
+.danmaku-video-result > img, .danmaku-cover-placeholder { width: calc(88px * 16 / 9); height: 88px; object-fit: cover; border-radius: 16px; }
+.danmaku-duration-warning { margin: 12px 0 0; color: var(--text2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.danmaku-cover-placeholder { display: grid; place-items: center; background: var(--bg); color: var(--text2); }
+.danmaku-cover-placeholder svg { width: 36px; height: 36px; }
+.danmaku-video-copy { display: flex; min-width: 0; flex-direction: column; align-items: stretch; gap: 4px; }
+.danmaku-video-copy > strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: 18px; line-height: 24px; }
+.danmaku-video-copy > span { color: var(--text2); font-size: 14px; line-height: 22px; overflow-wrap: anywhere; }
+.danmaku-page-field { margin-top: 16px; }
+.danmaku-status { margin-top: 12px; color: var(--danmaku-accent); font-size: .86rem; overflow-wrap: anywhere; }
+.danmaku-status:empty { display: none; }
+.danmaku-manage-card { height: min(822px, calc(100vh - 40px)); height: min(822px, calc(100dvh - 40px)); }
+.danmaku-manage-content { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; padding: 24px 24px 0; }
+.danmaku-manage-count { flex: none; color: var(--text2); font-size: 12px; font-weight: 600; line-height: 18px; }
+.danmaku-manage-status { flex: none; margin-top: 6px; color: var(--danmaku-accent); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.danmaku-manage-status:empty { display: none; }
+.danmaku-manage-list { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 12px; margin-top: 12px; overflow-x: hidden; overflow-y: auto; padding: 0 0 16px; overscroll-behavior: contain; scrollbar-width: none; }
+.danmaku-manage-list::-webkit-scrollbar { display: none; }
+.danmaku-manage-empty { display: grid; flex: 1 0 120px; min-height: 120px; place-items: center; margin: 0; color: var(--text2); font-size: 14px; text-align: center; }
+.danmaku-manage-error { color: var(--danger); }
+.danmaku-manage-record { display: grid; flex: none; grid-template-columns: 128px minmax(0, 1fr) 40px; align-items: center; gap: 20px; min-height: 88px; padding: 0 0 12px; border-bottom: 1px solid color-mix(in srgb, var(--border) 74%, transparent); }
+.danmaku-manage-cover { position: relative; width: 128px; height: 88px; overflow: hidden; border-radius: 16px; background: var(--bg); }
+.danmaku-manage-cover > img, .danmaku-manage-cover-fallback { position: absolute; inset: 0; display: grid; width: 100%; height: 100%; place-items: center; object-fit: cover; color: var(--text2); }
+.danmaku-manage-cover > img[hidden], .danmaku-manage-cover-fallback[hidden], .danmaku-manage-avatar-fallback[hidden] { display: none; }
+.danmaku-manage-cover-fallback svg { width: 28px; height: 28px; }
+.danmaku-manage-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.danmaku-manage-title { overflow: hidden; color: var(--text); font-size: 18px; font-weight: 700; line-height: 24px; text-overflow: ellipsis; white-space: nowrap; }
+.danmaku-manage-owner { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--text2); font-size: 14px; line-height: 22px; }
+.danmaku-manage-owner > img, .danmaku-manage-avatar-fallback { display: block; flex: 0 0 22px; width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+.danmaku-manage-avatar-fallback { display: grid; place-items: center; color: var(--text2); }
+.danmaku-manage-avatar-fallback svg { width: 18px; height: 18px; }
+.danmaku-manage-owner-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.danmaku-manage-separator, .danmaku-manage-duration { flex: none; }
+.danmaku-manage-date { color: var(--text2); font-size: 14px; line-height: 22px; }
+.danmaku-manage-actions { display: flex; height: 76px; flex-direction: column; align-items: center; justify-content: space-between; }
+.danmaku-manage-action.btn-icon { display: grid; width: 36px; min-width: 36px; height: 36px; min-height: 36px; place-items: center; padding: 0; border: 0; border-radius: 10px; color: var(--text2); background: transparent; box-shadow: none; }
+.danmaku-manage-action.btn-icon:hover, .danmaku-manage-action.btn-icon:focus-visible { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); outline: none; }
+.danmaku-manage-action.btn-icon:disabled { opacity: .42; cursor: default; }
+.danmaku-manage-action svg { display: block; width: 17px; height: 17px; fill: currentColor; }
+.danmaku-manage-delete.btn-icon:hover, .danmaku-manage-delete.btn-icon:focus-visible { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.danmaku-manage-spinner { width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: danmaku-manage-spin .8s linear infinite; }
+@keyframes danmaku-manage-spin { to { transform: rotate(360deg); } }
+.danmaku-error { color: var(--danger); }
+.danmaku-modal-card .danmaku-modal-actions { flex: none; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0; padding: 20px 24px 24px; }
+.danmaku-modal-card .danmaku-manage-footer { position: relative; z-index: 1; padding-top: 20px; background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--card) 96%, transparent) 28%); }
+
+@media (max-width: 540px) {
+  .modal.library-editor-card.danmaku-modal-card { max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); border-radius: 32px; }
+  .danmaku-modal-banner { gap: 16px; padding: 24px 20px 0; }
+  .danmaku-modal-banner > span { width: 68px; height: 68px; }
+  .danmaku-modal-banner svg { width: 44px; height: 44px; }
+  .danmaku-modal-banner h2 { font-size: 18px; }
+  .danmaku-modal-content { padding: 28px 20px 0; }
+  .danmaku-video-result { grid-template-columns: 128px minmax(0, 1fr); gap: 12px; }
+  .danmaku-video-result > img, .danmaku-cover-placeholder { width: 128px; height: 72px; border-radius: 12px; }
+  .danmaku-video-copy > strong { font-size: 15px; line-height: 20px; }
+  .danmaku-video-copy > span { font-size: 12px; line-height: 18px; }
+  .danmaku-result-empty { font-size: 16px; }
+  .danmaku-manage-content { padding: 20px 20px 0; }
+  .danmaku-manage-record { grid-template-columns: 96px minmax(0, 1fr) 36px; gap: 12px; min-height: 72px; }
+  .danmaku-manage-cover { width: 96px; height: 72px; border-radius: 12px; }
+  .danmaku-manage-title { font-size: 15px; line-height: 20px; }
+  .danmaku-manage-owner, .danmaku-manage-date { font-size: 12px; line-height: 18px; }
+  .danmaku-manage-actions { height: 68px; }
+  .danmaku-manage-action.btn-icon { width: 34px; min-width: 34px; height: 34px; min-height: 34px; }
+  .danmaku-modal-card .danmaku-modal-actions { gap: 10px; padding: 20px; }
+  .danmaku-modal-card .danmaku-manage-footer { padding-top: 16px; }
+}
+
+@media (max-height: 600px) and (orientation: landscape) {
+  .danmaku-modal-banner { gap: 8px; padding-top: 16px; }
+  .danmaku-modal-banner > span { width: 44px; height: 44px; border-radius: 12px; }
+  .danmaku-modal-banner svg { width: 32px; height: 32px; }
+  .danmaku-modal-banner p { margin-top: 4px; }
+  .danmaku-modal-content { padding-top: 20px; }
+  .danmaku-modal-card .danmaku-modal-actions { padding-top: 12px; padding-bottom: 16px; }
+  .danmaku-manage-content { padding-top: 12px; }
 }
 
 .modal-overlay {
@@ -5611,7 +5846,7 @@ html.echo-frame-open { overflow: hidden; }
   line-height: 1.25;
   margin-bottom: 8px;
   color: var(--text);
-  letter-spacing: -.01em;
+  letter-spacing: normal;
 }
 
 .settings-panel>p {
@@ -5898,6 +6133,27 @@ html.echo-frame-open { overflow: hidden; }
   grid-column: 1 / -1;
   min-width: 0;
   max-width: 100%;
+}
+
+.settings-stepped-range { position: relative; min-width: 0; --step-thumb-size: 22px; }
+.settings-stepped-range input { display: block; width: 100%; }
+.settings-range-stops { position: absolute; inset: 0 7px; display: flex; align-items: center; justify-content: space-between; pointer-events: none; }
+.settings-range-stops i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: color-mix(in srgb, var(--text) 18%, transparent); transition: background-color .12s ease; }
+.settings-range-stops i.is-before { background: rgba(0, 0, 0, .2); }
+.settings-range-stops i.is-current { background: rgba(255, 255, 255, .84); }
+.settings-panel-danmaku .settings-group { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.settings-panel-danmaku .settings-row { display: flex; align-items: center; gap: 28px; }
+.settings-panel-danmaku .settings-row .settings-static { flex: 1; min-width: 0; }
+.settings-panel-danmaku .settings-row .settings-actions { flex: 0 0 250px; margin: 0; }
+.settings-panel-danmaku .danmaku-status:empty { display: none; }
+#danmaku-block-modal textarea { width: 100%; resize: vertical; max-height: 40dvh; }
+#danmaku-block-modal .modal-footer.library-editor-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 600px) {
+  .settings-panel-danmaku .settings-row { flex-wrap: wrap; gap: 12px; }
+  .settings-panel-danmaku .settings-row .settings-static { flex-basis: 100%; }
+  .settings-panel-danmaku .settings-row .settings-actions { flex-basis: 100%; }
 }
 
 .settings-transfer-group{

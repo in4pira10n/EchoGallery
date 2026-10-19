@@ -132,6 +132,7 @@ type settingsResponse struct {
 	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
+	Danmaku                       *config.DanmakuPreferences   `json:"danmaku"`
 	LowResourceMode               bool                         `json:"low_resource_mode"`
 	PlayerKeymap                  string                       `json:"player_keymap"`
 	PWAIconURL                    string                       `json:"pwa_icon_url,omitempty"`
@@ -171,6 +172,7 @@ type settingsUpdateRequest struct {
 	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
+	Danmaku                       *config.DanmakuPreferences   `json:"danmaku"`
 	LowResourceMode               bool                         `json:"low_resource_mode"`
 	PlayerKeymap                  string                       `json:"player_keymap"`
 }
@@ -402,6 +404,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		VideoVolumeSwipeSensitivity:   profile.Preferences.VideoVolumeSwipeSensitivity,
 		VideoVolumeMinPercent:         profile.Preferences.VideoVolumeMinPercent,
 		VideoVolumeMaxPercent:         profile.Preferences.VideoVolumeMaxPercent,
+		Danmaku:                       config.NormalizeDanmaku(profile.Preferences.Danmaku),
 		LowResourceMode:               profile.Preferences.LowResourceMode,
 		PlayerKeymap:                  playerKeymap,
 		PWAIconURL:                    pwaIconURL(cfg.Workshop.FaviconAsset),
@@ -1048,6 +1051,9 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		if req.EchoFrame == nil {
 			req.EchoFrame = prevProfile.Preferences.EchoFrame
 		}
+		if req.Danmaku == nil {
+			req.Danmaku = prevProfile.Preferences.Danmaku
+		}
 		nextProfile := &config.Profile{
 			ActiveLibraryID: req.ActiveLibraryID,
 			StoragePath:     req.StoragePath,
@@ -1079,6 +1085,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 				VideoVolumeSwipeSensitivity:   req.VideoVolumeSwipeSensitivity,
 				VideoVolumeMinPercent:         req.VideoVolumeMinPercent,
 				VideoVolumeMaxPercent:         req.VideoVolumeMaxPercent,
+				Danmaku:                       config.NormalizeDanmaku(req.Danmaku),
 				LowResourceMode:               req.LowResourceMode,
 				PlayerKeymap:                  req.PlayerKeymap,
 			},

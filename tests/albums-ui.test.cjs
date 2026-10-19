@@ -198,6 +198,7 @@ test('album context menu only offers adding selected media to user albums', () =
       'app.interface.s_13794d2141': '编辑',
       'app.interface.s_a7f814c0a4': '编辑',
       'app.interface.s_3755f56f2f': '删除',
+      'app.interface.commonDelete': '删除',
       'app.interface.s_326155a897': '自动从文件夹导入',
     }[key] || ''),
     state: { selected: new Set([10]) },

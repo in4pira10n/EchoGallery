@@ -5,7 +5,9 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const html = fs.readFileSync(path.join(__dirname, '../web/pages/login.html'), 'utf8');
+const i18n = fs.readFileSync(path.join(__dirname, '../web/static/i18n.js'), 'utf8');
 const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, '../web/static/strings/zh-CN.json'), 'utf8'));
+const localeManifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../web/static/strings/locales.json'), 'utf8'));
 const css = fs.readFileSync(path.join(__dirname, '../web/pages/login.css'), 'utf8');
 
 function openPage(offline = false) {
@@ -41,30 +43,40 @@ function openPage(offline = false) {
     },
     addEventListener() {},
   };
+  const localStorage = {
+    getItem() { return null; },
+    setItem() {},
+  };
+  const fetch = async (url) => {
+    requests.push(url);
+    if (offline) throw new Error('offline');
+    if (url.endsWith('/locales.json')) return { ok: true, json: async () => localeManifest };
+    return { ok: true, json: async () => catalog };
+  };
+  const window = {
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    addEventListener: (event, listener) => events.set(event, listener),
+    clearTimeout() {},
+    setTimeout() { return 0; },
+    fetch,
+    localStorage,
+    navigator: { languages: ['zh-CN'], language: 'zh-CN' },
+    location: { reload() {} },
+    document,
+  };
   const context = vm.createContext({
     document,
-    window: {
-      matchMedia: () => ({ matches: false, addEventListener() {} }),
-      addEventListener: (event, listener) => events.set(event, listener),
-      clearTimeout() {},
-      setTimeout() { return 0; },
-    },
-    localStorage: {
-      getItem() { return null; },
-      setItem() {},
-    },
+    window,
+    fetch,
+    localStorage,
     sessionStorage: {
       getItem() { return null; },
       setItem() {},
     },
-    fetch: async (url) => {
-      requests.push(url);
-      if (offline) throw new Error('offline');
-      return { ok: true, json: async () => ({ pages: { login: catalog.pages.login } }) };
-    },
     URLSearchParams,
     location: { search: '' },
   });
+  vm.runInContext(i18n, context);
   for (const match of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) {
     vm.runInContext(match[1], context);
   }
@@ -79,7 +91,7 @@ function openPage(offline = false) {
 test('login copy is loaded from the local zh-CN catalog', async () => {
   const page = openPage();
   await new Promise(setImmediate);
-  assert.deepEqual(page.requests, ['/static/strings/zh-CN.json']);
+  assert.deepEqual(page.requests, ['/static/strings/locales.json', '/static/strings/zh-CN.json']);
   assert.equal(page.node('login-username-label').textContent, catalog.pages.login.usernameLabel);
   assert.equal(page.node('login-password-label').textContent, catalog.pages.login.passwordLabel);
   assert.equal(page.node('username').placeholder, catalog.pages.login.usernamePlaceholder);
@@ -90,7 +102,7 @@ test('login copy is loaded from the local zh-CN catalog', async () => {
 test('offline catalog loading leaves the login shell usable', async () => {
   const page = openPage(true);
   await new Promise(setImmediate);
-  assert.deepEqual(page.requests, ['/static/strings/zh-CN.json']);
+  assert.deepEqual(page.requests, ['/static/strings/locales.json', '/static/strings/zh-CN.json']);
   assert.equal(page.node('login-username-label').textContent, '');
   page.pageshow(true);
 });

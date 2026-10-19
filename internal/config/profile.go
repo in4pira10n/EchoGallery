@@ -403,6 +403,7 @@ func (p *Profile) applyDefaults(fallback *Config) {
 		p.Preferences.SlideshowMode = "random"
 	}
 	p.Preferences.EchoFrame = NormalizeEchoFrame(p.Preferences.EchoFrame)
+	p.Preferences.Danmaku = NormalizeDanmaku(p.Preferences.Danmaku)
 	if p.Preferences.SlideshowInterval == 0 {
 		p.Preferences.SlideshowInterval = 5000
 	}

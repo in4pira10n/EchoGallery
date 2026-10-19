@@ -406,6 +406,15 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/exif/backfill", authRequired, libraryRuntimeRequired, adminRequired, handleBackfillPhotoEXIF(cfg, registrar))
 	r.DELETE("/api/settings/exif/backfill", authRequired, libraryRuntimeRequired, adminRequired, handleCancelBackfillPhotoEXIF(cfg, registrar))
 	r.GET("/api/player/keymap", authRequired, libraryRuntimeRequired, handleGetPlayerKeymap(cfg))
+	r.GET("/api/danmaku", authRequired, libraryRuntimeRequired, handleListDanmaku(cfg, options))
+	r.POST("/api/danmaku/search", authRequired, libraryRuntimeRequired, handleSearchDanmaku())
+	r.GET("/api/danmaku/:bvid", authRequired, libraryRuntimeRequired, handleGetDanmaku(cfg, options))
+	r.POST("/api/danmaku/fetch", authRequired, libraryRuntimeRequired, writableRequired, handleFetchDanmaku(cfg, options))
+	r.GET("/api/danmaku/tasks/:id", authRequired, libraryRuntimeRequired, handleGetDanmakuTask(cfg, options))
+	r.DELETE("/api/danmaku/tasks/:id", authRequired, libraryRuntimeRequired, handleCancelDanmakuTask(cfg, options))
+	r.DELETE("/api/danmaku/:bvid", authRequired, libraryRuntimeRequired, writableRequired, handleDeleteDanmaku(cfg, options))
+	r.DELETE("/api/media/:id/danmaku-match", authRequired, libraryRuntimeRequired, writableRequired, handleRemoveDanmakuMatch(cfg, options))
+	r.GET("/api/media/:id/danmaku", authRequired, libraryRuntimeRequired, handleMediaDanmaku(cfg, options))
 
 	media := r.Group("/api/media", authRequired, libraryRuntimeRequired)
 	{

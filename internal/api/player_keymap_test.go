@@ -10,6 +10,7 @@ func TestDefaultPlayerKeymapUsesZXCWASDLayout(t *testing.T) {
 		"c seek 5",
 		"w add volume 5",
 		"s add volume -5",
+		"RIGHT cycle danmaku",
 	} {
 		if !containsLine(content, binding) {
 			t.Fatalf("default keymap is missing %q", binding)

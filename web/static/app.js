@@ -1159,6 +1159,9 @@ const icons = {
   contextRestore: '',
 };
 const svgIconFiles = {
+  settingsPanelHeadDanmaku: 'settings-panel-head-danmaku.svg',
+  danmaku: 'danmaku.svg',
+  danmakuDismatch: 'danmaku-dismatch.svg',
   rootDebug: 'root-debug.svg',
   rootDebugActive: 'root-debug-active.svg',
   timeline: 'timeline.svg',
@@ -2040,22 +2043,29 @@ function updateVideoBookmarkButton(photo = state.lightboxPhotos[state.lightboxIn
 }
 function syncTouchPlaybackButton(video = $('#lb-video'), photo = state.lightboxPhotos[state.lightboxIndex]) {
   const btn = $('#lb-touch-playback-toggle');
-  const icon = $('#lb-touch-playback-icon');
-  if (!btn) return;
-  const visible = isVideoMedia(photo)
+  const desktopBtn = $('#lb-desktop-playback-toggle');
+  const buttons = [btn, desktopBtn].filter(Boolean);
+  if (!buttons.length) return;
+  const visible = isTouchLikeDevice() && isVideoMedia(photo)
     && video
     && !video.classList.contains('hidden');
-  btn.classList.toggle('hidden', !visible);
-  if (!visible) {
-    btn.classList.remove('active');
+  btn?.classList.toggle('hidden', !visible);
+  desktopBtn?.classList.toggle('hidden', !isVideoMedia(photo) || !video || video.classList.contains('hidden'));
+  if (!isVideoMedia(photo) || !video || video.classList.contains('hidden')) {
+    buttons.forEach(button => button.classList.remove('active'));
     return;
   }
   const paused = !video || video.paused;
+  const icon = $('#lb-touch-playback-icon');
+  const desktopIcon = $('#lb-desktop-playback-icon');
   if (icon) icon.innerHTML = paused ? icons.play : icons.pause;
+  if (desktopIcon) desktopIcon.innerHTML = paused ? icons.play : icons.pause;
   const label = paused ? copyText('app.interface.s_af7d6e03da') : copyText('app.interface.s_a8505ca8e2');
-  btn.title = label;
-  btn.setAttribute('aria-label', label);
-  btn.setAttribute('aria-pressed', paused ? 'false' : 'true');
+  buttons.forEach(button => {
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-pressed', paused ? 'false' : 'true');
+  });
 }
 function updateMediaSessionPlaybackState(video = $('#lb-video')) {
   if (!('mediaSession' in navigator)) return;
@@ -2562,8 +2572,19 @@ function updateVideoSurfaceSwipe(e) {
   }
   if (swipe.mode === 'volume') {
     const sensitivity = normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100) / 100;
-    const delta = (-dy / Math.max(260, swipe.height * 0.72)) * sensitivity;
-    setVideoVolumeValue(swipe.startVolume + delta, video);
+    const range = Math.max(260, swipe.height * 0.72);
+    const bounds = effectiveVideoVolumeBounds();
+    const minimum = bounds.min / 100;
+    if (dy > 0) {
+      // A downward gesture reaches quiet volumes faster while retaining fine control near the start.
+      const progress = clampLightboxValue((dy / range) * sensitivity, 0, 1);
+      const remaining = Math.pow(1 - progress, 1.8);
+      const volume = minimum + (swipe.startVolume - minimum) * remaining;
+      setVideoVolumeValue(volume, video);
+    } else {
+      const delta = (-dy / range) * sensitivity;
+      setVideoVolumeValue(swipe.startVolume + delta, video);
+    }
     e.preventDefault();
     e.stopPropagation();
     return true;
@@ -2677,12 +2698,38 @@ function updateGridScaleProgress() {
   document.documentElement.style.setProperty('--grid-scale-progress', `${progress}%`);
   updateRangeProgress($('#floating-grid-scale-input'));
 }
+let danmakuSteppedRangeObserver = null;
+function observeDanmakuSteppedRanges(scope = document) {
+  if (typeof ResizeObserver !== 'function') return;
+  danmakuSteppedRangeObserver ||= new ResizeObserver(entries => {
+    entries.forEach(entry => {
+      const input = $('input[type="range"]', entry.target);
+      if (input) updateRangeProgress(input);
+    });
+  });
+  danmakuSteppedRangeObserver.disconnect();
+  $$('.settings-stepped-range', scope).forEach(range => danmakuSteppedRangeObserver.observe(range));
+}
 function updateRangeProgress(input) {
   if (!input || input.type !== 'range') return;
   const min = Number(input.min || 0);
   const max = Number(input.max || 100);
   const value = Math.min(max, Math.max(min, Number(input.value) || min));
-  const progress = max > min ? ((value - min) / (max - min)) * 100 : 100;
+  const fraction = max > min ? (value - min) / (max - min) : 1;
+  let progress = fraction * 100;
+  const steppedRange = input.closest('.settings-stepped-range');
+  if (steppedRange) {
+    const width = input.getBoundingClientRect().width;
+    const thumbSize = parseFloat(getComputedStyle(input).getPropertyValue('--step-thumb-size')) || 22;
+    const thumbInset = Math.min(thumbSize / 2, width / 2);
+    if (value >= max) progress = 100;
+    else if (width > 0) progress = ((thumbInset + (width - thumbInset * 2) * fraction) / width) * 100;
+    const activeStep = Math.round(value - min);
+    $$('.settings-range-stops i', steppedRange).forEach((dot, index) => {
+      dot.classList.toggle('is-before', index < activeStep);
+      dot.classList.toggle('is-current', index === activeStep);
+    });
+  }
   input.style.setProperty('--range-progress', `${progress}%`);
 }
 function syncRangeProgress(scope = document) {
@@ -4039,10 +4086,6 @@ function removeShareLinkFromState(id) {
   }
   if (removed) refreshPhotoShareIndicators(removed.type, removed.target_id);
 }
-function createTextFavicon(text) {
-  const glyph = (text || 'PA').trim().slice(0, 2) || 'PA';
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#2d6a5f"/><text x="32" y="41" font-size="28" text-anchor="middle" fill="#fff" font-family="Arial, sans-serif">${glyph}</text></svg>`)}`;
-}
 function createRoundedImageFavicon(url, accent = '#2d6a5f') {
   const safeURL = escapeHTML(url);
   const safeAccent = normalizeHexColor(accent) || '#2d6a5f';
@@ -4061,7 +4104,7 @@ function traceRoundedRect(ctx, x, y, width, height, radius) {
   ctx.arcTo(x, y, x + width, y, r);
   ctx.closePath();
 }
-function applyRoundedImageFavicon(favicon, url, accent, fallbackText) {
+function applyRoundedImageFavicon(favicon, url, accent) {
   if (!favicon || !url) return;
   const fallback = createRoundedImageFavicon(url, accent);
   favicon.dataset.logoUrl = url;
@@ -4096,11 +4139,11 @@ function applyRoundedImageFavicon(favicon, url, accent, fallbackText) {
     try {
       favicon.href = canvas.toDataURL('image/png');
     } catch (_) {
-      favicon.href = fallback || createTextFavicon(fallbackText);
+      favicon.href = fallback;
     }
   };
   img.onerror = () => {
-    if (favicon.dataset.logoUrl === url) favicon.href = createTextFavicon(fallbackText);
+    if (favicon.dataset.logoUrl === url) favicon.href = '/static/pwa-icon.png';
   };
   img.src = url;
 }
@@ -4204,11 +4247,10 @@ function applyLibraryBranding() {
     document.head.appendChild(favicon);
   }
   const logoURL = current ? resolveLibraryLogoURL(current) : '';
-  const fallbackText = current && current.name ? current.name : 'PA';
-  if (logoURL) applyRoundedImageFavicon(favicon, logoURL, accent, fallbackText);
+  if (logoURL) applyRoundedImageFavicon(favicon, logoURL, accent);
   else {
     favicon.dataset.logoUrl = '';
-    favicon.href = createTextFavicon(fallbackText);
+    favicon.href = '/static/pwa-icon.png';
   }
   const navLogo = document.querySelector('.nav-logo');
   if (navLogo) {
@@ -4994,6 +5036,8 @@ function applyServerSettings(data = {}) {
   state.slideshowLoop = data.slideshow_loop !== false;
   state.slideshowInterval = Math.min(30000, Math.max(1000, Number(data.slideshow_interval) || 5000));
   state.echoFrameSettings = data.echo_frame;
+  state.danmakuSettings = normalizeDanmakuSettings(data.danmaku);
+  window.EchoGalleryDanmaku?.configure(state.danmakuSettings);
   resetLightboxZoomToDefault();
   state.experimentalAutoplayVideo = data.experimental_autoplay_video !== false;
   state.videoAutoplayNext = data.video_autoplay_next !== false;
@@ -5055,6 +5099,7 @@ function buildSettingsPayload() {
     slideshow_loop: !!state.slideshowLoop,
     slideshow_interval: state.slideshowInterval,
     echo_frame: typeof normalizeEchoFrameSettings === 'function' ? normalizeEchoFrameSettings(state.echoFrameSettings) : state.echoFrameSettings,
+    danmaku: normalizeDanmakuSettings(state.danmakuSettings),
     lightbox_zoom: 100,
     experimental_autoplay_video: !!state.experimentalAutoplayVideo,
     video_autoplay_next: !!state.videoAutoplayNext,
@@ -5270,11 +5315,18 @@ function executePlayerKeyAction(binding) {
   const value = parseFloat(binding.args[0] || '0');
   switch (binding.command) {
     case 'cycle':
+      if (binding.args[0] === 'danmaku') return toggleLightboxDanmaku();
       if (binding.args[0] === 'pause') return toggleVideoPlayback();
       if (binding.args[0] === 'mute') return toggleVideoMute();
       return false;
     case 'seek':
       return adjustVideoTime(value);
+    case 'playlist-next':
+      void lbNav(1);
+      return true;
+    case 'playlist-prev':
+      void lbNav(-1);
+      return true;
     case 'frame-step':
       return stepVideoFrame(1);
     case 'frame-back-step':
@@ -5299,8 +5351,21 @@ function keyEventToken(e) {
   if (e.metaKey && base !== 'META') modifiers.push('META');
   return keyTokenWithModifiers(base, modifiers);
 }
+function toggleLightboxDanmaku() {
+  if (!window.EchoGalleryDanmaku) return false;
+  const enabled = window.EchoGalleryDanmaku.toggle();
+  showToast(copyText(enabled ? 'app.danmaku.enabled' : 'app.danmaku.disabled'));
+  return true;
+}
 function handleLightboxKeydown(e) {
   if (shouldIgnoreGlobalShortcut(e.target)) return false;
+  if (!e.isComposing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'ArrowRight' || e.code === 'ArrowRight')
+      && isVideoMedia(state.lightboxPhotos[state.lightboxIndex]) && !document.querySelector('.modal-overlay.open')) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (!e.repeat) toggleLightboxDanmaku();
+    return true;
+  }
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === '0') {
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -6972,6 +7037,7 @@ function bindNav() {
   window.addEventListener('resize', () => {
     syncSidebarUI();
     updateSelectionModeUI();
+    $$('.settings-stepped-range input[type="range"]').forEach(updateRangeProgress);
     if (!isCompactNavLayout()) closeNavPicker();
     scheduleLightboxViewportChangeCheck(false);
   });
@@ -10382,6 +10448,17 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
     </div>
   </section>
 
+  <section class="card settings-panel settings-panel-playback settings-panel-danmaku">
+    ${renderSettingsPanelHeader(copyText('app.danmaku.settingsTitle'), copyText('app.danmaku.settingsCopy'), 'settingsPanelHeadDanmaku')}
+    <div class="settings-group">
+      ${renderDanmakuSettingControls()}
+      <div class="settings-row"><div class="settings-static"><strong>${escapeHTML(copyText('app.danmaku.blockList'))}</strong><span>${escapeHTML(copyText('app.danmaku.blockListCopy'))}</span></div><div class="settings-actions settings-actions-fill"><button class="btn" id="settings-danmaku-block-btn" type="button">${escapeHTML(copyText('app.danmaku.editBlockList'))}</button></div></div>
+      <div class="settings-row"><div class="settings-static"><strong>${escapeHTML(copyText('app.danmaku.updateAll'))}</strong><span>${escapeHTML(copyText('app.danmaku.updateAllCopy'))}</span></div><div class="settings-actions settings-actions-fill"><button class="btn" id="settings-danmaku-update-btn" type="button" ${canWriteMedia() && !danmakuUpdatingAll ? '' : 'disabled'}>${escapeHTML(copyText('app.danmaku.updateAll'))}</button></div></div>
+      <div id="settings-danmaku-update-status" class="danmaku-status" role="status"></div>
+      <div class="settings-actions settings-actions-fill"><button class="btn" id="settings-danmaku-open-btn" type="button">${escapeHTML(copyText('app.danmaku.manage'))}</button></div>
+    </div>
+  </section>
+
   ${showExperimentalSettings ? `<section class="card settings-panel settings-panel-experimental">
     ${renderSettingsPanelHeader(settingsText('sections.experimental.title'), settingsText('sections.experimental.copy'), settingsPanelHeadIconMap.experimental)}
     <div class="settings-group">
@@ -10737,6 +10814,8 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
     openVideoThumbnailRefreshWorkflow();
   });
   $('#settings-playback-cache-btn')?.addEventListener('click', openPlaybackCacheModal);
+  $('#settings-danmaku-open-btn')?.addEventListener('click', openDanmakuManager);
+  bindDanmakuSettings();
   $('#settings-backfill-exif-btn')?.addEventListener('click', async () => {
     try {
       const status = await repairEXIFMetadata();
@@ -12035,12 +12114,45 @@ function buildLightboxInfoItems(photo) {
   }
   const videoEXIF = photo.exif && typeof photo.exif === 'object' ? photo.exif : {};
   const videoCamera = [compactExifValue(videoEXIF.make), compactExifValue(videoEXIF.model)].filter(Boolean).join(' ');
+  const danmakuMetadata = danmakuMetadataForPhoto(photo);
+  const danmakuOwner = String(danmakuMetadata?.owner || '').trim();
+  const ownerAvatar = safeDanmakuAvatarURL(danmakuMetadata?.owner_avatar);
   return compactInfoItems([
+    ...(danmakuOwner ? [[ownerAvatar ? { avatar: ownerAvatar } : icons.albumCardUser, copyText('app.danmaku.uploader'), danmakuOwner]] : []),
     ...base,
     [icons.exifCamera, copyText('app.interface.s_6042a0b155'), videoCamera],
     [icons.infoVideoCodec, copyText('app.interface.s_c94faa718a'), formatVideoCodec(videoEXIF.video_codec)],
     [icons.infoVideoFramerate, copyText('app.interface.s_7757a0dc83'), formatVideoFrameRate(videoEXIF.video_frame_rate)],
   ]);
+}
+
+function safeDanmakuAvatarURL(value) {
+  if (!String(value || '').trim()) return '';
+  try {
+    const url = new URL(String(value || ''), window.location.href);
+    return url.protocol === 'https:' ? url.href : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function lightboxInfoIconMarkup(icon) {
+  if (!icon || typeof icon !== 'object' || !icon.avatar) return icon || '';
+  return `<img class="lb-info-avatar" src="${escapeHTML(icon.avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy"><span class="lb-info-avatar-fallback" hidden>${icons.albumCardUser || ''}</span>`;
+}
+
+function renderLightboxInfo(photo) {
+  const target = $('#lb-info');
+  if (!target) return;
+  const items = buildLightboxInfoItems(photo);
+  target.innerHTML = items.map(([icon, key, value]) => {
+    const displayValue = addPanguSpacing(value);
+    return `<div class="lb-info-item" title="${escapeHTML(`${key}: ${displayValue}`)}" aria-label="${escapeHTML(`${key}: ${displayValue}`)}"><span class="lb-info-key">${lightboxInfoIconMarkup(icon)}</span><span class="lb-info-value">${escapeHTML(displayValue)}</span></div>`;
+  }).join('');
+  $$('.lb-info-avatar', target).forEach(image => image.addEventListener('error', () => {
+    image.hidden = true;
+    image.nextElementSibling?.removeAttribute('hidden');
+  }, { once: true }));
 }
 
 // ── 缩略图 ────────────────────────────────────────────
@@ -12097,6 +12209,9 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const div = el('div', 'photo-thumb');
   div.dataset.id = photo.id;
   div.dataset.kind = photo.media_kind || 'image';
+  div.dataset.uuid = photo.uuid || '';
+  div.dataset.durationMs = Number(photo.duration_ms) || 0;
+  if (isVideoMedia(photo) && !isRootDebugMedia(photo)) void ensureDanmakuMatches().catch(() => {});
   div.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
   div.classList.add('thumb-loading');
 
@@ -12105,9 +12220,7 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const favoriteToggle = opts.trashMode || opts.disableFavorite || !canWriteMedia() || isDebugMedia
     ? ''
     : `<button class="favorite-toggle${photo.is_favorite ? ' active' : ''}${photo.is_super_favorite ? ' super-active' : ''}" type="button" aria-label="${escapeHTML(favoriteLabelForPhoto(photo))}" title="${escapeHTML(favoriteLabelForPhoto(photo))}">${favoriteIconForPhoto(photo)}</button>`;
-  const mediaDurationBadge = isVideoMedia(photo) && photo.duration_ms
-    ? `<span class="media-duration-badge" title="${escapeHTML(formatDuration(photo.duration_ms))}">${escapeHTML(formatDuration(photo.duration_ms))}</span>`
-    : '';
+  const mediaDurationBadge = isVideoMedia(photo) ? renderVideoDurationBadge(photo) : '';
   const bookmarkCount = getVideoBookmarkCount(photo);
   const videoBookmarkBadge = bookmarkCount > 0
     ? `<span class="video-bookmark-badge" title="${escapeHTML(copyText('app.interface.d_video_bookmarks', { count: bookmarkCount }))}" aria-label="${escapeHTML(copyText('app.interface.d_video_bookmarks', { count: bookmarkCount }))}"><span class="video-bookmark-icon">${icons.bookmark}</span><span class="video-bookmark-count">${bookmarkCount}</span></span>`
@@ -12458,6 +12571,8 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     canWriteMedia() ? { role: 'album-add', icon: icons.plus || icons.contextAlbum, label: copyText('app.interface.albumAddToAlbum'), action: () => addSinglePhotoToAlbum(photo.id) } : null,
     { role: 'reveal', icon: icons.contextReveal, label: copyText('app.interface.mediaOpenInFileManager'), action: () => revealInFinder(photo.id) },
     { role: 'download', icon: icons.contextDownload, label: singleMediaSaveLabel(), action: () => confirmDownloadAction(copyText('app.interface.d_66274d1532', { v0: (singleMediaSaveLabel()) }), () => saveOrDownloadMedia(photo)) },
+    isVideoMedia(photo) && !hasDanmakuMatch(photo) ? { role: 'danmaku', icon: icons.danmaku || icons.contextSearch || icons.search, label: copyText('app.danmaku.find'), action: () => openDanmakuModal(photo) } : null,
+    isVideoMedia(photo) && canWriteMedia() && hasDanmakuMatch(photo) ? { role: 'danmaku-unmatch', icon: icons.danmakuDismatch || icons.danmaku, label: copyText('app.danmaku.removeMatch'), action: () => removeDanmakuMatch(photo) } : null,
     canWriteMedia() ? { role: 'rename', icon: icons.libraryCardEdit, label: copyText('app.interface.s_1cd80fd7a8'), action: () => openRenameMediaModal(photo) } : null,
   ];
   if (requiresBrowserPlaybackConversion(photo)) {
@@ -12489,6 +12604,679 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
   return filterPhotoContextMenuItemsForDevice(items, options);
 }
 
+let danmakuMatchCache = { key: '', uuids: new Set(), mediaIDs: new Set(), metadataByUUID: new Map(), metadataByMediaID: new Map(), ownerHydrationPending: new Set(), loaded: false, pending: null };
+let danmakuModalState = { photo: null, video: null, taskID: '', pollTimer: 0, searching: false, fetching: false, searchID: 0 };
+
+function hasDanmakuMatch(photo) {
+  if (danmakuMatchCache.key !== activeLibraryIdentity(state.serverSettings)) return false;
+  return (!!photo.uuid && danmakuMatchCache.uuids.has(photo.uuid))
+    || (Number(photo.id) > 0 && danmakuMatchCache.mediaIDs.has(Number(photo.id)));
+}
+
+function danmakuMetadataForPhoto(photo) {
+  if (!photo || danmakuMatchCache.key !== activeLibraryIdentity(state.serverSettings)) return null;
+  return (photo.uuid && danmakuMatchCache.metadataByUUID.get(photo.uuid))
+    || danmakuMatchCache.metadataByMediaID.get(Number(photo.id))
+    || null;
+}
+
+function syncDanmakuLightboxInfo() {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  if (!photo || !isVideoMedia(photo) || isRootDebugMedia(photo)) return;
+  const metadata = danmakuMetadataForPhoto(photo);
+  renderLightboxInfo(photo);
+  if (metadata) hydrateDanmakuOwnerForPhoto(photo, metadata);
+}
+
+function hydrateDanmakuOwnerForPhoto(photo, metadata) {
+  const cache = danmakuMatchCache;
+  const bvid = String(metadata?.bvid || '').trim();
+  if (!bvid || safeDanmakuAvatarURL(metadata.owner_avatar) || cache.ownerHydrationPending.has(bvid)) return;
+  cache.ownerHydrationPending.add(bvid);
+  api.get(`/api/danmaku/${encodeURIComponent(bvid)}`).then(updated => {
+    if (danmakuMatchCache !== cache || activeLibraryIdentity(state.serverSettings) !== cache.key) return;
+    if (photo.uuid) cache.metadataByUUID.set(photo.uuid, updated);
+    if (Number(photo.id) > 0) cache.metadataByMediaID.set(Number(photo.id), updated);
+    const current = state.lightboxPhotos[state.lightboxIndex];
+    if (current && ((photo.uuid && current.uuid === photo.uuid) || Number(current.id) === Number(photo.id))) renderLightboxInfo(current);
+  }).catch(() => {}).finally(() => cache.ownerHydrationPending.delete(bvid));
+}
+
+function renderVideoDurationBadge(photo) {
+  const matched = hasDanmakuMatch(photo);
+  const duration = Number(photo.duration_ms) > 0 ? formatDuration(photo.duration_ms) : '';
+  const icon = matched ? `<span class="media-danmaku-icon" title="${escapeHTML(copyText('app.danmaku.matched'))}" role="img" aria-label="${escapeHTML(copyText('app.danmaku.matched'))}">${icons.danmaku}</span>` : '';
+  return `<span class="media-duration-badge"${!matched && !duration ? ' hidden' : ''}>${icon}${escapeHTML(duration)}</span>`;
+}
+
+function syncDanmakuThumbBadges() {
+  $$('.photo-thumb[data-kind="video"]').forEach(thumb => {
+    const badge = $('.media-duration-badge', thumb);
+    if (badge) badge.outerHTML = renderVideoDurationBadge({ uuid: thumb.dataset.uuid, duration_ms: Number(thumb.dataset.durationMs) });
+  });
+}
+
+async function ensureDanmakuMatches(force = false) {
+  const key = activeLibraryIdentity(state.serverSettings);
+  if (danmakuMatchCache.key !== key || force) {
+    danmakuMatchCache = { key, uuids: new Set(), mediaIDs: new Set(), metadataByUUID: new Map(), metadataByMediaID: new Map(), ownerHydrationPending: new Set(), loaded: false, pending: null };
+  }
+  const cache = danmakuMatchCache;
+  if (cache.loaded) return;
+  if (!cache.pending) {
+    cache.pending = api.get('/api/danmaku').then(payload => {
+      if (danmakuMatchCache !== cache || activeLibraryIdentity(state.serverSettings) !== key) return;
+      const matchedItems = (payload.items || [])
+        .filter(item => item.media_uuid || Number(item.media_id) > 0)
+        .sort((a, b) => Date.parse(b.downloaded_at || '') - Date.parse(a.downloaded_at || ''));
+      cache.uuids = new Set(matchedItems.map(item => item.media_uuid).filter(Boolean));
+      cache.mediaIDs = new Set(matchedItems.map(item => Number(item.media_id)).filter(id => id > 0));
+      matchedItems.forEach(item => {
+        if (item.media_uuid && !cache.metadataByUUID.has(item.media_uuid)) cache.metadataByUUID.set(item.media_uuid, item);
+        const mediaID = Number(item.media_id);
+        if (mediaID > 0 && !cache.metadataByMediaID.has(mediaID)) cache.metadataByMediaID.set(mediaID, item);
+      });
+      cache.loaded = true;
+      syncDanmakuThumbBadges();
+      syncDanmakuLightboxInfo();
+    }).finally(() => { cache.pending = null; });
+  }
+  return cache.pending;
+}
+
+async function removeDanmakuMatch(photo) {
+  const key = activeLibraryIdentity(state.serverSettings);
+  try {
+    await api.del(`/api/media/${photo.id}/danmaku-match`);
+    if (activeLibraryIdentity(state.serverSettings) !== key) return;
+    if (Number(state.lightboxPhotos[state.lightboxIndex]?.id) === Number(photo.id)) window.EchoGalleryDanmaku?.stop();
+    danmakuMatchCache.uuids.delete(photo.uuid);
+    danmakuMatchCache.mediaIDs.delete(Number(photo.id));
+    syncDanmakuThumbBadges();
+    showToast(copyText('app.danmaku.matchRemoved'));
+    await ensureDanmakuMatches(true);
+  } catch (error) {
+    if (activeLibraryIdentity(state.serverSettings) === key) showToast(error.error || copyText('app.danmaku.errors.removeFailed'));
+  }
+}
+
+function closeDanmakuModal() {
+  if (!danmakuModalState.taskID) {
+    clearTimeout(danmakuModalState.pollTimer);
+    danmakuModalState.pollTimer = 0;
+  }
+  danmakuModalState.searchID++;
+  document.querySelector('#danmaku-modal')?.remove();
+}
+
+function danmakuEmptyResult() {
+  const name = danmakuDefaultSearchName();
+  if (name) return `<p class="danmaku-result-empty">${escapeHTML(copyText('app.danmaku.searchCurrentName', { name }))}</p>`;
+  return `<p class="danmaku-result-empty">${escapeHTML(copyText('app.danmaku.searchHint'))}</p>`;
+}
+
+function normalizeDanmakuSettings(raw = {}) {
+  raw = raw || {};
+  const step = (value, max, fallback) => Number.isInteger(value) && value >= 0 && value <= max ? value : fallback;
+  return { font_step: step(raw.font_step, 5, 1), font_weight_step: step(raw.font_weight_step, 4, 2), opacity_step: step(raw.opacity_step, 4, 2), speed_step: step(raw.speed_step, 4, 2), block_list: String(raw.block_list || '') };
+}
+
+function danmakuSettingLabel(key, value) {
+  if (key === 'font_step') return `${[1, 1.25, 1.5, 1.75, 2, 2.5][value]}em`;
+  if (key === 'font_weight_step') return String([400, 500, 600, 700, 800][value]);
+  if (key === 'opacity_step') return `${value * 25}%`;
+  return copyText(`app.danmaku.speedLevels.${['slowest', 'slow', 'medium', 'fast', 'fastest'][value]}`);
+}
+
+function renderDanmakuSettingControls() {
+  const prefs = normalizeDanmakuSettings(state.danmakuSettings);
+  return [['font_step', 'fontSize', 5], ['font_weight_step', 'fontWeight', 4], ['opacity_step', 'opacity', 4], ['speed_step', 'flowSpeed', 4]].map(([key, title, max]) => `<div class="settings-control"><label for="settings-danmaku-${key}"><span>${escapeHTML(copyText(`app.danmaku.${title}`))}</span><span id="settings-danmaku-${key}-value">${escapeHTML(danmakuSettingLabel(key, prefs[key]))}</span></label><div class="settings-stepped-range"><input class="input" id="settings-danmaku-${key}" data-danmaku-setting="${key}" type="range" min="0" max="${max}" step="1" value="${prefs[key]}" aria-valuetext="${escapeHTML(danmakuSettingLabel(key, prefs[key]))}"><span class="settings-range-stops" aria-hidden="true">${Array.from({ length: max + 1 }, () => '<i></i>').join('')}</span></div></div>`).join('');
+}
+
+function bindDanmakuSettings() {
+  observeDanmakuSteppedRanges();
+  requestAnimationFrame(() => $$('.settings-stepped-range input[type="range"]').forEach(updateRangeProgress));
+  document.querySelectorAll('[data-danmaku-setting]').forEach(input => input.addEventListener('input', () => {
+    const key = input.dataset.danmakuSetting;
+    const min = Number(input.min || 0), max = Number(input.max || 0);
+    const value = Math.min(max, Math.max(min, Math.round(Number(input.value) || min)));
+    input.value = String(value);
+    state.danmakuSettings = normalizeDanmakuSettings({ ...state.danmakuSettings, [key]: value });
+    const label = danmakuSettingLabel(key, value);
+    $(`#${input.id}-value`).textContent = label;
+    input.setAttribute('aria-valuetext', label);
+    updateRangeProgress(input);
+    window.EchoGalleryDanmaku?.configure(state.danmakuSettings);
+    setSettingsDirty();
+  }));
+  $('#settings-danmaku-block-btn')?.addEventListener('click', openDanmakuBlockList);
+  $('#settings-danmaku-update-btn')?.addEventListener('click', updateAllDanmaku);
+}
+
+function openDanmakuBlockList() {
+  $('#danmaku-block-modal')?.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'danmaku-block-modal';
+  overlay.className = 'modal-overlay library-editor-modal open';
+  overlay.innerHTML = `<div class="modal library-editor-card" role="dialog" aria-modal="true" aria-labelledby="danmaku-block-title"><div class="modal-title" id="danmaku-block-title">${escapeHTML(copyText('app.danmaku.blockList'))}</div><div class="rename-media-field"><label for="danmaku-block-input">${escapeHTML(copyText('app.danmaku.blockListHint'))}</label><textarea class="input" id="danmaku-block-input" rows="8" maxlength="2000"></textarea><p id="danmaku-block-error" class="danmaku-error" role="alert"></p></div><div class="modal-footer library-editor-actions">${libraryEditorActionButton({ id: 'danmaku-block-cancel', kind: 'cancel', icon: icons.close, label: copyText('app.interface.commonCancel') })}${libraryEditorActionButton({ id: 'danmaku-block-save', kind: 'save', icon: icons.check, label: copyText('app.interface.commonSave') })}</div></div>`;
+  document.body.append(overlay);
+  const input = $('#danmaku-block-input');
+  input.value = normalizeDanmakuSettings(state.danmakuSettings).block_list;
+  const close = () => overlay.remove();
+  $('#danmaku-block-cancel').onclick = close;
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
+  $('#danmaku-block-save').onclick = () => {
+    try {
+      const rules = input.value.split('\n').map(rule => rule.trim()).filter(Boolean);
+      if (rules.length > 100) throw new Error();
+      for (const rule of rules) {
+        if (rule.startsWith('/')) {
+          const end = rule.lastIndexOf('/');
+          if (end <= 0) throw new Error();
+          new RegExp(rule.slice(1, end), rule.slice(end + 1));
+        }
+      }
+    } catch (_) { $('#danmaku-block-error').textContent = copyText('app.danmaku.invalidBlockList'); return; }
+    state.danmakuSettings = normalizeDanmakuSettings({ ...state.danmakuSettings, block_list: input.value });
+    window.EchoGalleryDanmaku?.configure(state.danmakuSettings);
+    setSettingsDirty();
+    close();
+  };
+  input.focus();
+}
+
+let danmakuUpdatingAll = false;
+let danmakuManageState = null;
+async function updateAllDanmaku() {
+  if (danmakuUpdatingAll) return;
+  danmakuUpdatingAll = true;
+  const libraryKey = activeLibraryIdentity(state.serverSettings);
+  const current = () => libraryKey === activeLibraryIdentity(state.serverSettings);
+  let total = 0, completed = 0, failed = 0;
+  const report = () => {
+    const button = $('#settings-danmaku-update-btn');
+    if (button) button.disabled = danmakuUpdatingAll || !canWriteMedia();
+    const status = $('#settings-danmaku-update-status');
+    if (status) status.textContent = copyText('app.danmaku.updateProgress', { completed, total, failed });
+  };
+  report();
+  try {
+    const payload = await api.get('/api/danmaku');
+    if (!current()) return;
+    const jobs = (payload.items || []).flatMap(item => (item.pages || []).filter(page => page.status === 'completed').map(page => ({ bvid: item.bvid, page: page.page })));
+    total = jobs.length;
+    report();
+    for (const job of jobs) {
+      if (!current()) return;
+      try {
+        let task = await api.post('/api/danmaku/fetch', { url: job.bvid, page: job.page, overwrite: true });
+        while (['queued', 'resolving', 'downloading'].includes(task.status)) {
+          await new Promise(resolve => setTimeout(resolve, 750));
+          if (!current()) return;
+          task = await api.get(`/api/danmaku/tasks/${encodeURIComponent(task.task_id)}`);
+        }
+        if (task.status !== 'completed') failed++;
+      } catch (_) { failed++; }
+      completed++;
+      if (!current()) return;
+      report();
+    }
+    if (current()) await ensureDanmakuMatches(true);
+  } catch (error) {
+    if (current()) showToast(error.error || copyText('app.danmaku.errors.fetchFailed'));
+  } finally {
+    danmakuUpdatingAll = false;
+    if (current()) report();
+  }
+}
+
+function renderDanmakuModal() {
+  const accent = resolveLibraryAccentColor(currentLibraryBrand() || {});
+  return `<div class="modal-overlay library-editor-modal danmaku-modal-overlay open" id="danmaku-modal" role="presentation">
+    <div class="modal library-editor-card danmaku-modal-card" role="dialog" aria-modal="true" aria-labelledby="danmaku-modal-title" aria-describedby="danmaku-modal-description" style="--danmaku-accent:${escapeHTML(accent)}">
+      <header class="danmaku-modal-banner"><span aria-hidden="true">${icons.danmaku || icons.contextSearch || icons.search}</span><div><h2 id="danmaku-modal-title">${escapeHTML(copyText('app.danmaku.title'))}</h2><p id="danmaku-modal-description">${escapeHTML(copyText('app.danmaku.subtitle'))}</p></div></header>
+      <div class="danmaku-modal-content">
+        <label class="danmaku-label" for="danmaku-source">${escapeHTML(copyText('app.danmaku.sourceLabel'))}</label>
+        <input class="input" id="danmaku-source" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${escapeHTML(copyText('app.danmaku.sourcePlaceholder'))}">
+        <section class="danmaku-results-section" aria-labelledby="danmaku-results-title"><h3 class="danmaku-label" id="danmaku-results-title">${escapeHTML(copyText('app.danmaku.results'))}</h3><div id="danmaku-result" class="danmaku-result" aria-live="polite">${danmakuEmptyResult()}</div></section>
+        <div id="danmaku-status" class="danmaku-status" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer library-editor-actions danmaku-modal-actions">${libraryEditorActionButton({ id: 'danmaku-close', kind: 'cancel', icon: icons.close, label: copyText('app.danmaku.cancel') })}${libraryEditorActionButton({ id: 'danmaku-search-btn', kind: 'save', icon: icons.floatingSearch || icons.search, label: copyText('app.danmaku.search') })}</div>
+    </div>
+  </div>`;
+}
+
+function danmakuDefaultSearchName() {
+  return String(danmakuModalState.photo?.original_name || '').split(/[\\/]/).pop().replace(/\.[^.]+$/, '').trim();
+}
+
+function updateDanmakuAction() {
+  updateDanmakuDurationWarning();
+  const button = $('#danmaku-search-btn');
+  if (!button) return;
+  const matching = !!danmakuModalState.video;
+  const label = copyText(matching ? 'app.danmaku.match' : 'app.danmaku.search');
+  button.innerHTML = `<span class="library-editor-action-icon">${matching ? icons.check : (icons.floatingSearch || icons.search)}</span><span class="library-editor-action-label">${escapeHTML(label)}</span>`;
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.disabled = danmakuModalState.searching || danmakuModalState.fetching || !!danmakuModalState.taskID
+    || (matching ? !Number($('#danmaku-page')?.value) : !($('#danmaku-source')?.value.trim() || danmakuDefaultSearchName()));
+}
+
+function updateDanmakuDurationWarning() {
+  const warning = $('#danmaku-duration-warning');
+  if (!warning) return;
+  const page = danmakuModalState.video?.pages.find(item => item.page === Number($('#danmaku-page')?.value));
+  const localDuration = Number(danmakuModalState.photo?.duration_ms);
+  const sourceDuration = Number(page?.duration) * 1000;
+  const mismatch = Number.isFinite(localDuration) && localDuration > 0
+    && Number.isFinite(sourceDuration) && sourceDuration > 0
+    && Math.abs(localDuration - sourceDuration) > 1000;
+  warning.hidden = !mismatch;
+  warning.textContent = mismatch ? copyText('app.danmaku.durationMismatch', {
+    local: formatDuration(localDuration), source: formatDuration(sourceDuration),
+  }) : '';
+}
+
+function closeDanmakuManager() {
+  document.querySelector('#danmaku-manage-modal')?.remove();
+  danmakuManageState = null;
+}
+
+function isCurrentDanmakuManager(session) {
+  if (danmakuManageState !== session) return false;
+  if (session.libraryKey !== activeLibraryIdentity(state.serverSettings)) {
+    closeDanmakuManager();
+    return false;
+  }
+  return true;
+}
+
+function formatDanmakuRecordDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString(copyLocale(), { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+function renderDanmakuManagerRecord(record, session) {
+  const bvid = String(record.bvid || '').trim();
+  const cover = safeDanmakuAvatarURL(record.cover);
+  const avatar = safeDanmakuAvatarURL(record.owner_avatar);
+  const pages = Array.isArray(record.pages) ? record.pages : [];
+  const page = pages.find(item => Number(item.page) === Number(record.matched_page))
+    || pages.find(item => item.status === 'completed')
+    || pages[0];
+  const duration = Number(page?.duration) > 0 ? formatDuration(Number(page.duration) * 1000) : '';
+  const owner = String(record.owner || '').trim() || bvid;
+  const downloadedAt = formatDanmakuRecordDate(record.downloaded_at);
+  const refreshing = session.refreshing.has(bvid);
+  const disabled = !canWriteMedia() || session.saving || refreshing || session.refreshing.size > 0;
+  const coverMarkup = cover
+    ? `<img data-danmaku-manager-cover src="${escapeHTML(cover)}" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="danmaku-manage-cover-fallback" hidden>${icons.mediaVideo || icons.photo || ''}</span>`
+    : `<span class="danmaku-manage-cover-fallback">${icons.mediaVideo || icons.photo || ''}</span>`;
+  const avatarMarkup = avatar
+    ? `<img data-danmaku-manager-avatar src="${escapeHTML(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="danmaku-manage-avatar-fallback" hidden>${icons.albumCardUser || ''}</span>`
+    : `<span class="danmaku-manage-avatar-fallback">${icons.albumCardUser || ''}</span>`;
+  return `<article class="danmaku-manage-record" data-bvid="${escapeHTML(bvid)}">
+    <div class="danmaku-manage-cover">${coverMarkup}</div>
+    <div class="danmaku-manage-copy">
+      <strong class="danmaku-manage-title" title="${escapeHTML(record.title || bvid)}">${escapeHTML(record.title || bvid)}</strong>
+      <div class="danmaku-manage-owner">${avatarMarkup}<span class="danmaku-manage-owner-name">${escapeHTML(owner)}</span>${duration ? `<span class="danmaku-manage-separator" aria-hidden="true">·</span><span class="danmaku-manage-duration">${escapeHTML(duration)}</span>` : ''}</div>
+      ${downloadedAt ? `<time class="danmaku-manage-date" datetime="${escapeHTML(record.downloaded_at)}">${escapeHTML(downloadedAt)}</time>` : ''}
+    </div>
+    <div class="danmaku-manage-actions">
+      <button class="btn-icon danmaku-manage-action" type="button" data-danmaku-manager-refresh="${escapeHTML(bvid)}" title="${escapeHTML(copyText('app.danmaku.refresh'))}" aria-label="${escapeHTML(copyText('app.danmaku.refresh'))}"${disabled || !pages.some(item => item.status === 'completed') ? ' disabled' : ''}>${refreshing ? '<span class="danmaku-manage-spinner" aria-hidden="true"></span>' : (icons.refresh || icons.contextSearch || icons.search)}</button>
+      <button class="btn-icon danmaku-manage-action danmaku-manage-delete" type="button" data-danmaku-manager-delete="${escapeHTML(bvid)}" title="${escapeHTML(copyText('app.danmaku.delete'))}" aria-label="${escapeHTML(copyText('app.danmaku.delete'))}"${disabled ? ' disabled' : ''}>${icons.contextDelete || icons.trash || icons.close}</button>
+    </div>
+  </article>`;
+}
+
+function renderDanmakuManagerList(session) {
+  if (!isCurrentDanmakuManager(session)) return;
+  const list = $('#danmaku-manage-list');
+  const count = $('#danmaku-manage-count');
+  const status = $('#danmaku-manage-status');
+  if (!list || !count || !status) return;
+  const records = session.records.filter(record => !session.pendingDeletes.has(String(record.bvid || '').trim()));
+  count.textContent = copyText('app.danmaku.matchedCount', { count: records.length });
+  status.textContent = session.status || (session.pendingDeletes.size
+    ? copyText('app.danmaku.pendingDelete', { count: session.pendingDeletes.size })
+    : '');
+  if (session.loading) {
+    list.innerHTML = `<p class="danmaku-manage-empty">${escapeHTML(copyText('app.danmaku.loading'))}</p>`;
+  } else if (session.error) {
+    list.innerHTML = `<p class="danmaku-manage-empty danmaku-manage-error">${escapeHTML(copyText(session.error))}</p>`;
+  } else if (!records.length) {
+    list.innerHTML = `<p class="danmaku-manage-empty">${escapeHTML(copyText('app.danmaku.empty'))}</p>`;
+  } else {
+    list.innerHTML = records.map(record => renderDanmakuManagerRecord(record, session)).join('');
+    list.querySelectorAll('[data-danmaku-manager-cover], [data-danmaku-manager-avatar]').forEach(image => image.addEventListener('error', () => {
+      image.hidden = true;
+      image.nextElementSibling?.removeAttribute('hidden');
+    }, { once: true }));
+    list.querySelectorAll('[data-danmaku-manager-refresh]').forEach(button => button.addEventListener('click', () => {
+      void refreshDanmakuManagerRecord(button.dataset.danmakuManagerRefresh, session);
+    }));
+    list.querySelectorAll('[data-danmaku-manager-delete]').forEach(button => button.addEventListener('click', () => {
+      const bvid = String(button.dataset.danmakuManagerDelete || '').trim();
+      if (!bvid || session.saving || session.refreshing.size) return;
+      session.pendingDeletes.add(bvid);
+      session.status = '';
+      renderDanmakuManagerList(session);
+    }));
+  }
+  const save = $('#danmaku-manage-save');
+  if (save) save.disabled = session.saving || session.refreshing.size > 0;
+  const cancel = $('#danmaku-manage-cancel');
+  if (cancel) cancel.disabled = session.saving;
+}
+
+async function loadDanmakuManagerRecords(session) {
+  if (!isCurrentDanmakuManager(session)) return;
+  try {
+    const payload = await api.get('/api/danmaku');
+    if (!isCurrentDanmakuManager(session)) return;
+    session.records = Array.isArray(payload.items) ? payload.items : [];
+    session.error = '';
+  } catch (_) {
+    if (danmakuManageState !== session) return;
+    session.error = 'app.danmaku.loadFailed';
+  } finally {
+    if (danmakuManageState === session) {
+      if (session.libraryKey !== activeLibraryIdentity(state.serverSettings)) {
+        closeDanmakuManager();
+        return;
+      }
+      session.loading = false;
+      renderDanmakuManagerList(session);
+    }
+  }
+}
+
+async function refreshDanmakuManagerRecord(bvid, session) {
+  if (!isCurrentDanmakuManager(session) || session.saving || session.refreshing.has(bvid)) return;
+  const record = session.records.find(item => String(item.bvid || '').trim() === bvid);
+  if (!record || session.pendingDeletes.has(bvid)) return;
+  const pages = (Array.isArray(record.pages) ? record.pages : []).filter(page => page.status === 'completed');
+  if (!pages.length) {
+    session.status = copyText('app.danmaku.refreshUnavailable');
+    renderDanmakuManagerList(session);
+    return;
+  }
+  session.refreshing.add(bvid);
+  session.status = '';
+  renderDanmakuManagerList(session);
+  let completed = 0;
+  let failed = 0;
+  try {
+    for (const page of pages) {
+      if (!isCurrentDanmakuManager(session)) return;
+      try {
+        let task = await api.post('/api/danmaku/fetch', {
+          url: record.source_url || record.bvid,
+          page: page.page,
+          overwrite: true,
+        });
+        while (['queued', 'resolving', 'downloading'].includes(task.status)) {
+          await new Promise(resolve => window.setTimeout(resolve, 750));
+          if (!isCurrentDanmakuManager(session)) return;
+          task = await api.get(`/api/danmaku/tasks/${encodeURIComponent(task.task_id)}`);
+        }
+        if (task.status !== 'completed') failed++;
+      } catch (_) {
+        failed++;
+      }
+      completed++;
+      session.status = copyText('app.danmaku.updateProgress', { completed, total: pages.length, failed });
+      renderDanmakuManagerList(session);
+    }
+    if (danmakuManageState !== session) return;
+    if (failed) {
+      session.status = copyText('app.danmaku.refreshFailed');
+    } else {
+      session.status = copyText('app.danmaku.refreshComplete');
+      await ensureDanmakuMatches(true).catch(() => {});
+      await loadDanmakuManagerRecords(session);
+    }
+  } finally {
+    if (danmakuManageState === session) {
+      if (session.libraryKey !== activeLibraryIdentity(state.serverSettings)) {
+        closeDanmakuManager();
+        return;
+      }
+      session.refreshing.delete(bvid);
+      renderDanmakuManagerList(session);
+    }
+  }
+}
+
+async function saveDanmakuManager(session) {
+  if (!isCurrentDanmakuManager(session) || session.saving || session.refreshing.size) return;
+  session.saving = true;
+  session.status = '';
+  renderDanmakuManagerList(session);
+  let deleted = false;
+  let failed = false;
+  for (const bvid of [...session.pendingDeletes]) {
+    if (!isCurrentDanmakuManager(session)) return;
+    try {
+      await api.del(`/api/danmaku/${encodeURIComponent(bvid)}`);
+      session.pendingDeletes.delete(bvid);
+      session.records = session.records.filter(record => String(record.bvid || '').trim() !== bvid);
+      deleted = true;
+      renderDanmakuManagerList(session);
+    } catch (_) {
+      session.pendingDeletes.delete(bvid);
+      failed = true;
+    }
+  }
+  if (deleted) {
+    if (!isCurrentDanmakuManager(session)) return;
+    window.EchoGalleryDanmaku?.stop();
+    await ensureDanmakuMatches(true).catch(() => {});
+  }
+  if (!isCurrentDanmakuManager(session)) return;
+  session.saving = false;
+  if (failed) {
+    session.status = copyText('app.danmaku.deleteFailed');
+    renderDanmakuManagerList(session);
+    showToast(session.status);
+    return;
+  }
+  closeDanmakuManager();
+}
+
+function renderDanmakuManager() {
+  const accent = resolveLibraryAccentColor(currentLibraryBrand() || {});
+  const title = copyText('app.danmaku.manageTitle') || copyText('app.danmaku.manage');
+  return `<div class="modal-overlay library-editor-modal danmaku-modal-overlay open" id="danmaku-manage-modal" role="presentation">
+    <div class="modal library-editor-card danmaku-modal-card danmaku-manage-card" role="dialog" aria-modal="true" aria-labelledby="danmaku-manage-title" aria-describedby="danmaku-manage-description" style="--danmaku-accent:${escapeHTML(accent)}">
+      <header class="danmaku-modal-banner"><span aria-hidden="true">${icons.danmaku || icons.contextSearch || icons.search}</span><div class="danmaku-manage-heading"><h2 class="danmaku-manage-heading-title" id="danmaku-manage-title">${escapeHTML(title)}</h2><p id="danmaku-manage-description">${escapeHTML(copyText('app.danmaku.manageSubtitle'))}</p></div></header>
+      <div class="danmaku-manage-content">
+        <div class="danmaku-manage-count" id="danmaku-manage-count"></div>
+        <div class="danmaku-manage-status" id="danmaku-manage-status" role="status" aria-live="polite"></div>
+        <div class="danmaku-manage-list" id="danmaku-manage-list" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer library-editor-actions danmaku-modal-actions danmaku-manage-footer">${libraryEditorActionButton({ id: 'danmaku-manage-cancel', kind: 'cancel', icon: icons.close, label: copyText('app.interface.commonCancel') })}${libraryEditorActionButton({ id: 'danmaku-manage-save', kind: 'save', icon: icons.check, label: copyText('app.interface.commonSave') })}</div>
+    </div>
+  </div>`;
+}
+
+async function openDanmakuManager() {
+  closeDanmakuManager();
+  closeDanmakuModal();
+  const session = {
+    libraryKey: activeLibraryIdentity(state.serverSettings),
+    records: [],
+    pendingDeletes: new Set(),
+    refreshing: new Set(),
+    loading: true,
+    saving: false,
+    error: '',
+    status: '',
+  };
+  danmakuManageState = session;
+  const wrapper = el('div');
+  wrapper.innerHTML = renderDanmakuManager();
+  const overlay = wrapper.firstElementChild;
+  document.body.appendChild(overlay);
+  const close = () => { if (!session.saving) closeDanmakuManager(); };
+  $('#danmaku-manage-cancel')?.addEventListener('click', close);
+  $('#danmaku-manage-save')?.addEventListener('click', () => { void saveDanmakuManager(session); });
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } });
+  renderDanmakuManagerList(session);
+  $('#danmaku-manage-cancel')?.focus();
+  await loadDanmakuManagerRecords(session);
+}
+
+async function searchDanmaku(selectedBVID = '') {
+  if (danmakuModalState.searching || danmakuModalState.fetching || danmakuModalState.taskID) return;
+  const input = $('#danmaku-source');
+  const result = $('#danmaku-result');
+  const button = $('#danmaku-search-btn');
+  if (!input || !result || !button) return;
+  const source = typeof selectedBVID === 'string' && selectedBVID ? selectedBVID : (input.value.trim() || danmakuDefaultSearchName());
+  if (!source) { input.focus(); return; }
+  const session = danmakuModalState;
+  const searchID = ++session.searchID;
+  session.searching = true;
+  session.video = null;
+  updateDanmakuAction();
+  result.setAttribute('aria-busy', 'true');
+  result.innerHTML = `<p class="danmaku-result-empty">${escapeHTML(copyText('app.danmaku.searching'))}</p>`;
+  $('#danmaku-status').textContent = '';
+  try {
+    const video = await api.post('/api/danmaku/search', { url: source });
+    if (danmakuModalState !== session || session.searchID !== searchID || $('#danmaku-result') !== result) return;
+    if (Array.isArray(video.items)) {
+      result.innerHTML = video.items.length ? video.items.map(item => `<button type="button" class="danmaku-video-result danmaku-search-result" data-danmaku-bvid="${escapeHTML(item.bvid)}">${item.cover ? `<img src="${escapeHTML(item.cover)}" alt="" referrerpolicy="no-referrer" loading="lazy">` : `<span class="danmaku-cover-placeholder" aria-hidden="true">${icons.danmaku || icons.video}</span>`}<span class="danmaku-video-copy"><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.owner)} · ${escapeHTML(item.duration)}</span><span>${escapeHTML(item.bvid)}</span></span></button>`).join('') : `<p class="danmaku-result-empty">${escapeHTML(copyText('app.danmaku.noResults'))}</p>`;
+      result.querySelectorAll('[data-danmaku-bvid]').forEach(button => button.addEventListener('click', () => { void searchDanmaku(button.dataset.danmakuBvid); }));
+      return;
+    }
+    session.video = video;
+    const requestedPage = (() => { try { return Number(new URL(source).searchParams.get('p')) || 0; } catch (_) { return 0; } })();
+    const selectedPage = video.pages.some(page => page.page === requestedPage)
+      ? requestedPage
+      : video.pages.length === 1 ? video.pages[0].page : 0;
+    const needsPageChoice = video.pages.length > 1 && !selectedPage;
+    result.innerHTML = `<article class="danmaku-video-result">${video.cover ? `<img src="${escapeHTML(video.cover)}" alt="" referrerpolicy="no-referrer">` : `<span class="danmaku-cover-placeholder" aria-hidden="true">${icons.danmaku || icons.video}</span>`}<div class="danmaku-video-copy"><strong>${escapeHTML(video.title)}</strong><span>${escapeHTML(video.owner)}</span><span>${escapeHTML(video.bvid)}</span></div></article>
+      ${video.pages.length > 1 ? `<div class="danmaku-page-field"><label class="danmaku-label" for="danmaku-page">${escapeHTML(copyText('app.danmaku.pageLabel'))}</label><select class="input" id="danmaku-page">${needsPageChoice ? `<option value="" selected disabled>${escapeHTML(copyText('app.danmaku.pagePlaceholder'))}</option>` : ''}${video.pages.map(page => `<option value="${page.page}" ${page.page === selectedPage ? 'selected' : ''}>${escapeHTML(copyText('app.danmaku.pageOption', { page: page.page, part: page.part || '' }))}</option>`).join('')}</select></div>` : `<input type="hidden" id="danmaku-page" value="${selectedPage}">`}`;
+    result.insertAdjacentHTML('beforeend', '<p id="danmaku-duration-warning" class="danmaku-duration-warning" role="status" hidden></p>');
+    $('#danmaku-page')?.addEventListener('change', updateDanmakuAction);
+  } catch (error) {
+    if (danmakuModalState !== session || session.searchID !== searchID || $('#danmaku-result') !== result) return;
+    result.innerHTML = `<p class="danmaku-error">${escapeHTML(error.error || copyText('app.danmaku.errors.lookupFailed'))}</p>`;
+  } finally {
+    if (danmakuModalState === session && session.searchID === searchID && $('#danmaku-result') === result) {
+      session.searching = false;
+      result.setAttribute('aria-busy', 'false');
+      updateDanmakuAction();
+    }
+  }
+}
+
+async function startDanmakuFetch() {
+  if (danmakuModalState.fetching || danmakuModalState.taskID) return;
+  const video = danmakuModalState.video;
+  const photo = danmakuModalState.photo;
+  const page = Number($('#danmaku-page')?.value || 0);
+  if (!video || !page) return;
+  const session = danmakuModalState;
+  session.fetching = true;
+  $('#danmaku-source').disabled = true;
+  if ($('#danmaku-page')) $('#danmaku-page').disabled = true;
+  updateDanmakuAction();
+  try {
+    const task = await api.post('/api/danmaku/fetch', {
+      url: video.source_url,
+      page,
+      overwrite: false,
+      media_id: Number(photo?.id) || 0,
+      media_uuid: photo?.uuid || '',
+    });
+    if (activeLibraryIdentity(state.serverSettings) !== session.libraryKey) return;
+    session.taskID = task.task_id;
+    pollDanmakuTask(task.task_id, session);
+  } catch (error) {
+    if (activeLibraryIdentity(state.serverSettings) !== session.libraryKey) return;
+    if (error.task?.task_id) { session.taskID = error.task.task_id; pollDanmakuTask(error.task.task_id, session); }
+    else if (danmakuModalState === session && $('#danmaku-modal')) $('#danmaku-status').textContent = error.error || copyText('app.danmaku.errors.fetchFailed');
+  } finally {
+    if (danmakuModalState === session && $('#danmaku-modal')) {
+      session.fetching = false;
+      $('#danmaku-source').disabled = !!session.taskID;
+      if ($('#danmaku-page')) $('#danmaku-page').disabled = !!session.taskID;
+      updateDanmakuAction();
+    }
+  }
+}
+
+function pollDanmakuTask(taskID, session = danmakuModalState) {
+  clearTimeout(session.pollTimer);
+  session.pollTimer = window.setTimeout(async () => {
+    if (activeLibraryIdentity(state.serverSettings) !== session.libraryKey) return;
+    try {
+      const task = await api.get(`/api/danmaku/tasks/${encodeURIComponent(taskID)}`);
+      if (activeLibraryIdentity(state.serverSettings) !== session.libraryKey || session.taskID !== taskID) return;
+      const visible = danmakuModalState === session && !!$('#danmaku-modal');
+      const statusKey = `app.danmaku.status.${task.status}`;
+      if (visible) $('#danmaku-status').textContent = `${copyText(statusKey)} · ${task.completed || 0}/${task.total_pages || 0}${task.failed ? ` · ${copyText('app.danmaku.failedCount', { count: task.failed })}` : ''}`;
+      const active = ['queued', 'resolving', 'downloading'].includes(task.status);
+      if (active) pollDanmakuTask(taskID, session);
+      else {
+        session.taskID = '';
+        await ensureDanmakuMatches(true).catch(() => {});
+        if (session.photo && ['completed', 'partial'].includes(task.status)
+            && $('#lightbox')?.classList.contains('open')
+            && Number(state.lightboxPhotos[state.lightboxIndex]?.id) === Number(session.photo.id)) {
+          window.EchoGalleryDanmaku?.start($('#lb-video'), session.photo.id, fetchWithPageSession);
+        }
+        if (danmakuModalState === session && $('#danmaku-modal')) {
+          $('#danmaku-source').disabled = false;
+          if ($('#danmaku-page')) $('#danmaku-page').disabled = false;
+          updateDanmakuAction();
+        }
+      }
+    } catch (_) {
+      if (activeLibraryIdentity(state.serverSettings) !== session.libraryKey || session.taskID !== taskID) return;
+      if (danmakuModalState === session && $('#danmaku-modal')) $('#danmaku-status').textContent = copyText('app.danmaku.errors.statusFailed');
+      pollDanmakuTask(taskID, session);
+    }
+  }, 700);
+}
+
+async function openDanmakuModal(photo = null) {
+  if (photo && !isVideoMedia(photo)) return;
+  closeDanmakuModal();
+  danmakuModalState = { photo, video: null, taskID: '', pollTimer: 0, searching: false, fetching: false, searchID: 0, libraryKey: activeLibraryIdentity(state.serverSettings) };
+  const modal = el('div');
+  modal.innerHTML = renderDanmakuModal();
+  const overlay = modal.firstElementChild;
+  document.body.appendChild(overlay);
+  const runAction = () => danmakuModalState.video ? startDanmakuFetch() : searchDanmaku();
+  const closeButton = $('#danmaku-close');
+  closeButton.title = copyText('app.danmaku.cancel');
+  closeButton.setAttribute('aria-label', closeButton.title);
+  $('#danmaku-source')?.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); void runAction(); } });
+  $('#danmaku-source')?.addEventListener('input', () => {
+    danmakuModalState.video = null;
+    danmakuModalState.searchID++;
+    danmakuModalState.searching = false;
+    $('#danmaku-result').innerHTML = danmakuEmptyResult();
+    $('#danmaku-result').setAttribute('aria-busy', 'false');
+    $('#danmaku-status').textContent = '';
+    updateDanmakuAction();
+  });
+  $('#danmaku-search-btn')?.addEventListener('click', runAction);
+  $('#danmaku-close')?.addEventListener('click', closeDanmakuModal);
+  overlay.addEventListener('click', event => { if (event.target === overlay) closeDanmakuModal(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') { event.stopPropagation(); closeDanmakuModal(); } });
+  updateDanmakuAction();
+  $('#danmaku-source')?.focus();
+}
+
 function albumTypeContextIcon(album) {
   if (String(album && album.source_kind || '').trim() === 'smart') return icons.albumIntelligence || icons.contextAlbum;
   if (isFolderAlbum(album)) return icons.albumCardFolder || icons.contextAlbum;
@@ -12497,6 +13285,10 @@ function albumTypeContextIcon(album) {
 
 // 时间线图片右键菜单
 async function showPhotoContextMenu(x, y, photo, thumbEl, listRef, options = {}) {
+  const libraryKey = activeLibraryIdentity(state.serverSettings);
+  if (isVideoMedia(photo)) {
+    try { await ensureDanmakuMatches(); } catch (_) {}
+  }
   let albums = [];
   try {
     albums = await api.get(`/api/media/${photo.id}/albums`);
@@ -12513,6 +13305,7 @@ async function showPhotoContextMenu(x, y, photo, thumbEl, listRef, options = {})
   if ((!albums || !albums.length) && state.view === 'album-detail' && state.currentAlbum && state.currentAlbum.id) {
     albums = [state.currentAlbum];
   }
+  if (activeLibraryIdentity(state.serverSettings) !== libraryKey) return;
   showContextMenu(x, y, photoContextMenuItems(photo, thumbEl, listRef, albums || [], options), options);
 }
 
@@ -14894,7 +15687,7 @@ function bindGlobal() {
     if (e.target.closest('#lb-close')) exitLightboxToContext();
     if (e.target.closest('#lb-prev')) void lbNav(-1);
     if (e.target.closest('#lb-next')) void lbNav(1);
-    const touchPlaybackToggle = e.target.closest('#lb-touch-playback-toggle');
+    const touchPlaybackToggle = e.target.closest('#lb-touch-playback-toggle, #lb-desktop-playback-toggle');
     if (touchPlaybackToggle) {
       e.preventDefault();
       e.stopPropagation();
@@ -15279,6 +16072,7 @@ async function openLightbox(photos, index, options = {}) {
   lbRender();
 }
 function closeLightbox() {
+  window.EchoGalleryDanmaku?.stop();
   if (typeof stopEchoFrame === 'function') stopEchoFrame();
   stopSlideshow();
   const lightbox = $('#lightbox');
@@ -15295,6 +16089,7 @@ function closeLightbox() {
   state.lightboxLastPointerType = '';
   $('#lb-video-progress')?.classList.remove('active', 'scrubbing', 'touching');
   $('#lb-touch-playback-toggle')?.classList.remove('active');
+  $('#lb-desktop-playback-toggle')?.classList.remove('active');
   state.lightboxPlaybackToken += 1;
   resetLightboxPrefetchCache();
   setLightboxMediaLoading(false);
@@ -15509,6 +16304,7 @@ async function lbGoTo(index, options = {}) {
   lbRender();
 }
 function lbRender() {
+  window.EchoGalleryDanmaku?.stop();
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
   state.videoSurfaceSwipe = null;
@@ -15533,6 +16329,7 @@ function lbRender() {
     video.setAttribute('x-webkit-airplay', 'deny');
     video.playsInline = true;
     video.preload = 'auto';
+    window.EchoGalleryDanmaku?.start(video, p.id, fetchWithPageSession);
     video.onloadeddata = () => {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
@@ -15700,11 +16497,11 @@ function lbRender() {
   updateSlideshowControls();
   if (state.slideshowPlaying) scheduleSlideshowStep();
   if (!state.slideshowPlaying && (state.experimentalPrefetchNeighbors || isTouchLikeDevice())) prefetchAdjacentMedia();
-  const items = buildLightboxInfoItems(p);
-  $('#lb-info').innerHTML = items.map(([icon, k, v]) => {
-    const value = addPanguSpacing(v);
-    return `<div class="lb-info-item" title="${escapeHTML(`${k}: ${value}`)}" aria-label="${escapeHTML(`${k}: ${value}`)}"><span class="lb-info-key">${icon}</span><span class="lb-info-value">${escapeHTML(value)}</span></div>`;
-  }).join('');
+  renderLightboxInfo(p);
+  if (isVideoMedia(p) && !isRootDebugMedia(p)) {
+    void ensureDanmakuMatches().then(syncDanmakuLightboxInfo).catch(() => {});
+    syncDanmakuLightboxInfo();
+  }
 }
 
 async function toggleCurrentLightboxFavorite() {
