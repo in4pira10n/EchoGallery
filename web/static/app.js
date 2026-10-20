@@ -12127,9 +12127,13 @@ function buildLightboxInfoItems(photo) {
 }
 
 function safeDanmakuAvatarURL(value) {
-  if (!String(value || '').trim()) return '';
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const normalized = raw.startsWith('//')
+    ? `https:${raw}`
+    : raw.replace(/^http:\/\//i, 'https://');
   try {
-    const url = new URL(String(value || ''), window.location.href);
+    const url = new URL(normalized, window.location.href);
     return url.protocol === 'https:' ? url.href : '';
   } catch (_) {
     return '';
@@ -12138,7 +12142,7 @@ function safeDanmakuAvatarURL(value) {
 
 function lightboxInfoIconMarkup(icon) {
   if (!icon || typeof icon !== 'object' || !icon.avatar) return icon || '';
-  return `<img class="lb-info-avatar" src="${escapeHTML(icon.avatar)}" alt="" referrerpolicy="no-referrer" loading="lazy"><span class="lb-info-avatar-fallback" hidden>${icons.albumCardUser || ''}</span>`;
+  return `<img class="lb-info-avatar" src="${escapeHTML(icon.avatar)}" alt="" referrerpolicy="no-referrer" loading="eager"><span class="lb-info-avatar-fallback" hidden>${icons.albumCardUser || ''}</span>`;
 }
 
 function renderLightboxInfo(photo) {
