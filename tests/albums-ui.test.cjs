@@ -15,6 +15,27 @@ function loadFunctions(context, names) {
   }
 }
 
+test('view in album returns through parent albums and never to the originating tab', () => {
+  const root = { id: 1 }, child = { id: 2 };
+  for (const sourceView of ['timeline', 'random-album', 'favorites']) {
+    const calls = [];
+    const context = vm.createContext({
+      state: { view: sourceView },
+      saveViewScroll() {}, copyText: key => key,
+      showTimelineLocateBlocking() {}, closeLightbox() {},
+      parentAlbumFor: album => album.id === child.id ? root : null,
+      openAlbumDetail: album => { context.state.currentAlbum = album; context.state.view = 'album-detail'; calls.push(album.id); },
+      switchView: view => calls.push(view),
+    });
+    loadFunctions(context, ['openInAlbum', 'returnToAlbumParent']);
+    context.openInAlbum(child, 42);
+    assert.equal(context.state.pendingAlbumPhotoID, 42);
+    context.returnToAlbumParent();
+    context.returnToAlbumParent();
+    assert.deepEqual(calls, [2, 1, 'albums']);
+  }
+});
+
 test('root album listing keeps user albums and folders side by side and filters each kind', () => {
   const context = vm.createContext({
     copyText: key => ({

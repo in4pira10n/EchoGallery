@@ -1500,6 +1500,9 @@ html.fixed-touch-grid .photo-grid {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* Keep accessible alt text without painting it while the source is unavailable. */
+  color: transparent;
+  font-size: 0;
   opacity: 1;
   transform: scale(1);
   transition: none;
@@ -1525,7 +1528,12 @@ html.fixed-touch-grid .photo-grid {
 }
 
 .photo-thumb.thumb-load-failed img {
-  opacity: .18;
+  opacity: 0;
+}
+
+.photo-thumb img:not([src]),
+.photo-thumb img[src=""] {
+  visibility: hidden;
 }
 
 .photo-thumb .media-duration-badge {
@@ -2736,7 +2744,7 @@ body.selection-mode .date-select-all {
 }
 
 .lightbox-swipe-strip.animating .lightbox-swipe-preview {
-  transition: transform .38s cubic-bezier(.18, .86, .22, 1);
+  transition: transform var(--lightbox-swipe-duration, .38s) cubic-bezier(.18, .86, .22, 1);
 }
 
 .lightbox-swipe-preview.is-empty {
@@ -2760,7 +2768,7 @@ body.selection-mode .date-select-all {
 
 .lightbox-swipe-strip.animating .lightbox-swipe-divider {
   transition:
-    transform .38s cubic-bezier(.18, .86, .22, 1),
+    transform var(--lightbox-swipe-duration, .38s) cubic-bezier(.18, .86, .22, 1),
     opacity .16s ease;
 }
 
