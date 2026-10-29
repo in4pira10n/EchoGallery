@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -472,6 +473,40 @@ func TestListPhotos_Pagination(t *testing.T) {
 	}
 	if page2.HasMore {
 		t.Error("不应该有更多")
+	}
+}
+
+func TestListPhotosForMetadataBackfill_PaginatesByStableID(t *testing.T) {
+	db := newTestDB(t)
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		photo := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		photo.UUID = fmt.Sprintf("metadata-backfill-%d", i)
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := db.ListPhotosForMetadataBackfillContext(context.Background(), 1, 0, 3, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Total != 5 || !first.HasMore || len(first.Photos) != 3 {
+		t.Fatalf("unexpected first metadata page: %+v", first)
+	}
+	if first.Photos[0].ID >= first.Photos[1].ID || first.Photos[1].ID >= first.Photos[2].ID {
+		t.Fatalf("metadata pages must use ascending stable IDs: %+v", first.Photos)
+	}
+	if err := db.UpdatePhotoCapturedMetadata(first.Photos[0].ID, 1, base.Add(100*time.Hour), nil, 800, 600, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := db.ListPhotosForMetadataBackfillContext(context.Background(), 1, first.Photos[2].ID, 3, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Photos) != 2 || second.HasMore || second.Photos[0].ID <= first.Photos[2].ID {
+		t.Fatalf("changing capture time must not move media across the backfill cursor: %+v", second)
 	}
 }
 

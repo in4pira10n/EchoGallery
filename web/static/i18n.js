@@ -7,6 +7,9 @@
   var activeCatalog = {};
   var availableLocales = [];
   var availableLocalesPromise = null;
+  var script = root.document && root.document.currentScript;
+  var versionMatch = script && String(script.src || '').match(/[?&]v=([^&#]+)/);
+  var assetVersionQuery = versionMatch ? '?v=' + versionMatch[1] : '';
 
   function normalizeLocale(value) {
     var locale = String(value || '').trim().replace(/_/g, '-');
@@ -33,7 +36,7 @@
 
   function loadAvailableLocales() {
     if (availableLocalesPromise) return availableLocalesPromise;
-    availableLocalesPromise = root.fetch('/static/strings/locales.json', { cache: 'no-cache' })
+    availableLocalesPromise = root.fetch('/static/strings/locales.json' + assetVersionQuery, { cache: 'no-cache' })
       .then(function (response) {
         if (!response || !response.ok) return null;
         return response.json();
@@ -88,7 +91,7 @@
   }
 
   function fetchCatalog(locale) {
-    return root.fetch('/static/strings/' + encodeURIComponent(locale) + '.json', { cache: 'no-cache' })
+    return root.fetch('/static/strings/' + encodeURIComponent(locale) + '.json' + assetVersionQuery, { cache: 'no-cache' })
       .then(function (response) {
         if (!response || !response.ok) return null;
         return response.json();

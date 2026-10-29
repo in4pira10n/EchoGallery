@@ -29,6 +29,7 @@ EchoGallery 是一个本地 Web 相册管理应用，适合在自己的电脑或
 - 视频缩略图刷新
 
 > 视频封面生成依赖 `ffmpeg`。如果未安装 `ffmpeg`，视频文件仍可管理，但可能无法生成视频缩略图。
+> HEIC/HEIF 需要安装包含 HEIF/HEVC 解码支持的 `ffmpeg` 和 `ffprobe`。构建缩略图时还会预生成原分辨率 JPEG 缓存，灯箱可直接查看；原始文件保持不变。
 
 ## 快捷键
 
@@ -65,7 +66,7 @@ EchoGallery 是一个本地 Web 相册管理应用，适合在自己的电脑或
 
 ## 快速开始
 
-_如果需要生成视频缩略图，请先安装 `ffmpeg`。_
+_导入 HEIC/HEIF 或构建媒体缩略图前，请安装包含 `ffprobe` 及 HEIF/HEVC 解码支持的 `ffmpeg`。_
 
 1. 下载 Release
    - 从 GitHub Release 页面下载对应平台的压缩包或可执行文件。
@@ -90,7 +91,7 @@ _如果需要生成视频缩略图，请先安装 `ffmpeg`。_
 ### 环境要求
 
 - Go 1.26+
-- ffmpeg
+- `ffmpeg` 和 `ffprobe`（HEIC/HEIF 预览需要包含 HEIF/HEVC 解码支持）
 
 ### 构建
 

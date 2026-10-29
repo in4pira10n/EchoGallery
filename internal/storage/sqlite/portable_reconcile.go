@@ -28,8 +28,8 @@ func (s *DB) reconcilePortableMedia() error {
             WHERE cover_photo_id IN (SELECT old_id FROM portable_duplicates)`,
 		`UPDATE share_links SET target_id=(SELECT keep_id FROM portable_duplicates WHERE old_id=target_id)
             WHERE type='photo' AND target_id IN (SELECT old_id FROM portable_duplicates)`,
-		`INSERT OR IGNORE INTO video_playback_preferences(photo_id,volume,muted,resume_time,bookmarks_json,updated_at)
-            SELECT d.keep_id,p.volume,p.muted,p.resume_time,p.bookmarks_json,p.updated_at
+		`INSERT OR IGNORE INTO video_playback_preferences(photo_id,volume,muted,resume_time,bookmarks_json,audio_track_json,updated_at)
+            SELECT d.keep_id,p.volume,p.muted,p.resume_time,p.bookmarks_json,p.audio_track_json,p.updated_at
             FROM video_playback_preferences p JOIN portable_duplicates d ON p.photo_id=d.old_id ORDER BY p.updated_at DESC`,
 		`DELETE FROM photos WHERE id IN (SELECT old_id FROM portable_duplicates)`,
 		`DROP TABLE portable_duplicates`,

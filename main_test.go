@@ -174,9 +174,148 @@ func TestBatchThumbnailStartRejectsPausedMigration(t *testing.T) {
 func TestBatchScanStartRejectsPausedMigration(t *testing.T) {
 	cfg := &config.Config{StoragePath: t.TempDir(), AppDataDir: t.TempDir()}
 	manager := newLibraryBatchBuildManager(nil, nil, "")
-	_, err := manager.Start(cfg, &config.Profile{}, "alice", 1, false, true, true, false, false)
+	_, err := manager.Start(cfg, &config.Profile{}, "alice", 1, false, true, false, true, false, false)
 	if err == nil || manager.task != nil {
 		t.Fatalf("扫描任务也应拒绝迁移参数: %v", err)
+	}
+}
+
+func TestBatchScanProgressReportsDiscoveryAndNamedStages(t *testing.T) {
+	library := config.Library{ID: "lib_a", Name: "Library A", Path: t.TempDir()}
+	task := newLibraryBatchBuildTask([]config.Library{library}, false, false, nil)
+	if got := task.snapshot().CurrentPhase; got != "preparing" {
+		t.Fatalf("new tasks should report preparation, got %q", got)
+	}
+	manager := newLibraryBatchBuildManager(nil, nil, "")
+	manager.beginLibrary(task, 0, library)
+	if got := task.snapshot(); got.CurrentPhase != "checking" || got.CurrentLibraryName != library.Name {
+		t.Fatalf("snapshot checks must identify the current library: %+v", got)
+	}
+	for _, step := range []struct {
+		phase       string
+		done, total int
+		wantPhase   string
+		wantPercent float64
+	}{
+		{"scan", 32, 0, "discovering", 0},
+		{"scan", 4, 10, "scan", 40},
+		{"exif", 1, 4, "exif", 25},
+	} {
+		setBatchScanLibraryProgress(task, 0, library, step.phase, step.done, step.total)
+		got := task.snapshot()
+		if got.Status != "running" || got.CurrentPhase != step.wantPhase || got.CurrentPercent != step.wantPercent ||
+			got.CurrentDone != step.done || got.CurrentTotal != step.total || got.CurrentLibraryName != library.Name ||
+			got.Libraries[0].Status != "scanning" || !strings.Contains(got.Message, library.Name) {
+			t.Fatalf("incorrect progress for phase %q: %+v", step.wantPhase, got)
+		}
+		if phase := batchPhaseLabel(got.CurrentPhase); phase == "preparing" || phase == "idle" {
+			t.Fatalf("CLI lost phase %q: %q", got.CurrentPhase, phase)
+		}
+	}
+	thumbnails := newLibraryBatchThumbnailBuildManager(nil, nil, "")
+	thumbnails.beginLibrary(task, 0, library)
+	if got := task.snapshot(); got.CurrentPhase != "thumbnails" || got.CurrentLibraryName != library.Name || got.Libraries[0].Status != "building" {
+		t.Fatalf("thumbnail tasks must identify the current library: %+v", got)
+	}
+}
+
+func TestBatchScanRechecksCompletedInactiveLibrary(t *testing.T) {
+	base := t.TempDir()
+	libraries := []config.Library{
+		{ID: "lib_a", Name: "Library A", Path: filepath.Join(base, "a"), OwnerUsername: "admin"},
+		{ID: "lib_b", Name: "Library B", Path: filepath.Join(base, "b"), OwnerUsername: "admin"},
+	}
+	cfg := &config.Config{
+		AppDataDir: filepath.Join(base, "data"), ThumbnailDir: filepath.Join(base, "thumbnails"), ThumbnailSize: 64,
+		Libraries: libraries, ActiveProfile: "admin", ActiveLibraryID: "lib_b", StoragePath: libraries[1].Path,
+		Users: []config.User{{Username: "admin", Role: config.UserRoleAdmin}},
+	}
+	profile := &config.Profile{ActiveLibraryID: "lib_b", StoragePath: libraries[1].Path}
+	var media bytes.Buffer
+	if err := jpeg.Encode(&media, image.NewRGBA(image.Rect(0, 0, 16, 16)), nil); err != nil {
+		t.Fatal(err)
+	}
+	writeMedia := func(rel string) {
+		t.Helper()
+		path := filepath.Join(libraries[0].Path, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, media.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager := newLibraryBatchBuildManager(nil, nil, "")
+	completed := make(chan struct{}, 1)
+	manager.afterScanComplete = func(*config.Config, string, int64, bool, bool, bool, bool, bool) error {
+		completed <- struct{}{}
+		return nil
+	}
+	run := func(completeEXIF bool) api.LibraryBatchBuildStatus {
+		t.Helper()
+		if _, err := manager.Start(cfg, profile, "admin", 1, false, true, completeEXIF, false, false, false); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-completed:
+		case <-time.After(15 * time.Second):
+			_, _ = manager.Cancel(cfg, "admin")
+			t.Fatalf("batch scan did not reach the thumbnail stage: %+v", manager.Status(cfg, profile, "admin"))
+		}
+		status := manager.Status(cfg, profile, "admin")
+		if status.Status != "completed" || status.CompletedLibraries != 2 || status.FailedLibraries != 0 {
+			t.Fatalf("unexpected batch result: %+v", status)
+		}
+		if cfg.ActiveLibraryID != "lib_b" {
+			t.Fatalf("batch scan changed the active library: %q", cfg.ActiveLibraryID)
+		}
+		return status
+	}
+	writeMedia("old.jpg")
+	run(false)
+	writeMedia("copied/nested/new.jpg")
+	if err := os.Remove(filepath.Join(libraries[0].Path, "old.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	status := run(false)
+	if row := status.Libraries[0]; row.Imported != 1 || row.Pruned != 1 || row.MessageKey != "" {
+		t.Fatalf("inactive library changes were skipped or hidden by a stale message: %+v", row)
+	}
+	if status.MessageKey != "" || status.Libraries[1].MessageKey != "batchWorkflow.scanSkipped" {
+		t.Fatalf("batch result must distinguish changed and unchanged libraries: %+v", status)
+	}
+	mediaDir, trashDir, thumbDir, err := prepareLibraryBatchPaths(cfg, libraries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, svc, err := openBatchLibraryService(cfg, libraries[0], mediaDir, trashDir, thumbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.Close()
+	userID := svc.LibraryUserID(1)
+	if photo, err := repo.GetPhotoBySourceRelPath("copied/nested/new.jpg", userID); err != nil || photo == nil {
+		t.Fatalf("new media must be indexed before the thumbnail stage: photo=%+v err=%v", photo, err)
+	}
+	page, err := svc.GetTimeline(storage.ListPhotosParams{UserID: userID, Limit: 10})
+	if err != nil || len(page.Photos) != 1 || page.Photos[0].SourceRelPath != "copied/nested/new.jpg" {
+		t.Fatalf("timeline must show the new media and hide the removed media: page=%+v err=%v", page, err)
+	}
+	snapshot, err := repo.GetLibraryScanSnapshot()
+	if err != nil || snapshot == nil || snapshot.Version != 2 {
+		t.Fatalf("snapshot version must remain 2: snapshot=%+v err=%v", snapshot, err)
+	}
+	status = run(true)
+	if status.MessageKey != "batchWorkflow.scanSkippedExifCompleted" {
+		t.Fatalf("unchanged libraries should skip imports but still run the selected EXIF stage: %+v", status)
+	}
+	for _, row := range status.Libraries {
+		if row.Imported != 0 || row.Pruned != 0 {
+			t.Fatalf("unchanged library repeated stale work or counts: %+v", row)
+		}
+	}
+	if row := status.Libraries[0]; row.MessageKey != "batchWorkflow.scanSkippedExifCompleted" || row.EXIFScanned != 2 {
+		t.Fatalf("an unchanged library with the EXIF option enabled must still report its metadata pass: %+v", row)
 	}
 }
 

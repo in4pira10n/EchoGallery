@@ -44,7 +44,7 @@ type Repository interface {
 	SaveLibraryVideoVolume(volume float64) error
 
 	// UpsertVideoPlaybackPreference 保存单个视频的播放偏好。
-	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []VideoPlaybackBookmark) (*VideoPlaybackPreference, error)
+	UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []VideoPlaybackBookmark, audioTrack ...*VideoAudioTrackPreference) (*VideoPlaybackPreference, error)
 
 	// ListPhotos 查询用户图片（时间线，游标分页，不包含已删除）
 	ListPhotos(params ListPhotosParams) (*PhotoPage, error)

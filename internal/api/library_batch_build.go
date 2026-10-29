@@ -14,11 +14,16 @@ type LibraryBatchBuildLibraryStatus struct {
 	Path           string   `json:"path"`
 	Status         string   `json:"status"`
 	Message        string   `json:"message"`
+	MessageKey     string   `json:"message_key,omitempty"`
 	Imported       int      `json:"imported"`
 	Skipped        int      `json:"skipped"`
 	Pruned         int      `json:"pruned"`
 	Generated      int      `json:"generated"`
 	Failed         int      `json:"failed"`
+	EXIFScanned    int      `json:"exif_scanned,omitempty"`
+	EXIFUpdated    int      `json:"exif_updated,omitempty"`
+	EXIFSkipped    int      `json:"exif_skipped,omitempty"`
+	EXIFFailed     int      `json:"exif_failed,omitempty"`
 	Matched        int      `json:"matched,omitempty"`
 	Resumed        int      `json:"resumed,omitempty"`
 	Existing       int      `json:"existing,omitempty"`
@@ -29,6 +34,7 @@ type LibraryBatchBuildLibraryStatus struct {
 type LibraryBatchBuildStatus struct {
 	Status               string                           `json:"status"`
 	Message              string                           `json:"message"`
+	MessageKey           string                           `json:"message_key,omitempty"`
 	SelectedLibraryIDs   []string                         `json:"selected_library_ids,omitempty"`
 	SelectedPaths        []string                         `json:"selected_paths,omitempty"`
 	SelectionConfigured  bool                             `json:"selection_configured,omitempty"`
@@ -59,7 +65,7 @@ type LibraryBatchBuildStatus struct {
 
 type LibraryBatchBuildHooks struct {
 	Status               func(cfg *config.Config, profile *config.Profile, username string) LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (LibraryBatchBuildStatus, error)
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
 	SetSelection         func(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (LibraryBatchBuildStatus, error)
@@ -72,6 +78,7 @@ type libraryBatchBuildExitRequest struct {
 type libraryBatchBuildStartRequest struct {
 	Aggressive               bool `json:"aggressive"`
 	BuildThumbnailsAfterScan bool `json:"build_thumbnails_after_scan"`
+	CompleteEXIF             bool `json:"complete_exif"`
 	MoveLegacyThumbnails     bool `json:"move_legacy_thumbnails"`
 	CleanThumbnailFiles      bool `json:"clean_thumbnail_files"`
 	BuildPlaybackCaches      bool `json:"build_playback_caches"`
@@ -92,7 +99,11 @@ func handleGetLibraryBatchBuildStatus(cfg *config.Config, hooks LibraryBatchBuil
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, hooks.Status(cfg, profile, currentUsername(c)))
+		status := hooks.Status(cfg, profile, currentUsername(c))
+		if status.Status == "completed" {
+			refreshCompletedLibraryMetrics(cfg, status.Libraries)
+		}
+		c.JSON(http.StatusOK, status)
 	}
 }
 
@@ -122,7 +133,7 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.BuildThumbnailsAfterScan, req.MoveLegacyThumbnails, req.CleanThumbnailFiles, req.BuildPlaybackCaches)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.BuildThumbnailsAfterScan, req.CompleteEXIF, req.MoveLegacyThumbnails, req.CleanThumbnailFiles, req.BuildPlaybackCaches)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

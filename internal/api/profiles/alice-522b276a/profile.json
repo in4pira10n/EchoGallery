@@ -41,10 +41,20 @@
     "lightbox_ui_idle_seconds": 0,
     "throttled_video_seek": false,
     "video_seek_throttle_ms": 240,
-    "video_volume_swipe_sensitivity": 100,
     "video_volume_min_percent": 0,
     "video_volume_max_percent": 100,
+    "danmaku": {
+      "font_step": 1,
+      "font_weight_step": 2,
+      "opacity_step": 2,
+      "speed_step": 2,
+      "block_list": ""
+    },
     "low_resource_mode": false,
-    "player_keymap": ""
+    "player_keymap": "",
+    "subtitles_enabled": true,
+    "subtitle_font_size": 100,
+    "subtitle_color": "#ffffff",
+    "subtitle_background_opacity": 72
   }
 }

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -295,7 +296,16 @@ func (s *DB) UpdatePhotoMediaPath(id int64, userID int64, sourceRelPath string, 
 
 // UpdatePhotoCapturedMetadata 更新拍摄时间与基础媒体元数据。
 func (s *DB) UpdatePhotoCapturedMetadata(id int64, userID int64, takenAt time.Time, exif *storage.PhotoEXIF, width int, height int, durationMS int64) error {
-	result, err := s.db.Exec(`
+	return s.UpdatePhotoCapturedMetadataContext(context.Background(), id, userID, takenAt, exif, width, height, durationMS)
+}
+
+// UpdatePhotoCapturedMetadataContext updates captured metadata and allows long-running
+// metadata backfills to stop waiting on a busy SQLite database after cancellation.
+func (s *DB) UpdatePhotoCapturedMetadataContext(ctx context.Context, id int64, userID int64, takenAt time.Time, exif *storage.PhotoEXIF, width int, height int, durationMS int64) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE photos
 		SET taken_at = ?, exif_json = ?, width = ?, height = ?, duration_ms = ?
 		WHERE id = ? AND uploaded_by = ?`,
@@ -469,6 +479,57 @@ func escapeLikePattern(value string) string {
 
 // ListPhotos 查询用户图片（时间线，游标分页）
 func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
+	return s.listPhotos(context.Background(), params, true)
+}
+
+// ListPhotosForMetadataBackfillContext loads the fields needed to repair media
+// metadata, without the extra playback-preference lookups used by the timeline.
+func (s *DB) ListPhotosForMetadataBackfillContext(ctx context.Context, userID, afterID int64, limit int, includeTotal bool) (*storage.PhotoPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	page := &storage.PhotoPage{Photos: make([]*storage.Photo, 0, limit)}
+	if includeTotal {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM photos WHERE uploaded_by = ? AND deleted_at IS NULL`, userID).Scan(&page.Total); err != nil {
+			return nil, fmt.Errorf("统计待修正媒体失败: %w", err)
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
+		       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
+		       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
+		FROM photos
+		WHERE uploaded_by = ? AND deleted_at IS NULL AND id > ?
+		ORDER BY id ASC
+		LIMIT ?`, userID, afterID, limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("查询待修正媒体失败: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		photo, err := scanPhoto(rows)
+		if err != nil {
+			return nil, err
+		}
+		page.Photos = append(page.Photos, photo)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(page.Photos) > limit {
+		page.HasMore = true
+		page.Photos = page.Photos[:limit]
+	}
+	return page, nil
+}
+
+func (s *DB) listPhotos(ctx context.Context, params storage.ListPhotosParams, attachPlayback bool) (*storage.PhotoPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 30
@@ -485,7 +546,7 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 
 	var total int
 	if !params.SkipTotal {
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM photos WHERE "+where, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("统计图片失败: %w", err)
 		}
 	}
@@ -497,7 +558,7 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 		if params.Cursor == "" {
 			queryArgs := append([]interface{}{}, args...)
 			queryArgs = append(queryArgs, limit+1)
-			rows, err = s.db.Query(`
+			rows, err = s.db.QueryContext(ctx, `
 				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 				       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
 				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
@@ -512,7 +573,7 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 			}
 			queryArgs := append([]interface{}{}, args...)
 			queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
-			rows, err = s.db.Query(`
+			rows, err = s.db.QueryContext(ctx, `
 				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 				       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
 				       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
@@ -525,7 +586,7 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	} else if params.Cursor == "" {
 		queryArgs := append([]interface{}{}, args...)
 		queryArgs = append(queryArgs, limit+1)
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
@@ -540,7 +601,7 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 		}
 		queryArgs := append([]interface{}{}, args...)
 		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
-		rows, err = s.db.Query(`
+		rows, err = s.db.QueryContext(ctx, `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
 			       taken_at, uploaded_at, uploaded_by, deleted_at, deleted_by
@@ -561,8 +622,10 @@ func (s *DB) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPage, er
 	if err != nil {
 		return nil, err
 	}
-	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
-		return nil, err
+	if attachPlayback {
+		if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
+			return nil, err
+		}
 	}
 	page.Total = total
 	return page, nil

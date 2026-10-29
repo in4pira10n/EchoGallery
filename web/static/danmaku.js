@@ -17,10 +17,18 @@
     refresh();
   }
 
-  function toggle() {
-    enabled = !enabled;
+  function isEnabled() {
+    return enabled;
+  }
+
+  function setEnabled(value) {
+    enabled = Boolean(value);
     refresh();
     return enabled;
+  }
+
+  function toggle() {
+    return setEnabled(!enabled);
   }
 
   function stop() {
@@ -188,5 +196,5 @@
     }
   }
 
-  window.EchoGalleryDanmaku = { start, stop, toggle, configure };
+  window.EchoGalleryDanmaku = { start, stop, toggle, setEnabled, isEnabled, configure };
 }());

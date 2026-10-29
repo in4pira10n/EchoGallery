@@ -182,6 +182,7 @@ var stableAPIMessageKeys = map[string]string{
 	"标准缩略图生成失败":          "api.status.thumbnailBuildFailed",
 	"正在取消缩略图生成…":         "api.status.thumbnailBuildCancelling",
 	"正在准备修正 EXIF 信息…":    "api.status.exifBackfillPreparing",
+	"正在读取媒体列表…":          "api.status.exifBackfillReadingMediaList",
 	"正在扫描媒体…":            "api.status.exifBackfillScanning",
 	"正在取消 EXIF 信息修正…":    "api.status.exifBackfillCancelling",
 	"已取消 EXIF 信息修正":      "api.status.exifBackfillCancelled",
@@ -229,6 +230,12 @@ func dynamicAPIMessage(value string) (string, map[string]any) {
 			case prefix == "正在修正 EXIF 信息":
 				return "api.status.exifBackfillProgress", map[string]any{"count": count}
 			}
+		}
+	}
+	if prefix, rest, ok := strings.Cut(value, "… 已处理 "); ok && prefix == "正在修正 EXIF 信息" {
+		count, err := strconv.Atoi(strings.TrimSuffix(rest, " 项"))
+		if err == nil {
+			return "api.status.exifBackfillProgress", map[string]any{"count": count}
 		}
 	}
 	if strings.HasPrefix(value, "正在准备 ") && strings.HasSuffix(value, " 的播放缓存") {

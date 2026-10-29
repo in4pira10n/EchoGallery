@@ -79,10 +79,14 @@ func (p *libraryRuntimeProvider) Close() error {
 	p.initMu.Lock()
 	defer p.initMu.Unlock()
 	p.mu.Lock()
-	repos := p.repos
-	services := p.services
-	p.repos = make(map[string]*sqlite.DB)
-	p.services = make(map[string]videoRegistrar)
+	repos := make(map[string]*sqlite.DB, len(p.repos))
+	services := make(map[string]videoRegistrar, len(p.services))
+	for id, repo := range p.repos {
+		repos[id] = repo
+	}
+	for id, registrar := range p.services {
+		services[id] = registrar
+	}
 	danmakuManagers := p.danmaku
 	p.danmaku = make(map[string]*danmaku.Manager)
 	p.sessions = make(map[string]string)
@@ -96,10 +100,17 @@ func (p *libraryRuntimeProvider) Close() error {
 	for _, manager := range danmakuManagers {
 		manager.Stop()
 	}
-	for _, repo := range repos {
-		if err := repo.Close(); err != nil && firstErr == nil {
-			firstErr = err
+	for id, repo := range repos {
+		if err := repo.Close(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue // Retain failed snapshots so shutdown/restart can retry safely.
 		}
+		p.mu.Lock()
+		delete(p.repos, id)
+		delete(p.services, id)
+		p.mu.Unlock()
 	}
 	return firstErr
 }
@@ -125,6 +136,7 @@ func (p *libraryRuntimeProvider) SyncBeforeRelease(locks *sessionlock.Store, ses
 		p.mu.Unlock()
 		return nil
 	}
+	previousLibrary := p.sessions[sessionID]
 	repos := make(map[string]*sqlite.DB, len(p.repos))
 	for id, repo := range p.repos {
 		repos[id] = repo
@@ -138,41 +150,43 @@ func (p *libraryRuntimeProvider) SyncBeforeRelease(locks *sessionlock.Store, ses
 		if err != nil {
 			return err
 		}
-		for _, lock := range active {
-			if lock.SessionID == sessionID && lock.Scope == "browse" {
-				// Another reader or a batch build still owns this runtime.
-				shared := false
-				for _, owner := range active {
-					if owner.SessionID != sessionID || owner.Scope != "browse" {
-						shared = true
-					}
-				}
-				if !shared {
-					p.mu.Lock()
-					registrar := p.services[id]
-					p.mu.Unlock()
-					if stopper, ok := registrar.(interface{ StopBackground() }); ok {
-						stopper.StopBackground()
-					}
-				}
-				if err := repo.SyncPortable(); err != nil {
-					return fmt.Errorf("sync library %s before release: %w", id, err)
-				}
-				if !shared {
-					if err := repo.Close(); err != nil {
-						return fmt.Errorf("close library %s: %w", id, err)
-					}
-					p.mu.Lock()
-					if manager := p.danmaku[id]; manager != nil {
-						manager.Stop()
-						delete(p.danmaku, id)
-					}
-					delete(p.repos, id)
-					delete(p.services, id)
-					p.mu.Unlock()
-				}
-				break
+		// This also releases an unused bootstrap runtime, or a runtime whose
+		// last browse lease expired before its page could send a release.
+		owned := id == previousLibrary || len(active) == 0
+		shared := false
+		for _, owner := range active {
+			if owner.SessionID == sessionID && owner.Scope == "browse" {
+				owned = true
+			} else {
+				shared = true
 			}
+		}
+		if !owned {
+			continue
+		}
+		if !shared {
+			p.mu.Lock()
+			registrar := p.services[id]
+			p.mu.Unlock()
+			if stopper, ok := registrar.(interface{ StopBackground() }); ok {
+				stopper.StopBackground()
+			}
+		}
+		if err := repo.SyncPortable(); err != nil {
+			return fmt.Errorf("sync library %s before release: %w", id, err)
+		}
+		if !shared {
+			if err := repo.Close(); err != nil {
+				return fmt.Errorf("close library %s: %w", id, err)
+			}
+			p.mu.Lock()
+			if manager := p.danmaku[id]; manager != nil {
+				manager.Stop()
+				delete(p.danmaku, id)
+			}
+			delete(p.repos, id)
+			delete(p.services, id)
+			p.mu.Unlock()
 		}
 	}
 	return nil
@@ -196,6 +210,20 @@ func (p *libraryRuntimeProvider) rememberSession(sessionID, libraryID string) {
 		p.sessions = make(map[string]string)
 	}
 	p.sessions[sessionID] = libraryID
+}
+
+// enterSessionLibrary records the library currently opened by a page session
+// and reports whether this is a new library entry (or a switch).
+func (p *libraryRuntimeProvider) enterSessionLibrary(sessionID, libraryID string) bool {
+	if p == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	libraryID = strings.TrimSpace(libraryID)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	previous := strings.TrimSpace(p.sessions[sessionID])
+	p.sessions[sessionID] = libraryID
+	return libraryID != "" && previous != libraryID
 }
 
 func (p *libraryRuntimeProvider) ForLibrary(baseCfg *config.Config, library config.Library) (videoRegistrar, error) {

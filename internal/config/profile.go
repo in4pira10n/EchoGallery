@@ -36,6 +36,7 @@ type BatchTaskLibraryState struct {
 	Path           string   `json:"path"`
 	Status         string   `json:"status"`
 	Message        string   `json:"message"`
+	MessageKey     string   `json:"message_key,omitempty"`
 	Imported       int      `json:"imported"`
 	Skipped        int      `json:"skipped"`
 	Pruned         int      `json:"pruned"`
@@ -54,6 +55,7 @@ type BatchTaskState struct {
 	SelectionConfigured  bool                    `json:"selection_configured,omitempty"`
 	Status               string                  `json:"status"`
 	Message              string                  `json:"message"`
+	MessageKey           string                  `json:"message_key,omitempty"`
 	MoveLegacyThumbnails bool                    `json:"move_legacy_thumbnails,omitempty"`
 	CleanThumbnailFiles  bool                    `json:"clean_thumbnail_files,omitempty"`
 	BuildPlaybackCaches  bool                    `json:"build_playback_caches,omitempty"`
@@ -80,16 +82,19 @@ type BatchTaskState struct {
 
 type profileDefaultsProbe struct {
 	Preferences struct {
-		WarmEnabled                 *bool `json:"warm_enabled"`
-		LowResourceMode             *bool `json:"low_resource_mode"`
-		LightboxUIIdleSeconds       *int  `json:"lightbox_ui_idle_seconds"`
-		ThrottledVideoSeek          *bool `json:"throttled_video_seek"`
-		VideoSeekThrottleMS         *int  `json:"video_seek_throttle_ms"`
-		VideoVolumeSwipeSensitivity *int  `json:"video_volume_swipe_sensitivity"`
-		VideoVolumeMinPercent       *int  `json:"video_volume_min_percent"`
-		VideoVolumeMaxPercent       *int  `json:"video_volume_max_percent"`
-		ExperimentalAutoplayVideo   *bool `json:"experimental_autoplay_video"`
-		VideoAutoplayNext           *bool `json:"video_autoplay_next"`
+		WarmEnabled               *bool   `json:"warm_enabled"`
+		LowResourceMode           *bool   `json:"low_resource_mode"`
+		LightboxUIIdleSeconds     *int    `json:"lightbox_ui_idle_seconds"`
+		ThrottledVideoSeek        *bool   `json:"throttled_video_seek"`
+		VideoSeekThrottleMS       *int    `json:"video_seek_throttle_ms"`
+		VideoVolumeMinPercent     *int    `json:"video_volume_min_percent"`
+		VideoVolumeMaxPercent     *int    `json:"video_volume_max_percent"`
+		ExperimentalAutoplayVideo *bool   `json:"experimental_autoplay_video"`
+		VideoAutoplayNext         *bool   `json:"video_autoplay_next"`
+		SubtitlesEnabled          *bool   `json:"subtitles_enabled"`
+		SubtitleFontSize          *int    `json:"subtitle_font_size"`
+		SubtitleColor             *string `json:"subtitle_color"`
+		SubtitleBackgroundOpacity *int    `json:"subtitle_background_opacity"`
 	} `json:"preferences"`
 }
 
@@ -171,6 +176,10 @@ func NewUserProfileTemplate(cfg *Config) *Profile {
 	profile.Preferences.ExperimentalAutoplayVideo = true
 	profile.Preferences.VideoAutoplayNext = true
 	profile.Preferences.VideoVolumeMaxPercent = 100
+	profile.Preferences.SubtitlesEnabled = true
+	profile.Preferences.SubtitleFontSize = 100
+	profile.Preferences.SubtitleColor = "#ffffff"
+	profile.Preferences.SubtitleBackgroundOpacity = 72
 	return profile
 }
 
@@ -206,14 +215,23 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	if probe.Preferences.VideoSeekThrottleMS == nil {
 		profile.Preferences.VideoSeekThrottleMS = 240
 	}
-	if probe.Preferences.VideoVolumeSwipeSensitivity == nil {
-		profile.Preferences.VideoVolumeSwipeSensitivity = 100
-	}
 	if probe.Preferences.VideoVolumeMinPercent == nil {
 		profile.Preferences.VideoVolumeMinPercent = 0
 	}
 	if probe.Preferences.VideoVolumeMaxPercent == nil {
 		profile.Preferences.VideoVolumeMaxPercent = 100
+	}
+	if probe.Preferences.SubtitlesEnabled == nil {
+		profile.Preferences.SubtitlesEnabled = true
+	}
+	if probe.Preferences.SubtitleFontSize == nil {
+		profile.Preferences.SubtitleFontSize = 100
+	}
+	if probe.Preferences.SubtitleColor == nil {
+		profile.Preferences.SubtitleColor = "#ffffff"
+	}
+	if probe.Preferences.SubtitleBackgroundOpacity == nil {
+		profile.Preferences.SubtitleBackgroundOpacity = 72
 	}
 	if probe.Preferences.ExperimentalAutoplayVideo == nil {
 		profile.Preferences.ExperimentalAutoplayVideo = true
@@ -419,9 +437,6 @@ func (p *Profile) applyDefaults(fallback *Config) {
 	if p.Preferences.VideoSeekThrottleMS < 120 || p.Preferences.VideoSeekThrottleMS > 1000 {
 		p.Preferences.VideoSeekThrottleMS = 240
 	}
-	if p.Preferences.VideoVolumeSwipeSensitivity < 40 || p.Preferences.VideoVolumeSwipeSensitivity > 220 {
-		p.Preferences.VideoVolumeSwipeSensitivity = 100
-	}
 	if p.Preferences.VideoVolumeMinPercent < 0 || p.Preferences.VideoVolumeMinPercent > 100 {
 		p.Preferences.VideoVolumeMinPercent = 0
 	}
@@ -430,6 +445,15 @@ func (p *Profile) applyDefaults(fallback *Config) {
 	}
 	if p.Preferences.VideoVolumeMaxPercent < p.Preferences.VideoVolumeMinPercent {
 		p.Preferences.VideoVolumeMaxPercent = p.Preferences.VideoVolumeMinPercent
+	}
+	if p.Preferences.SubtitleFontSize < 50 || p.Preferences.SubtitleFontSize > 200 {
+		p.Preferences.SubtitleFontSize = 100
+	}
+	if strings.TrimSpace(p.Preferences.SubtitleColor) == "" {
+		p.Preferences.SubtitleColor = "#ffffff"
+	}
+	if p.Preferences.SubtitleBackgroundOpacity < 0 || p.Preferences.SubtitleBackgroundOpacity > 100 {
+		p.Preferences.SubtitleBackgroundOpacity = 72
 	}
 	p.normalizeLibraries()
 	var libraryScope []Library

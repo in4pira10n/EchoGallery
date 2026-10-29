@@ -18,8 +18,9 @@ const STATIC_ASSETS = [
   `/static/pwa-icon.png?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon-512.png?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon-192.png?v=${EG_ASSET_VERSION}`,
-  '/static/strings/zh-CN.json',
-  '/static/strings/locales.json'
+  `/static/strings/zh-CN.json?v=${EG_ASSET_VERSION}`,
+  `/static/strings/en-US.json?v=${EG_ASSET_VERSION}`,
+  `/static/strings/locales.json?v=${EG_ASSET_VERSION}`
 ];
 
 self.addEventListener('install', event => {
@@ -56,7 +57,7 @@ function shouldBypass(request) {
   return false;
 }
 
-function networkFirst(request) {
+function networkFirst(request, fallbackToShell = true) {
   return fetch(request)
     .then(response => {
       const copy = response.clone();
@@ -65,7 +66,11 @@ function networkFirst(request) {
       }
       return response;
     })
-    .catch(() => caches.match(request).then(cached => cached || caches.match('/')));
+    .catch(error => caches.match(request).then(cached => {
+      if (cached) return cached;
+      if (fallbackToShell) return caches.match('/');
+      throw error;
+    }));
 }
 
 function cacheFirst(request) {
@@ -87,6 +92,12 @@ self.addEventListener('fetch', event => {
   const url = new URL(request.url);
   if (request.mode === 'navigate') {
     event.respondWith(cacheStrategy === 'app-shell' ? networkFirst(request) : fetch(request).catch(() => caches.match('/')));
+    return;
+  }
+  // Catalogs use stable URLs, while application scripts are versioned.
+  // Revalidate translations so new menu labels do not read an old catalog.
+  if (url.pathname.startsWith('/static/strings/')) {
+    event.respondWith(networkFirst(request, false));
     return;
   }
   if (url.pathname.startsWith('/pages/') || url.pathname.startsWith('/static/') || url.pathname === '/manifest.webmanifest') {

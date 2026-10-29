@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -46,6 +47,7 @@ type libraryBatchBuildTask struct {
 	persistFn   func(status api.LibraryBatchBuildStatus)
 
 	buildThumbnailsAfterScan bool
+	completeEXIFAfterScan    bool
 	autoThumbnailAggressive  bool
 	autoMoveLegacyThumbnails bool
 	autoCleanThumbnailFiles  bool
@@ -76,7 +78,7 @@ type libraryBatchBuildManager struct {
 	idleMessage       string
 	lockStore         *sessionlock.Store
 	sessionID         string
-	afterScanComplete func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error
+	afterScanComplete func(cfg *config.Config, username string, userID int64, aggressive bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error
 }
 
 type libraryBatchThumbnailBuildManager struct {
@@ -134,6 +136,7 @@ func newLibraryBatchBuildTask(libraries []config.Library, lowResource bool, aggr
 		status: api.LibraryBatchBuildStatus{
 			Status:            "running",
 			Message:           "正在准备批量任务…",
+			CurrentPhase:      "preparing",
 			TotalLibraries:    len(libraries),
 			LowResourceMode:   lowResource,
 			AggressiveMode:    aggressive,
@@ -406,6 +409,14 @@ func batchETA(status api.LibraryBatchBuildStatus, percent float64) int64 {
 
 func batchPhaseLabel(phase string) string {
 	switch strings.TrimSpace(phase) {
+	case "checking":
+		return "checking changes"
+	case "discovering":
+		return "discovering media"
+	case "exif":
+		return "completing EXIF"
+	case "audit":
+		return "checking thumbnails"
 	case "scan":
 		return "scan"
 	case "thumbnails":
@@ -716,6 +727,7 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 			Path:           library.Path,
 			Status:         row.Status,
 			Message:        row.Message,
+			MessageKey:     row.MessageKey,
 			Imported:       row.Imported,
 			Skipped:        row.Skipped,
 			Pruned:         row.Pruned,
@@ -731,6 +743,12 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 			item.Status = "pending"
 			item.Message = "等待处理中"
 		}
+		if state.Status == "completed" && state.FailedLibraries == 0 && (item.Status == "pending" || item.Status == "") {
+			item.Status = "completed"
+			if item.Message == "" {
+				item.Message = "已完成"
+			}
+		}
 		if item.Status == "completed" {
 			completed++
 		}
@@ -742,6 +760,7 @@ func batchTaskStateToAPI(state config.BatchTaskState, libraries []config.Library
 	status := api.LibraryBatchBuildStatus{
 		Status:               state.Status,
 		Message:              state.Message,
+		MessageKey:           state.MessageKey,
 		SelectedLibraryIDs:   selectedLibraryIDsFromLibraries(selected),
 		SelectedPaths:        selectedPathsFromLibraries(selected),
 		SelectionConfigured:  selectionConfigured,
@@ -783,6 +802,7 @@ func batchTaskAPIToState(status api.LibraryBatchBuildStatus) config.BatchTaskSta
 			Path:           row.Path,
 			Status:         row.Status,
 			Message:        row.Message,
+			MessageKey:     row.MessageKey,
 			Imported:       row.Imported,
 			Skipped:        row.Skipped,
 			Pruned:         row.Pruned,
@@ -1002,12 +1022,17 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 	for index := range rows {
 		if rerunCompleted {
 			rows[index].Status = "pending"
+			rows[index].MessageKey = "batchWorkflow.statusPending"
 			rows[index].Message = "等待重新开始"
 			rows[index].Imported = 0
 			rows[index].Skipped = 0
 			rows[index].Pruned = 0
 			rows[index].Generated = 0
 			rows[index].Failed = 0
+			rows[index].EXIFScanned = 0
+			rows[index].EXIFUpdated = 0
+			rows[index].EXIFSkipped = 0
+			rows[index].EXIFFailed = 0
 			rows[index].Matched = 0
 			rows[index].Resumed = 0
 			rows[index].Existing = 0
@@ -1032,6 +1057,10 @@ func prepareBatchTaskRowsForResume(previous []api.LibraryBatchBuildLibraryStatus
 			rows[index].Pruned = 0
 		}
 		rows[index].Failed = 0
+		rows[index].EXIFScanned = 0
+		rows[index].EXIFUpdated = 0
+		rows[index].EXIFSkipped = 0
+		rows[index].EXIFFailed = 0
 	}
 	return rows
 }
@@ -1048,7 +1077,7 @@ func (m *libraryBatchBuildManager) Status(cfg *config.Config, profile *config.Pr
 	return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch scan parameters")
 	}
@@ -1076,6 +1105,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.username = username
 	task.idleMessage = m.idleMessage
 	task.buildThumbnailsAfterScan = buildThumbnailsAfterScan
+	task.completeEXIFAfterScan = completeEXIF
 	task.autoThumbnailAggressive = aggressive
 	task.autoMoveLegacyThumbnails = moveLegacyThumbnails
 	task.autoCleanThumbnailFiles = cleanThumbnailFiles
@@ -1090,7 +1120,10 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
 	task.status.SelectionConfigured = true
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, false)
+	// Each explicit start must revalidate the current filesystem snapshot,
+	// including libraries completed by an earlier or interrupted task.
+	// NeedsLibraryBuild still skips unchanged libraries without reimporting media.
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, false, true)
 	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
 	task.status.TotalLibraries = len(task.status.Libraries)
 	if buildThumbnailsAfterScan {
@@ -1237,8 +1270,17 @@ func (m *libraryBatchThumbnailBuildManager) Start(cfg *config.Config, profile *c
 	task.status.MoveLegacyThumbnails = moveLegacyThumbnails
 	task.status.CleanThumbnailFiles = cleanThumbnailFiles
 	task.status.BuildPlaybackCaches = buildPlaybackCaches
-	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, true)
-	task.status.CompletedLibraries = countBatchStatusWithState(task.status.Libraries, "completed")
+	task.status.Libraries = prepareBatchTaskRowsForResume(selectedStatus.Libraries, libraries, true, false)
+	// Thumbnail availability is determined by the current media records and
+	// thumbnail files. A previous completed row must not suppress a later
+	// scan after the user copies a new folder into the library.
+	for index := range task.status.Libraries {
+		if task.status.Libraries[index].Status == "completed" {
+			task.status.Libraries[index].Status = "pending"
+			task.status.Libraries[index].Message = "等待检查缩略图"
+		}
+	}
+	task.status.CompletedLibraries = 0
 	task.status.TotalLibraries = len(task.status.Libraries)
 	m.task = task
 	cfgSnapshot := *cfg
@@ -1338,14 +1380,14 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		}
 	}
 	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
+	performedScan := false
+	performedEXIF := false
 	for index, library := range libraries {
-		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
-			continue
-		}
 		if ctx.Err() != nil {
 			m.cancelTask(task, index)
 			return
 		}
+		m.beginLibrary(task, index, library)
 		if m.lockStore != nil {
 			if _, err := m.lockStore.Acquire(library, task.username, config.UserRoleAdmin, m.sessionID, "batch_scan"); err != nil {
 				var conflict *sessionlock.ConflictError
@@ -1357,7 +1399,6 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 				continue
 			}
 		}
-		m.beginLibrary(task, index, library)
 		if err := os.MkdirAll(library.Path, 0755); err != nil {
 			if m.lockStore != nil {
 				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
@@ -1381,26 +1422,74 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.failLibrary(task, index, err)
 			continue
 		}
+		needsBuild, checkErr := svc.NeedsLibraryBuild(ctx)
+		if checkErr != nil {
+			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
+			m.failLibrary(task, index, fmt.Errorf("检查资源库快照失败: %w", checkErr))
+			continue
+		}
+		if !needsBuild {
+			var exifResult *service.EXIFBackfillResult
+			if task.completeEXIFAfterScan {
+				performedEXIF = true
+				setBatchScanLibraryProgress(task, index, library, "exif", 0, 0)
+				task.persist(true)
+				libraryUserID := svc.LibraryUserID(batchLibraryOwnerUserID(cfg, library, userID))
+				exifResult, err = svc.BackfillPhotoEXIFContext(ctx, libraryUserID, func(done, total int) {
+					setBatchScanLibraryProgress(task, index, library, "exif", done, total)
+					task.persist(false)
+				})
+				if err != nil {
+					_ = repo.Close()
+					if m.lockStore != nil {
+						_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+					}
+					if ctx.Err() != nil {
+						m.cancelTask(task, index)
+						return
+					}
+					m.failLibrary(task, index, fmt.Errorf("补全资源库 EXIF 失败: %w", err))
+					continue
+				}
+			}
+			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+			}
+			task.mutate(func(status *api.LibraryBatchBuildStatus) {
+				status.CompletedLibraries++
+				status.Libraries[index].Status = "completed"
+				status.Libraries[index].MessageKey = "batchWorkflow.scanSkipped"
+				status.Libraries[index].Message = "资源库未变化，已跳过扫描"
+				status.Libraries[index].Skipped = 1
+				if exifResult != nil {
+					status.Libraries[index].EXIFScanned = exifResult.Scanned
+					status.Libraries[index].EXIFUpdated = exifResult.Updated
+					status.Libraries[index].EXIFSkipped = exifResult.Skipped
+					status.Libraries[index].EXIFFailed = exifResult.Failed
+					status.Libraries[index].MessageKey = "batchWorkflow.scanSkippedExifCompleted"
+					status.Libraries[index].Message = "资源库未变化，已跳过扫描；EXIF 已补全"
+				}
+				status.MessageKey = "batchWorkflow.scanSkipped"
+				status.Message = "资源库未变化，已跳过扫描"
+				if exifResult != nil {
+					status.MessageKey = "batchWorkflow.scanSkippedExifCompleted"
+					status.Message = "资源库未变化，已跳过扫描；EXIF 已补全"
+				}
+			})
+			task.persist(true)
+			continue
+		}
+		performedScan = true
 
 		libraryUserID := svc.LibraryUserID(batchLibraryOwnerUserID(cfg, library, userID))
+		setBatchScanLibraryProgress(task, index, library, "discovering", 0, 0)
+		task.persist(true)
 		summary, err := svc.ImportExistingPhotosContext(ctx, libraryUserID, func(done, total int) {
-			task.mutate(func(status *api.LibraryBatchBuildStatus) {
-				status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
-				status.CurrentLibraryID = library.ID
-				status.CurrentLibraryIndex = index + 1
-				status.CurrentLibraryName = library.Name
-				status.CurrentLibraryPath = library.Path
-				status.CurrentPhase = "scan"
-				status.CurrentDone = done
-				status.CurrentTotal = total
-				if total > 0 {
-					status.CurrentPercent = float64(done) / float64(total) * 100
-				} else {
-					status.CurrentPercent = 0
-				}
-				status.Libraries[index].Status = "scanning"
-				status.Libraries[index].Message = fmt.Sprintf("扫描中 %d / %d", done, total)
-			})
+			setBatchScanLibraryProgress(task, index, library, "scan", done, total)
 			task.persist(false)
 		})
 		if err != nil {
@@ -1414,6 +1503,35 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			}
 			m.failLibrary(task, index, fmt.Errorf("扫描资源库失败: %w", err))
 			continue
+		}
+		if task.completeEXIFAfterScan {
+			setBatchScanLibraryProgress(task, index, library, "exif", 0, 0)
+			task.persist(true)
+			exifResult, exifErr := svc.BackfillPhotoEXIFContext(ctx, libraryUserID, func(done, total int) {
+				setBatchScanLibraryProgress(task, index, library, "exif", done, total)
+				task.persist(false)
+			})
+			if exifErr != nil {
+				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+				}
+				if ctx.Err() != nil {
+					m.cancelTask(task, index)
+					return
+				}
+				m.failLibrary(task, index, fmt.Errorf("补全资源库 EXIF 失败: %w", exifErr))
+				continue
+			}
+			performedEXIF = true
+			if exifResult != nil {
+				task.mutate(func(status *api.LibraryBatchBuildStatus) {
+					status.Libraries[index].EXIFScanned = exifResult.Scanned
+					status.Libraries[index].EXIFUpdated = exifResult.Updated
+					status.Libraries[index].EXIFSkipped = exifResult.Skipped
+					status.Libraries[index].EXIFFailed = exifResult.Failed
+				})
+			}
 		}
 		_ = repo.Close()
 		if m.lockStore != nil {
@@ -1438,20 +1556,31 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		status.CurrentDone = 0
 		status.CurrentTotal = 0
 		status.CurrentPercent = 0
+		status.MessageKey = ""
 		if status.FailedLibraries > 0 {
 			status.Status = "completed"
 			status.Message = fmt.Sprintf("批量扫描完成，%d 个资源库成功，%d 个失败", status.CompletedLibraries, status.FailedLibraries)
 			return
 		}
 		status.Status = "completed"
-		status.Message = fmt.Sprintf("批量扫描完成，已处理 %d 个资源库", status.CompletedLibraries)
+		if !performedScan && status.CompletedLibraries == status.TotalLibraries {
+			if performedEXIF {
+				status.MessageKey = "batchWorkflow.scanSkippedExifCompleted"
+				status.Message = "资源库未变化，已跳过扫描；EXIF 已补全"
+			} else {
+				status.MessageKey = "batchWorkflow.scanSkipped"
+				status.Message = "资源库未变化，已跳过扫描"
+			}
+		} else {
+			status.Message = fmt.Sprintf("批量扫描完成，已处理 %d 个资源库", status.CompletedLibraries)
+		}
 	})
 	task.persist(true)
 	progress.Stop()
 	finalSnapshot := task.snapshot()
 	if finalSnapshot.Status == "completed" && task.buildThumbnailsAfterScan && m.afterScanComplete != nil {
 		fmt.Println("Batch library scan completed. Starting batch thumbnail build...")
-		if err := m.afterScanComplete(cfg, task.username, userID, task.autoThumbnailAggressive, task.autoMoveLegacyThumbnails, task.autoCleanThumbnailFiles, task.autoBuildPlaybackCaches); err != nil {
+		if err := m.afterScanComplete(cfg, task.username, userID, task.autoThumbnailAggressive, task.completeEXIFAfterScan, task.autoMoveLegacyThumbnails, task.autoCleanThumbnailFiles, task.autoBuildPlaybackCaches); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to start batch thumbnail build: %v\n", err)
 		}
 	}
@@ -1474,20 +1603,42 @@ func (m *libraryBatchBuildManager) failTask(task *libraryBatchBuildTask, err err
 	task.persist(true)
 }
 
-func (m *libraryBatchBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
+func setBatchScanLibraryProgress(task *libraryBatchBuildTask, index int, library config.Library, phase string, done, total int) {
+	// Discovery reports a growing count before the total is known.
+	if phase == "scan" && total <= 0 {
+		phase = "discovering"
+	}
 	task.mutate(func(status *api.LibraryBatchBuildStatus) {
-		status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+		status.MessageKey = ""
+		switch phase {
+		case "checking":
+			status.Message = fmt.Sprintf("正在检查资源库 %s 的变化", library.Name)
+		case "discovering":
+			status.Message = fmt.Sprintf("正在发现资源库 %s 中的媒体，已发现 %d 条", library.Name, done)
+		case "exif":
+			status.Message = fmt.Sprintf("正在补全资源库 %s 的 EXIF", library.Name)
+		default:
+			status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
+		}
 		status.CurrentLibraryID = library.ID
 		status.CurrentLibraryIndex = index + 1
 		status.CurrentLibraryName = library.Name
 		status.CurrentLibraryPath = library.Path
-		status.CurrentPhase = "scan"
-		status.CurrentDone = 0
-		status.CurrentTotal = 0
+		status.CurrentPhase = phase
+		status.CurrentDone = done
+		status.CurrentTotal = total
 		status.CurrentPercent = 0
+		if total > 0 {
+			status.CurrentPercent = float64(done) / float64(total) * 100
+		}
 		status.Libraries[index].Status = "scanning"
-		status.Libraries[index].Message = "正在扫描媒体"
+		status.Libraries[index].MessageKey = ""
+		status.Libraries[index].Message = status.Message
 	})
+}
+
+func (m *libraryBatchBuildManager) beginLibrary(task *libraryBatchBuildTask, index int, library config.Library) {
+	setBatchScanLibraryProgress(task, index, library, "checking", 0, 0)
 	task.persist(true)
 }
 
@@ -1550,9 +1701,6 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 	}
 	libraries := selectedLibrariesFromBatchStatus(cfg.Libraries, snapshot)
 	for index, library := range libraries {
-		if index < len(snapshot.Libraries) && snapshot.Libraries[index].Status == "completed" {
-			continue
-		}
 		if ctx.Err() != nil {
 			m.cancelTask(task, index)
 			return
@@ -1590,6 +1738,20 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
 			}
 			m.failLibrary(task, index, err)
+			continue
+		}
+		changedDirs := map[string]bool(nil)
+		if scanSnapshot, snapshotErr := repo.GetLibraryScanSnapshot(); snapshotErr == nil && scanSnapshot != nil {
+			changedDirs = make(map[string]bool, len(scanSnapshot.ChangedDirectories))
+			for _, path := range scanSnapshot.ChangedDirectories {
+				changedDirs[filepath.ToSlash(filepath.Clean(path))] = true
+			}
+		} else if snapshotErr != nil {
+			_ = repo.Close()
+			if m.lockStore != nil {
+				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
+			}
+			m.failLibrary(task, index, fmt.Errorf("读取资源库扫描快照失败: %w", snapshotErr))
 			continue
 		}
 
@@ -1688,7 +1850,7 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 				continue
 			}
 		}
-		if _, err := svc.StartThumbnailBuild(libraryUserID); err != nil {
+		if _, err := svc.StartThumbnailBuildForDirectories(libraryUserID, changedDirs); err != nil {
 			_ = repo.Close()
 			if m.lockStore != nil {
 				_ = m.lockStore.Release(library.ID, m.sessionID, "batch_thumbnails")
@@ -1904,7 +2066,11 @@ func (m *libraryBatchThumbnailBuildManager) run(ctx context.Context, task *libra
 			return
 		}
 		status.Status = "completed"
-		status.Message = fmt.Sprintf("批量缩略图构建完成，已处理 %d 个资源库", status.CompletedLibraries)
+		if status.MessageKey == "batchWorkflow.thumbnailSkipped" && status.CompletedLibraries == status.TotalLibraries {
+			status.Message = "缩略图已就绪，已跳过构建"
+		} else {
+			status.Message = fmt.Sprintf("批量缩略图构建完成，已处理 %d 个资源库", status.CompletedLibraries)
+		}
 	})
 	task.persist(true)
 	if snapshot := task.snapshot(); snapshot.ExitAfterComplete && m.shutdownAfterDone != nil {
@@ -2023,8 +2189,14 @@ func describeLibraryAvailability(lockStore *sessionlock.Store, cfg *config.Confi
 		if id == "" {
 			continue
 		}
-		if sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite")) {
-			result[id] = api.LibraryAvailabilityState{Available: false, Status: "admin_locked", Reason: "当前由其他 Gallery 占用"}
+		occupied, leaseErr := sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite"))
+		if leaseErr != nil && !occupied {
+			log.Printf("inspect library %s lease: %v", id, leaseErr)
+			result[id] = api.LibraryAvailabilityState{Available: false, Status: "unavailable", Reason: "无法读取资源库访问锁，请检查目录权限或磁盘状态", ReasonKey: "api.errors.libraryLeaseReadFailed"}
+			continue
+		}
+		if occupied {
+			result[id] = api.LibraryAvailabilityState{Available: false, Status: "admin_locked", Reason: "当前由其他 Gallery 占用", ReasonKey: "api.errors.libraryOtherGalleryOccupied"}
 			continue
 		}
 		conflict, err := lockStore.LockedByOther(id, username, role, "", "browse")
@@ -2574,7 +2746,7 @@ func main() {
 	buildState := newLibraryBuildState(shutdownCurrentProcess)
 	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
 	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
-	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
+	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
 		profile, err := config.EnsureProfile(cfg, username)
 		if err != nil {
 			return err
@@ -2649,7 +2821,14 @@ func main() {
 		fmt.Printf("🌐 HTTP server started: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 && photoService != nil {
-		photoService.RunBackground(func() { runLibraryBuild(rootCtx, photoService, buildState) })
+		needsBuild, checkErr := photoService.NeedsLibraryBuild(rootCtx)
+		if checkErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to check library build state: %v\n", checkErr)
+			needsBuild = true
+		}
+		if needsBuild {
+			photoService.RunBackground(func() { runLibraryBuild(rootCtx, photoService, buildState) })
+		}
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: HTTP server failed: %v\n", err)
@@ -2721,7 +2900,7 @@ func startRootConsoleServer(cfg *config.Config) {
 	shutdownCurrentProcess := makeShutdownCurrentProcess(cancelRoot)
 	batchBuildManager := newLibraryBatchBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
 	batchThumbnailBuildManager := newLibraryBatchThumbnailBuildManager(shutdownCurrentProcess, lockStore, processSessionID)
-	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
+	batchBuildManager.afterScanComplete = func(cfg *config.Config, username string, userID int64, aggressive bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) error {
 		profile, err := config.EnsureProfile(cfg, username)
 		if err != nil {
 			return err

@@ -431,13 +431,13 @@ function refreshPrimaryScreenOrientationSoon() {
 }
 
 const videoPosterPlaceholder = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
-  <rect width="240" height="240" rx="24" fill="#1b2a2f"/>
-  <circle cx="120" cy="120" r="54" fill="#2d6a5f"/>
-  <polygon points="105,90 105,150 152,120" fill="#f4f1e8"/>
-  <text x="120" y="198" font-size="18" text-anchor="middle" fill="#d9e4dd" font-family="sans-serif">VIDEO</text>
-</svg>`)} `;
-const supportedImageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff'];
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
+  <rect width="180" height="180" fill="#1f1f1f"/>
+  <svg x="60" y="62" width="56" height="56" viewBox="0 0 20 20">
+    <path d="M5.61816 14.8086V5.32031C5.61816 4.97852 5.70247 4.72786 5.87109 4.56836C6.03971 4.4043 6.24023 4.32227 6.47266 4.32227C6.67773 4.32227 6.88737 4.38151 7.10156 4.5L15.0654 9.15527C15.348 9.31934 15.5439 9.46745 15.6533 9.59961C15.7673 9.72721 15.8242 9.88216 15.8242 10.0645C15.8242 10.2422 15.7673 10.3971 15.6533 10.5293C15.5439 10.6615 15.348 10.8096 15.0654 10.9736L7.10156 15.6289C6.88737 15.7474 6.67773 15.8066 6.47266 15.8066C6.24023 15.8066 6.03971 15.7246 5.87109 15.5605C5.70247 15.3965 5.61816 15.1458 5.61816 14.8086Z" fill="#fff"/>
+  </svg>
+</svg>`)}`;
+const supportedImageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.heics', '.heifs', '.hif'];
 const supportedVideoExtensions = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi', '.wmv', '.wma', '.ts', '.mts', '.m2ts', '.mpg', '.mpeg', '.3gp', '.3g2', '.ogv'];
 const browserUnsupportedVideoExtensions = ['.wmv', '.wma'];
 const memoriesStorageKey = 'echogallery_memories_v1';
@@ -451,10 +451,10 @@ const legacyVideoBookmarksStorageKey = 'echogallery_video_bookmarks_v1';
 const globalVideoVolumeStorageKey = 'echogallery_global_video_volume_v1';
 const libraryBatchWorkflowEnabledStorageKey = 'echogallery_library_batch_workflow_enabled_v1';
 const libraryBatchWorkflowAggressiveStorageKey = 'echogallery_library_batch_workflow_aggressive_v1';
+const libraryBatchWorkflowEXIFStorageKey = 'echogallery_library_batch_workflow_exif_v1';
 const libraryBatchWorkflowPhaseStorageKey = 'echogallery_library_batch_workflow_phase_v1';
 const settingsPanelExpandedState = new Map();
 const pwaSettingsStorageKey = 'echogallery_pwa_settings_v1';
-const updateSettingsStorageKey = 'echogallery_update_settings_v1';
 const copyCatalog = {};
 
 function mergeCopyCatalog(target, source) {
@@ -720,8 +720,7 @@ function normalizeLibraries(libraries, fallbackPath = '') {
       accent_color: normalizeHexColor(library && (library.accent_color || library.accentColor) || ''),
       status: String(library && library.status || '').trim(),
       available: !(library && library.available === false),
-      rebuild_required: !!(library && (library.rebuild_required || library.rebuildRequired)),
-      unavailable_reason: String(library && (library.unavailable_reason || library.unavailableReason) || '').trim(),
+      unavailable_reason: localizedAPIText(library, 'unavailable_reason', String(library && (library.unavailable_reason || library.unavailableReason) || '').trim()),
       locked_by_username: String(library && (library.locked_by_username || library.lockedByUsername) || '').trim(),
       ...stats,
     });
@@ -1079,6 +1078,7 @@ const icons = {
   albumViewList: '',
   topbarRestoreSelected: '',
   settingsPanelHeadUpdate: '',
+  settingsPanelHeadSubtitle: '',
   settingsPanelHeadBlank1: '',
   settingsPanelHeadBlank2: '',
   settingsPanelHeadBlank3: '',
@@ -1160,6 +1160,7 @@ const icons = {
 };
 const svgIconFiles = {
   settingsPanelHeadDanmaku: 'settings-panel-head-danmaku.svg',
+  settingsPanelHeadSubtitle: 'settings-panel-head-subtitle.svg',
   danmaku: 'danmaku.svg',
   danmakuDismatch: 'danmaku-dismatch.svg',
   rootDebug: 'root-debug.svg',
@@ -1327,6 +1328,7 @@ const svgIconFiles = {
   contextDelete: 'context-delete.svg',
   contextRestore: 'context-restore.svg',
   contextConvertPlayback: 'context-convert-playback.svg',
+  contextSwitchSoundtrack: 'switch-soundtrack.svg',
 };
 
 function navIconMarkup(view, active = false) {
@@ -1531,24 +1533,6 @@ function persistPWASettings() {
   localStorage.setItem(pwaSettingsStorageKey, JSON.stringify(state.pwaSettings));
   window.dispatchEvent(new CustomEvent('eg:pwa-settings-change', { detail: state.pwaSettings }));
 }
-function normalizeUpdateSettings(input = {}) {
-  const data = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  return {
-    localEnabled: !!data.localEnabled,
-    githubEnabled: !!data.githubEnabled,
-  };
-}
-function loadUpdateSettings() {
-  try {
-    return normalizeUpdateSettings(JSON.parse(localStorage.getItem(updateSettingsStorageKey) || '{}'));
-  } catch (_) {
-    return normalizeUpdateSettings();
-  }
-}
-function persistUpdateSettings() {
-  state.updateSettings = normalizeUpdateSettings(state.updateSettings);
-  localStorage.setItem(updateSettingsStorageKey, JSON.stringify(state.updateSettings));
-}
 function normalizeLightboxUIIdleSeconds(value, fallback = 0) {
   const num = Number(value);
   if (!Number.isFinite(num)) return Math.min(15, Math.max(0, fallback));
@@ -1560,18 +1544,218 @@ function renderLocalUpdateConfigPreview() {
     '  "/path/to/EchoGallery_1",',
     '  "/path/to/EchoGallery_2",',
     ']',
-    'update_package_path = "/path/to/latest/EchoGallery"',
+    'include = []',
+    'exclude = []',
+    'update_package_dir = "/path/to/updates"',
   ].join('\n');
-}
-async function saveLocalUpdateConfig(text) {
-  return api.put('/api/settings/local-update-config', { text });
 }
 async function checkLocalUpdate() {
   return api.get('/api/settings/local-update/check');
 }
-async function applyLocalUpdate() {
-  return api.post('/api/settings/local-update/apply', {});
+const localUpdateUI = { config: null, targets: [], warnings: [], check: null, loading: false, generation: 0, source: 'local', error: false };
+function updateDraft() {
+  return localUpdateUI.config || { distribute: [], include: [], exclude: [], update_package_dir: '', update_package_path: '' };
 }
+function updateTargetVersion(target) {
+  const current = target.current_version || settingsText('update.unknownVersion');
+  const currentCode = target.current_version_code;
+  const currentLabel = currentCode ? `${current} · ${currentCode}` : current;
+  const packageVersion = localUpdateUI.check?.package_version;
+  if (!packageVersion) return currentLabel;
+  const packageCode = localUpdateUI.check?.package_version_code;
+  const packageLabel = packageCode ? `${packageVersion} · ${packageCode}` : packageVersion;
+  return `${currentLabel} → ${packageLabel}`;
+}
+function renderLocalUpdatePanel() {
+  const cfg = updateDraft();
+  const github = localUpdateUI.source === 'github';
+  const disabled = !canRunServerTasks() || localUpdateUI.loading;
+  const t = key => escapeHTML(settingsText(`update.${key}`));
+  return `
+    <div class="settings-control"><label id="settings-update-source-label"><span>${t('source')}</span></label>
+      <div class="echo-segmented smart-album-segmented" role="group" aria-labelledby="settings-update-source-label">
+        <button type="button" class="echo-segmented__option" data-update-source="local" aria-pressed="${!github}">${t('localSource')}</button>
+        <button type="button" class="echo-segmented__option" data-update-source="github" aria-pressed="${github}">${t('github')}</button>
+      </div>
+    </div>
+    ${github ? `<div class="settings-static settings-update-note"><strong>GitHub</strong><span>${t('githubUnavailable')}</span></div>` : `
+    <div class="settings-control"><label for="settings-update-roots"><span>${t('distributions')}</span></label>
+      <textarea class="input" id="settings-update-roots" rows="${Math.max(1, (cfg.distribute || []).length)}" spellcheck="false" ${disabled ? 'disabled' : ''}>${escapeHTML((cfg.distribute || []).join('\n'))}</textarea>
+      <span class="settings-empty">${t('distributionsHelp')}</span>
+    </div>
+    <div class="settings-control"><label id="settings-update-targets-label"><span>${t('availableFolders')}</span></label>
+      <div id="settings-update-targets" role="group" aria-labelledby="settings-update-targets-label">
+        ${localUpdateUI.targets.length ? localUpdateUI.targets.map((target, index) => `
+          <div class="settings-library-main" data-update-target="${index}">
+            <div class="settings-library-logo-preview${target.avatar_url ? ' has-image' : ''}">${target.avatar_url ? `<img src="${escapeHTML(withPageSessionURL(target.avatar_url))}" alt="">` : `<span class="library-avatar-placeholder">${icons.photo}</span>`}</div>
+            <div class="settings-library-fields">
+              <strong class="settings-library-name-display" title="${escapeHTML(target.name || target.path)}"><span>${escapeHTML(target.name || target.path)}</span></strong>
+              <span class="settings-library-path-display" title="${escapeHTML(target.path)}">${escapeHTML(target.error ? settingsText('update.invalidTarget') : updateTargetVersion(target))}${target.manual ? ` · ${t('manual')}` : ''} · ${escapeHTML(target.path)}</span>
+            </div>
+            <div class="settings-library-row-actions">
+              <button class="btn btn-icon" type="button" data-update-one="${index}" title="${t('updateOne')}" aria-label="${t('updateOne')}" ${disabled || !target.needs_update || !localUpdateUI.check || localUpdateUI.check.blocked ? 'disabled' : ''}>${icons.refresh || icons.update || icons.download}</button>
+              <button class="btn btn-icon" type="button" data-update-remove="${index}" title="${t('removeTarget')}" aria-label="${t('removeTarget')}" ${disabled ? 'disabled' : ''}>${icons.close}</button>
+            </div>
+          </div>`).join('') : `<div class="settings-empty">${t(localUpdateUI.loading ? 'scanning' : 'emptyFolders')}</div>`}
+      </div>
+      ${(cfg.exclude || []).length ? `<div class="settings-actions"><button type="button" class="btn" id="settings-update-restore" ${disabled ? 'disabled' : ''}>${t('restoreExcluded')} (${cfg.exclude.length})</button></div>` : ''}
+      ${localUpdateUI.warnings.length ? `<details class="settings-empty"><summary>${t('scanWarnings')} (${localUpdateUI.warnings.length})</summary><div>${localUpdateUI.warnings.map(escapeHTML).join('<br>')}</div></details>` : ''}
+    </div>
+    <div class="settings-control"><label for="settings-update-package-dir"><span>${t('packageDirectory')}</span></label>
+      <input class="input" id="settings-update-package-dir" spellcheck="false" value="${escapeHTML(cfg.update_package_dir || '')}" ${disabled ? 'disabled' : ''}>
+      <span class="settings-empty">${t('packageDirectoryHelp')}</span>
+    </div>
+    ${cfg.update_package_path ? `<div class="settings-control"><label for="settings-update-pinned-package"><span>${t('pinnedPackage')}</span></label><input class="input" id="settings-update-pinned-package" spellcheck="false" value="${escapeHTML(cfg.update_package_path)}" ${disabled ? 'disabled' : ''}><span class="settings-empty">${t('pinnedHelp')}</span></div>` : ''}
+    <div class="settings-static"><strong>${t('versionName')}</strong><span id="settings-update-version-name">${escapeHTML(localUpdateUI.releaseName || settingsText('update.releaseNameUnavailable'))}</span>
+      ${localUpdateUI.check ? `<span>${t('selectedPackage')}: ${escapeHTML(localUpdateUI.check.package_path || '')} · ${escapeHTML(localUpdateUI.check.package_version || settingsText('update.unknownVersion'))}${localUpdateUI.check.package_version_code ? ` · ${escapeHTML(localUpdateUI.check.package_version_code)}` : ''}</span>` : ''}
+    </div>
+    <div class="settings-static"><strong>${t('versionCode')}</strong><span>${escapeHTML(localUpdateUI.versionCode || localUpdateUI.currentVersion || settingsText('update.unknownVersion'))}</span></div>
+    ${localUpdateUI.error ? `<div class="settings-empty" role="status">${t('operationFailed')}</div>` : ''}
+    <div class="settings-actions settings-actions-equal settings-update-actions">
+      <button class="btn" id="settings-check-update-btn" type="button" ${disabled ? 'disabled' : ''}>${t('check')}</button>
+      <button class="btn btn-primary" id="settings-run-update-btn" type="button" ${disabled || !localUpdateUI.check?.has_update || localUpdateUI.check?.blocked ? 'disabled' : ''}>${t('updateAll')}</button>
+      <button class="btn" id="settings-update-add" type="button" ${disabled ? 'disabled' : ''}>${t('manuallyAdd')}</button>
+    </div>`}`;
+}
+function refreshLocalUpdatePanel() {
+  const host = $('#settings-local-update-panel');
+  if (!host) return;
+  host.innerHTML = renderLocalUpdatePanel();
+  bindLocalUpdatePanel();
+}
+function invalidateLocalUpdate() {
+  localUpdateUI.generation++;
+  localUpdateUI.check = null;
+  localUpdateUI.error = false;
+  $('#settings-run-update-btn')?.setAttribute('disabled', '');
+  document.querySelectorAll('[data-update-one]').forEach(button => { button.disabled = true; });
+}
+async function persistLocalUpdateDraft() {
+  const saved = await api.put('/api/settings/local-update-config', { config: updateDraft() });
+  localUpdateUI.config = saved.config;
+  state.serverSettings.local_update_config_text = saved.text;
+}
+async function scanLocalUpdate({ save = false, check = false } = {}) {
+  if (!canRunServerTasks() || localUpdateUI.loading) return;
+  localUpdateUI.loading = true;
+  localUpdateUI.check = null;
+  localUpdateUI.error = false;
+  const generation = ++localUpdateUI.generation;
+  refreshLocalUpdatePanel();
+  try {
+    if (save && localUpdateUI.config) await persistLocalUpdateDraft();
+    const scan = await api.get('/api/settings/local-update/scan');
+    if (generation !== localUpdateUI.generation) return;
+    localUpdateUI.config = scan.config;
+    localUpdateUI.targets = scan.targets || [];
+    localUpdateUI.warnings = scan.warnings || [];
+    localUpdateUI.currentVersion = scan.current_version;
+    localUpdateUI.versionCode = scan.version_code;
+    localUpdateUI.releaseName = scan.version_name;
+    if (check) {
+      const result = await checkLocalUpdate();
+      if (generation !== localUpdateUI.generation) return;
+      localUpdateUI.targets = result.targets || [];
+      localUpdateUI.check = result.check;
+      localUpdateUI.warnings = result.check.warnings || [];
+      showToast(settingsText(result.check.blocked ? 'update.blocked' : result.check.has_update ? 'update.updateFound' : 'update.upToDate'));
+    }
+  } catch (err) {
+    localUpdateUI.error = true;
+    showToast(settingsText('update.operationFailed'), 5000);
+    console.warn('Local update:', err);
+    if (!localUpdateUI.config) localUpdateUI.config = updateDraft();
+  } finally {
+    localUpdateUI.loading = false;
+    refreshLocalUpdatePanel();
+  }
+}
+async function runCheckedLocalUpdate(targets = []) {
+  if (!localUpdateUI.check?.has_update || localUpdateUI.loading) return;
+  const checked = localUpdateUI.check;
+  if (!await appConfirm(settingsText('update.confirmUpdate'), { title: settingsText('update.updateAll') })) return;
+  if (checked !== localUpdateUI.check || localUpdateUI.loading) return;
+  localUpdateUI.loading = true;
+  refreshLocalUpdatePanel();
+  try {
+    const result = await api.post('/api/settings/local-update/apply', { check_id: checked.check_id, targets });
+    localUpdateUI.check = null;
+    showToast(settingsText(result.restarting ? 'update.restarting' : 'update.upToDate'), 5000);
+  } catch (err) {
+    localUpdateUI.check = null;
+    localUpdateUI.error = true;
+    showToast(settingsText('update.operationFailed'), 5000);
+    console.warn('Local update:', err);
+  } finally { localUpdateUI.loading = false; refreshLocalUpdatePanel(); }
+}
+function openUpdateTargetDialog() {
+  return new Promise(resolve => {
+    const modal = el('div', 'modal-overlay blocking-dialog-overlay open');
+    modal.innerHTML = `<form class="modal blocking-dialog-modal" role="dialog" aria-modal="true" aria-labelledby="update-target-title">
+      <div class="modal-title" id="update-target-title">${escapeHTML(settingsText('update.manuallyAdd'))}</div>
+      <div class="settings-control"><label for="settings-update-manual-path"><span>${escapeHTML(settingsText('update.manualPath'))}</span></label><input class="input" id="settings-update-manual-path" name="path" required spellcheck="false"></div>
+      <p class="modal-copy">${escapeHTML(settingsText('update.manualPathHelp'))}</p>
+      <div class="modal-footer"><button class="btn" type="button" data-cancel>${escapeHTML(copyText('app.interface.commonCancel'))}</button><button class="btn btn-primary" type="submit">${escapeHTML(settingsText('update.manuallyAdd'))}</button></div>
+    </form>`;
+    const finish = value => { document.removeEventListener('keydown', onKey); removeBlockingDialog(modal); resolve(value); };
+    const onKey = event => { if (event.key === 'Escape') { event.preventDefault(); finish(null); } };
+    modal.querySelector('form').addEventListener('submit', event => { event.preventDefault(); finish(modal.querySelector('input').value.trim()); });
+    modal.querySelector('[data-cancel]').addEventListener('click', () => finish(null));
+    modal.addEventListener('click', event => { if (event.target === modal) finish(null); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(modal);
+    requestAnimationFrame(() => modal.querySelector('input').focus());
+  });
+}
+function bindLocalUpdatePanel() {
+  const host = $('#settings-local-update-panel');
+  if (!host) return;
+  host.querySelectorAll('.settings-library-logo-preview').forEach(preview => applyLibraryPreviewFallback(preview));
+  host.querySelectorAll('[data-update-source]').forEach(button => button.addEventListener('click', () => {
+    localUpdateUI.source = button.dataset.updateSource;
+    refreshLocalUpdatePanel();
+  }));
+  $('#settings-update-roots')?.addEventListener('input', event => {
+    event.target.rows = Math.max(1, event.target.value.split('\n').length);
+    updateDraft().distribute = event.target.value.split('\n').map(value => value.trim()).filter(Boolean);
+    invalidateLocalUpdate();
+  });
+  $('#settings-update-package-dir')?.addEventListener('input', event => {
+    updateDraft().update_package_dir = event.target.value.trim();
+    if (updateDraft().update_package_dir) {
+      updateDraft().update_package_path = '';
+      const pinned = $('#settings-update-pinned-package'); if (pinned) pinned.value = '';
+    }
+    invalidateLocalUpdate();
+  });
+  $('#settings-update-pinned-package')?.addEventListener('input', event => {
+    updateDraft().update_package_path = event.target.value.trim();
+    if (updateDraft().update_package_path) { updateDraft().update_package_dir = ''; $('#settings-update-package-dir').value = ''; }
+    invalidateLocalUpdate();
+  });
+  $('#settings-check-update-btn')?.addEventListener('click', () => scanLocalUpdate({save:true,check:true}));
+  $('#settings-run-update-btn')?.addEventListener('click', () => runCheckedLocalUpdate());
+  $('#settings-update-add')?.addEventListener('click', async () => {
+    const path = await openUpdateTargetDialog(); if (!path) return;
+    const cfg = updateDraft();
+    cfg.include = [...new Set([...(cfg.include || []),path])];
+    cfg.exclude = (cfg.exclude || []).filter(value => normalizePathForCompare(value) !== normalizePathForCompare(path));
+    invalidateLocalUpdate();
+    await scanLocalUpdate({save:true});
+  });
+  host.querySelectorAll('[data-update-remove]').forEach(button => button.addEventListener('click', async () => {
+    const target = localUpdateUI.targets[Number(button.dataset.updateRemove)];
+    const cfg = updateDraft();
+    // Exclude canonical paths as well, so overlapping roots cannot restore it.
+    cfg.include = (cfg.include || []).filter(path => normalizePathForCompare(path) !== normalizePathForCompare(target.source_path || target.path));
+    cfg.distribute = (cfg.distribute || []).filter(path => normalizePathForCompare(path) !== normalizePathForCompare(target.path));
+    cfg.exclude = [...new Set([...(cfg.exclude || []),target.path])];
+    invalidateLocalUpdate(); await scanLocalUpdate({save:true});
+  }));
+  host.querySelectorAll('[data-update-one]').forEach(button => button.addEventListener('click', () => runCheckedLocalUpdate([localUpdateUI.targets[Number(button.dataset.updateOne)].path])));
+  $('#settings-update-restore')?.addEventListener('click', async () => { updateDraft().exclude = []; invalidateLocalUpdate(); await scanLocalUpdate({save:true}); });
+}
+
 function normalizePathForCompare(value) {
   return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/g, '');
 }
@@ -1878,6 +2062,7 @@ function cloneVideoPlaybackPreference(pref) {
     muted: normalized.muted,
     resumeTime: normalized.resumeTime,
     bookmarks: cloneVideoPlaybackBookmarks(normalized.bookmarks),
+    audioTrack: normalizeVideoAudioTrack(normalized.audioTrack),
   };
 }
 function cacheVideoPlaybackPreference(photo, pref) {
@@ -2174,11 +2359,6 @@ function normalizeVideoVolumeValue(value, fallback = 1) {
   if (!Number.isFinite(volume)) return Math.max(0, Math.min(1, Number(fallback) || 1));
   return Math.max(0, Math.min(1, volume));
 }
-function normalizeVideoVolumeSwipeSensitivity(value, fallback = 100) {
-  const numeric = Math.round(Number(value));
-  if (!Number.isFinite(numeric)) return Math.max(40, Math.min(220, Number(fallback) || 100));
-  return Math.max(40, Math.min(220, numeric));
-}
 function normalizeVideoVolumePercent(value, fallback = 0) {
   const numeric = Math.round(Number(value));
   if (!Number.isFinite(numeric)) return Math.max(0, Math.min(100, Number(fallback) || 0));
@@ -2211,47 +2391,11 @@ function persistGlobalVideoVolume(volume) {
   return state.globalVideoVolume;
 }
 function effectiveVideoVolume(video = $('#lb-video')) {
-  const stored = Number(video && video.dataset ? video.dataset.egVolume : NaN);
-  if (Number.isFinite(stored)) return clampVideoVolumeToBounds(stored);
   if (video && Number.isFinite(Number(video.volume))) return clampVideoVolumeToBounds(video.volume);
   return clampVideoVolumeToBounds(state.globalVideoVolume);
 }
-function ensureVideoGainNode(video = $('#lb-video')) {
-  if (!video || !isTouchLikeDevice()) return null;
-  if (state.lightboxVideoGainNode && state.lightboxVideoAudioElement === video) {
-    if (state.lightboxVideoAudioContext && state.lightboxVideoAudioContext.state === 'suspended') {
-      state.lightboxVideoAudioContext.resume().catch(() => {});
-    }
-    return state.lightboxVideoGainNode;
-  }
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return null;
-  try {
-    if (!state.lightboxVideoAudioContext) state.lightboxVideoAudioContext = new AudioContextClass();
-    if (state.lightboxVideoAudioContext.state === 'suspended') {
-      state.lightboxVideoAudioContext.resume().catch(() => {});
-    }
-    state.lightboxVideoAudioSource = state.lightboxVideoAudioContext.createMediaElementSource(video);
-    state.lightboxVideoGainNode = state.lightboxVideoAudioContext.createGain();
-    state.lightboxVideoAudioSource.connect(state.lightboxVideoGainNode);
-    state.lightboxVideoGainNode.connect(state.lightboxVideoAudioContext.destination);
-    state.lightboxVideoAudioElement = video;
-    return state.lightboxVideoGainNode;
-  } catch (_) {
-    return null;
-  }
-}
 async function restoreVideoAudioOutput(video = $('#lb-video')) {
   if (!video || video.classList.contains('hidden')) return;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (AudioContextClass && isTouchLikeDevice()) {
-    try {
-      ensureVideoGainNode(video);
-      if (state.lightboxVideoAudioContext && state.lightboxVideoAudioContext.state === 'suspended') {
-        await state.lightboxVideoAudioContext.resume();
-      }
-    } catch (_) {}
-  }
   applyVideoVolumeOutput(video, effectiveVideoVolume(video));
   if (video.muted) {
     video.setAttribute('muted', '');
@@ -2262,16 +2406,187 @@ async function restoreVideoAudioOutput(video = $('#lb-video')) {
 function applyVideoVolumeOutput(video = $('#lb-video'), volume = state.globalVideoVolume) {
   if (!video) return false;
   const value = clampVideoVolumeToBounds(volume);
-  if (video.dataset) video.dataset.egVolume = String(value);
-  const gain = ensureVideoGainNode(video);
-  if (gain) {
-    try { video.volume = 1; } catch (_) {}
-    gain.gain.value = value;
-  } else {
-    try { video.volume = value; } catch (_) {}
-  }
+  try { video.volume = value; } catch (_) {}
   return true;
 }
+function normalizeVideoAudioTrack(raw) {
+  if (!raw || typeof raw !== 'object' || !Number.isInteger(raw.index) || raw.index < 0) return null;
+  return {
+    index: raw.index,
+    id: String(raw.id || ''),
+    language: String(raw.language || ''),
+    label: String(raw.label || ''),
+  };
+}
+function cancelVideoSoundtrackRequest(video) {
+  if (!video) return;
+  video._soundtrackRequest?.controller.abort();
+  video._soundtrackRequest = null;
+  if (video.dataset.soundtrackReplacing) {
+    delete video.dataset.soundtrackReplacing;
+    delete video.dataset.restoringPlaybackPreference;
+  }
+}
+function isCurrentSoundtrackRequest(video, photo, request) {
+  return !request.controller.signal.aborted && video._soundtrackRequest === request
+    && state.lightboxPhotos[state.lightboxIndex] === photo
+    && activeLibraryIdentity(state.serverSettings) === request.libraryKey
+    && !!$('#lightbox')?.classList.contains('open') && !video.classList.contains('hidden');
+}
+function videoSoundtrackErrorText(error, restoring = false) {
+  if (error?.error_key === 'app.lightbox.audioTrackToolsRequired') return copyText('app.lightbox.audioTrackToolsRequired');
+  return copyText(restoring ? 'app.lightbox.audioTrackRestoreFailed' : 'app.lightbox.audioTrackFailed');
+}
+async function loadLightboxVideoSource(video, photo) {
+  cancelVideoSoundtrackRequest(video);
+  const request = { controller: new AbortController(), libraryKey: activeLibraryIdentity(state.serverSettings) };
+  video._soundtrackRequest = request;
+  delete video.dataset.soundtrackIndex;
+  try {
+    const pref = await loadVideoPlaybackPreference(photo);
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    let url = mediaPlaybackURL(photo);
+    const selected = normalizeVideoAudioTrack(pref.audioTrack);
+    if (selected) {
+      try {
+        const entry = await api.post(`/api/media/${photo.id}/soundtracks`, { index: selected.index }, { signal: request.controller.signal });
+        if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+        url = withPageSessionURL(entry.url);
+        video.dataset.soundtrackIndex = String(entry.track.index);
+      } catch (error) {
+        if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+        showToast(videoSoundtrackErrorText(error, true));
+      }
+    }
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    video.src = url;
+    video.load();
+    if (shouldAutoplayVideoInLightbox(photo)) autoplayLightboxVideo(video);
+  } finally {
+    if (video._soundtrackRequest === request) video._soundtrackRequest = null;
+  }
+}
+// Wait for a decoded frame before remembering a new source. All output still
+// uses the same native video element, including on iPhone and iPad.
+function loadVideoSoundtrackSource(video, url, playback, signal) {
+  return new Promise((resolve, reject) => {
+    let timeout;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      video.removeEventListener('loadedmetadata', metadata);
+      video.removeEventListener('loadeddata', loaded);
+      video.removeEventListener('error', failed);
+      signal.removeEventListener('abort', aborted);
+    };
+    const failed = () => { cleanup(); reject(new Error('Soundtrack media could not be decoded')); };
+    const aborted = () => { cleanup(); reject(new DOMException('Aborted', 'AbortError')); };
+    const metadata = () => {
+      video.playbackRate = playback.rate;
+      video.muted = playback.muted;
+      try { video.volume = playback.volume; } catch (_) {}
+      if (playback.time > 0 && Number.isFinite(video.duration)) {
+        video.currentTime = Math.max(0, Math.min(playback.time, Math.max(0, video.duration - 0.2)));
+      }
+    };
+    const loaded = () => { cleanup(); resolve(); };
+    if (signal.aborted) return aborted();
+    video.addEventListener('loadedmetadata', metadata);
+    video.addEventListener('loadeddata', loaded);
+    video.addEventListener('error', failed);
+    signal.addEventListener('abort', aborted, { once: true });
+    timeout = setTimeout(failed, 45000);
+    video.src = withPageSessionURL(url);
+    video.load();
+  });
+}
+async function loadLightboxSubtitles(video, photo) {
+  const requestToken = String(Number(state.lightboxIndex) || 0) + ':' + String(photo?.id || '');
+  if (video.dataset.subtitleLoading === requestToken) return;
+  video.dataset.subtitleRequest = requestToken;
+  video.dataset.subtitleLoading = requestToken;
+  video.querySelectorAll('track[data-echogallery-subtitle]').forEach(track => track.remove());
+  if (!state.subtitlesEnabled || !photo?.id || !isVideoMedia(photo)) return;
+  try {
+    const result = await api.get(`/api/media/${photo.id}/subtitles`);
+    const tracks = Array.isArray(result.tracks) ? result.tracks : [];
+    const selected = tracks.find(track => track.default) || tracks[0];
+    if (!selected || state.lightboxPhotos[state.lightboxIndex] !== photo || video.dataset.subtitleRequest !== requestToken) return;
+    const entry = await api.post(`/api/media/${photo.id}/subtitles`, { index: selected.index });
+    if (state.lightboxPhotos[state.lightboxIndex] !== photo || video.dataset.subtitleRequest !== requestToken) return;
+    const track = document.createElement('track');
+    track.kind = 'subtitles'; track.label = selected.label || selected.language || copyText('app.lightbox.subtitleNumber', { number: selected.index + 1 });
+    track.srclang = selected.language || 'und'; track.src = withPageSessionURL(entry.url); track.default = true; track.dataset.echogallerySubtitle = '1';
+    video.appendChild(track);
+    const showTrack = () => {
+      try { if (track.track) track.track.mode = 'showing'; } catch (_) {}
+    };
+    track.addEventListener('load', showTrack, { once: true });
+    window.setTimeout(showTrack, 250);
+  } catch (error) {
+    if (error?.error_key !== 'app.lightbox.subtitleNone') showToast(copyText('app.lightbox.subtitleFailed'));
+  } finally {
+    if (video.dataset.subtitleLoading === requestToken) delete video.dataset.subtitleLoading;
+  }
+}
+async function switchLightboxAudioTrack(photo) {
+  const video = $('#lb-video');
+  if (!photo || state.lightboxPhotos[state.lightboxIndex] !== photo || !$('#lightbox')?.classList.contains('open')
+      || !video || video.classList.contains('hidden')) return;
+  if (video._soundtrackRequest || video.readyState < 1) return showToast(copyText('app.lightbox.audioTrackLoading'));
+  const request = { controller: new AbortController(), libraryKey: activeLibraryIdentity(state.serverSettings) };
+  video._soundtrackRequest = request;
+  let playback;
+  let previousURL;
+  try {
+    await loadVideoPlaybackPreference(photo);
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    const result = await api.get(`/api/media/${photo.id}/soundtracks`, { signal: request.controller.signal });
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    const tracks = Array.isArray(result.tracks) ? result.tracks : [];
+    if (tracks.length < 2) return showToast(copyText(tracks.length ? 'app.lightbox.audioTrackSingle' : 'app.lightbox.audioTrackNone'));
+    const currentIndex = video.dataset.soundtrackIndex !== undefined
+      ? tracks.findIndex(track => track.index === Number(video.dataset.soundtrackIndex))
+      : Math.max(0, tracks.findIndex(track => track.default));
+    const next = tracks[(currentIndex + 1) % tracks.length];
+    showToast(copyText('app.lightbox.audioTrackPreparing'));
+    const entry = await api.post(`/api/media/${photo.id}/soundtracks`, { index: next.index }, { signal: request.controller.signal });
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    // Capture at conversion completion so playback can continue while FFmpeg runs.
+    playback = { time: video.currentTime || 0, rate: video.playbackRate, muted: video.muted, volume: video.volume, paused: video.paused };
+    previousURL = video.currentSrc || video.src;
+    video.dataset.soundtrackReplacing = '1';
+    video.dataset.restoringPlaybackPreference = '1';
+    await loadVideoSoundtrackSource(video, entry.url, playback, request.controller.signal);
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    const selected = normalizeVideoAudioTrack(entry.track);
+    if (!selected) throw new Error('Invalid soundtrack response');
+    video.dataset.soundtrackIndex = String(selected.index);
+    state.videoPlaybackPreferences[videoPlaybackPreferenceKey(photo)].audioTrack = selected;
+    queueVideoPlaybackPreferenceSave(photo, { audio_track: selected }, 0);
+    if (!playback.paused) video.play().catch(() => {});
+    showToast(copyText('app.lightbox.audioTrackSwitched', {
+      track: selected.label || selected.language || copyText('app.lightbox.audioTrackNumber', { number: selected.index + 1 }),
+      number: selected.index + 1,
+      total: tracks.length,
+    }));
+  } catch (error) {
+    if (!isCurrentSoundtrackRequest(video, photo, request)) return;
+    if (previousURL && playback) {
+      try {
+        await loadVideoSoundtrackSource(video, previousURL, playback, request.controller.signal);
+        if (isCurrentSoundtrackRequest(video, photo, request) && !playback.paused) video.play().catch(() => {});
+      } catch (_) {}
+    }
+    if (isCurrentSoundtrackRequest(video, photo, request)) showToast(videoSoundtrackErrorText(error));
+  } finally {
+    if (video._soundtrackRequest === request) {
+      video._soundtrackRequest = null;
+      delete video.dataset.soundtrackReplacing;
+      delete video.dataset.restoringPlaybackPreference;
+    }
+  }
+}
+
 function normalizeVideoPlaybackPreference(raw) {
   const legacy = normalizeVideoBookmarkState(raw);
   return {
@@ -2279,6 +2594,7 @@ function normalizeVideoPlaybackPreference(raw) {
     muted: !!(raw && raw.muted),
     resumeTime: Math.max(0, Math.floor(Number(raw && (raw.resume_time ?? raw.resumeTime ?? legacy.resumeTime)) || 0)),
     bookmarks: cloneVideoPlaybackBookmarks(raw && raw.bookmarks || legacy.bookmarks),
+    audioTrack: normalizeVideoAudioTrack(raw && (raw.audio_track || raw.audioTrack)),
   };
 }
 function shouldMigrateLegacyVideoPlayback(serverPref, legacyPref) {
@@ -2317,7 +2633,7 @@ async function loadVideoPlaybackPreference(photo) {
 async function restoreVideoPlaybackPreference(video, photo) {
   if (!video || !isVideoMedia(photo)) return;
   const pref = await loadVideoPlaybackPreference(photo);
-  if (state.lightboxPhotos[state.lightboxIndex] !== photo) return;
+  if (state.lightboxPhotos[state.lightboxIndex] !== photo || video.dataset.soundtrackReplacing) return;
   video.dataset.restoringPlaybackPreference = '1';
   if (state.continueLastVideoPosition && Number.isFinite(video.duration) && video.duration > 0) {
     const saved = Math.max(0, Math.floor(Number(pref && pref.resumeTime) || 0));
@@ -2342,6 +2658,7 @@ function queueVideoPlaybackPreferenceSave(photo, patch = {}, delay = 380) {
   if (Object.prototype.hasOwnProperty.call(patch, 'muted')) queue.muted = !!patch.muted;
   if (Object.prototype.hasOwnProperty.call(patch, 'resume_time')) queue.resume_time = Math.max(0, Math.floor(Number(patch.resume_time) || 0));
   if (Object.prototype.hasOwnProperty.call(patch, 'bookmarks')) queue.bookmarks = cloneVideoPlaybackBookmarks(patch.bookmarks);
+  if (Object.prototype.hasOwnProperty.call(patch, 'audio_track')) queue.audio_track = normalizeVideoAudioTrack(patch.audio_track);
   state.videoPlaybackPreferenceSaveQueue[key] = queue;
   clearTimeout(state.videoPlaybackPreferenceSaveTimers[key]);
   state.videoPlaybackPreferenceSaveTimers[key] = setTimeout(async () => {
@@ -2357,7 +2674,8 @@ function queueVideoPlaybackPreferenceSave(photo, patch = {}, delay = 380) {
         if (_ctxMenu?.classList.contains('lightbox-bookmark-menu')) refreshVideoBookmarkMenu();
       }
     } catch (_) {
-      // 静默失败：下次播放或再次修改时会继续尝试同步。
+      if (payload.audio_track) showToast(copyText('app.lightbox.audioTrackSaveFailed'));
+      // Other preference changes keep the existing quiet retry behavior.
     }
   }, delay);
 }
@@ -2374,6 +2692,7 @@ function persistVideoPlaybackPreferenceSoon(video = $('#lb-video'), photo = stat
   const pref = normalizeVideoPlaybackPreference({ volume, muted });
   pref.resumeTime = previous.resumeTime;
   pref.bookmarks = cloneVideoPlaybackBookmarks(previous.bookmarks);
+  pref.audioTrack = normalizeVideoAudioTrack(previous.audioTrack);
   state.videoPlaybackPreferences[key] = pref;
   queueVideoPlaybackPreferenceSave(photo, { volume: pref.volume, muted: pref.muted });
 }
@@ -2516,14 +2835,11 @@ function beginVideoSurfaceSwipe(e) {
   const body = $('.lightbox-body');
   const width = Math.max(1, (body && body.clientWidth) || window.innerWidth || 1);
   const height = Math.max(1, (body && body.clientHeight) || window.innerHeight || 1);
-  const centerStart = e.clientX >= width * 0.32 && e.clientX <= width * 0.68 && e.clientY >= height * 0.18 && e.clientY <= height * 0.82;
   state.videoSurfaceSwipe = {
     pointerId: e.pointerId,
     startX: e.clientX,
     startY: e.clientY,
     startTime: Number(video.currentTime) || 0,
-    startVolume: effectiveVideoVolume(video),
-    centerStart,
     dismissProgress: 0,
     dragging: false,
     mode: '',
@@ -2545,13 +2861,9 @@ function updateVideoSurfaceSwipe(e) {
   const absX = Math.abs(dx);
   const absY = Math.abs(dy);
   if (!swipe.dragging) {
-    if (swipe.centerStart && dy > 0 && absY > 12 && absY > absX * 1.08) {
+    if (dy > 0 && absY > 12 && absY > absX * 1.08) {
       swipe.dragging = true;
       swipe.mode = 'dismiss';
-    } else if (absY > 22 && absY > absX * 1.2) {
-      swipe.dragging = true;
-      swipe.mode = 'volume';
-      showVolumeOverlay(video);
     } else if (absX >= 14 && absX >= absY * 1.2) {
       swipe.dragging = true;
       swipe.mode = 'seek';
@@ -2566,25 +2878,6 @@ function updateVideoSurfaceSwipe(e) {
     swipe.dismissProgress = dismissProgress;
     setLightboxDismissGesture(dismissProgress, amplifiedDownY);
     setLightboxUnderzoomProgress(dismissProgress);
-    e.preventDefault();
-    e.stopPropagation();
-    return true;
-  }
-  if (swipe.mode === 'volume') {
-    const sensitivity = normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100) / 100;
-    const range = Math.max(260, swipe.height * 0.72);
-    const bounds = effectiveVideoVolumeBounds();
-    const minimum = bounds.min / 100;
-    if (dy > 0) {
-      // A downward gesture reaches quiet volumes faster while retaining fine control near the start.
-      const progress = clampLightboxValue((dy / range) * sensitivity, 0, 1);
-      const remaining = Math.pow(1 - progress, 1.8);
-      const volume = minimum + (swipe.startVolume - minimum) * remaining;
-      setVideoVolumeValue(volume, video);
-    } else {
-      const delta = (-dy / range) * sensitivity;
-      setVideoVolumeValue(swipe.startVolume + delta, video);
-    }
     e.preventDefault();
     e.stopPropagation();
     return true;
@@ -2619,8 +2912,7 @@ function endVideoSurfaceSwipe(e) {
     } else {
       clearLightboxDismissGesture({ animate: true });
     }
-  } else if (swipe.mode === 'volume') showVolumeOverlay();
-  else showVideoProgressActivity();
+  } else showVideoProgressActivity();
   e.preventDefault();
   e.stopPropagation();
   return true;
@@ -2957,6 +3249,12 @@ function touchMidpoint(touches) {
 }
 function isPhotoWallPinchView() {
   return ['timeline', 'favorites', 'random-album', 'album-detail', 'memories', 'trash'].includes(state.view);
+}
+function isPhotoWallView() {
+  return isPhotoWallPinchView() || state.view === 'root-debug';
+}
+function syncPhotoWallNameMode() {
+  document.documentElement.classList.toggle('photo-wall-name-mode', !!state.photoWallShowNames && isPhotoWallView());
 }
 function pinchContextForTouches(touches) {
   if (!touches || touches.length < 2) return '';
@@ -3964,8 +4262,7 @@ function normalizeLibrary(data = {}) {
     accent_color: normalizeHexColor(data.accent_color || data.accentColor || ''),
     status: String(data.status || '').trim(),
     available: data.available !== false,
-    rebuild_required: !!(data.rebuild_required || data.rebuildRequired),
-    unavailable_reason: String(data.unavailable_reason || data.unavailableReason || '').trim(),
+    unavailable_reason: localizedAPIText(data, 'unavailable_reason', String(data.unavailable_reason || data.unavailableReason || '').trim()),
     locked_by_username: String(data.locked_by_username || data.lockedByUsername || '').trim(),
     ...stats,
   };
@@ -4555,7 +4852,7 @@ function renderSearchResults() {
           ${isVideoMedia(photo) ? `<span class="search-result-kind">${copyText('app.lightbox.video')}</span>` : ''}
         </span>
         <span class="search-result-main">
-          <strong>${escapeHTML(photo.original_name || copyText('app.interface.s_90a5096a0c'))}</strong>
+          <strong>${escapeHTML(window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c'))}</strong>
           <span>${escapeHTML(searchResultMeta(photo))}</span>
         </span>`;
       const img = $('img', card);
@@ -4757,9 +5054,6 @@ async function loadServerSettings() {
   try {
     state.serverSettings = await api.get('/api/settings');
     applyServerSettings(state.serverSettings);
-    if (Array.isArray(state.serverSettings.libraries) && state.serverSettings.libraries.some(library => library.rebuild_required)) {
-      showToast(copyText('app.interface.s_adb9c56298'), 5200);
-    }
   } catch (_) {
     if (pageSessionRedirectPending) return state.serverSettings;
     state.serverSettings = {
@@ -4793,6 +5087,10 @@ async function loadServerSettings() {
       experimental_prefetch_neighbors: true,
       experimental_restore_last_view: false,
       continue_last_video_position: true,
+      subtitles_enabled: true,
+      subtitle_font_size: 100,
+      subtitle_color: '#ffffff',
+      subtitle_background_opacity: 72,
       warm_enabled: true,
       lightbox_ui_idle_seconds: 0,
       low_resource_mode: false,
@@ -4872,6 +5170,7 @@ const portableBrowserSettingKeys = [
   globalVideoVolumeStorageKey,
   libraryBatchWorkflowEnabledStorageKey,
   libraryBatchWorkflowAggressiveStorageKey,
+  libraryBatchWorkflowEXIFStorageKey,
   'echogallery_sidebar_compact',
 ];
 function portableBrowserSettings() {
@@ -4938,6 +5237,7 @@ async function startLibraryBatchBuild(options = {}) {
   return api.post('/api/settings/libraries/build-all', {
     aggressive: !!options.aggressive,
     build_thumbnails_after_scan: !!options.buildThumbnailsAfterScan,
+    complete_exif: !!options.completeEXIF,
   });
 }
 async function cancelLibraryBatchBuild() {
@@ -5044,12 +5344,12 @@ function applyServerSettings(data = {}) {
   state.videoSectionMinMinutes = Math.min(240, Math.max(1, Number(data.video_section_min_minutes) || 10));
   state.throttledVideoSeek = !!data.throttled_video_seek;
   state.videoSeekThrottleMS = normalizeVideoSeekThrottleMS(data.video_seek_throttle_ms, 240);
-  state.videoVolumeSwipeSensitivity = normalizeVideoVolumeSwipeSensitivity(data.video_volume_swipe_sensitivity, 100);
   state.videoVolumeMinPercent = normalizeVideoVolumePercent(data.video_volume_min_percent, 0);
   state.videoVolumeMaxPercent = Math.max(state.videoVolumeMinPercent, normalizeVideoVolumePercent(data.video_volume_max_percent, 100));
   state.experimentalPrefetchNeighbors = data.experimental_prefetch_neighbors !== false;
   state.experimentalRestoreLastView = !!data.experimental_restore_last_view;
   state.continueLastVideoPosition = false;
+  state.subtitlesEnabled = data.subtitles_enabled !== false;
   state.serverSettings.warm_enabled = data.warm_enabled !== false;
   state.serverSettings.lightbox_ui_idle_seconds = normalizeLightboxUIIdleSeconds(data.lightbox_ui_idle_seconds, 0);
   state.serverSettings.low_resource_mode = !!data.low_resource_mode;
@@ -5108,12 +5408,12 @@ function buildSettingsPayload() {
     lightbox_ui_idle_seconds: normalizeLightboxUIIdleSeconds(state.serverSettings.lightbox_ui_idle_seconds, 0),
     throttled_video_seek: !!state.throttledVideoSeek,
     video_seek_throttle_ms: normalizeVideoSeekThrottleMS(state.videoSeekThrottleMS, 240),
-    video_volume_swipe_sensitivity: normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100),
     video_volume_min_percent: normalizeVideoVolumePercent(state.videoVolumeMinPercent, 0),
     video_volume_max_percent: Math.max(normalizeVideoVolumePercent(state.videoVolumeMinPercent, 0), normalizeVideoVolumePercent(state.videoVolumeMaxPercent, 100)),
     experimental_prefetch_neighbors: !!state.experimentalPrefetchNeighbors,
     experimental_restore_last_view: !!state.experimentalRestoreLastView,
     continue_last_video_position: !!state.continueLastVideoPosition,
+    subtitles_enabled: !!state.subtitlesEnabled,
     low_resource_mode: !!state.serverSettings.low_resource_mode,
     player_keymap: state.playerKeymapSource || '',
   };
@@ -5228,8 +5528,7 @@ function jumpVideoSection(direction) {
 function adjustVideoVolume(delta) {
   const video = $('#lb-video');
   if (!video || video.classList.contains('hidden')) return false;
-  const sensitivity = normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100) / 100;
-  setVideoVolumeValue(effectiveVideoVolume(video) + (delta / 100) * sensitivity, video);
+  setVideoVolumeValue(effectiveVideoVolume(video) + delta / 100, video);
   return true;
 }
 function setVideoVolumeValue(value, video = $('#lb-video')) {
@@ -5354,6 +5653,8 @@ function keyEventToken(e) {
 function toggleLightboxDanmaku() {
   if (!window.EchoGalleryDanmaku) return false;
   const enabled = window.EchoGalleryDanmaku.toggle();
+  const input = $('#settings-danmaku-enabled');
+  if (input) input.checked = enabled;
   showToast(copyText(enabled ? 'app.danmaku.enabled' : 'app.danmaku.disabled'));
   return true;
 }
@@ -5637,6 +5938,10 @@ const state = {
     experimental_prefetch_neighbors: true,
     experimental_restore_last_view: false,
     continue_last_video_position: true,
+    subtitles_enabled: true,
+    subtitle_font_size: 100,
+    subtitle_color: '#ffffff',
+    subtitle_background_opacity: 72,
     warm_enabled: true,
     lightbox_ui_idle_seconds: 0,
     low_resource_mode: false,
@@ -5650,12 +5955,12 @@ const state = {
   videoSectionMinMinutes: 10,
   throttledVideoSeek: false,
   videoSeekThrottleMS: 240,
-  videoVolumeSwipeSensitivity: 100,
   videoVolumeMinPercent: 0,
   videoVolumeMaxPercent: 100,
   experimentalPrefetchNeighbors: true,
   experimentalRestoreLastView: false,
   continueLastVideoPosition: true,
+  subtitlesEnabled: true,
   favoritePhotos: [],
   favoriteCursor: '',
   favoriteHasMore: true,
@@ -5663,6 +5968,7 @@ const state = {
   favoriteTotal: 0,
   favoriteLoaded: false,
   timelineAutoLoadPaused: false,
+  photoWallShowNames: false,
   randomAlbumAutoLoadPaused: false,
   memoryPhotos: [],
   memoryEntries: [],
@@ -5688,10 +5994,6 @@ const state = {
   lightboxUiIdleTimer: null,
   lightboxInfoInteractionTimer: null,
   lightboxVolumeTimer: null,
-  lightboxVideoAudioContext: null,
-  lightboxVideoAudioSource: null,
-  lightboxVideoGainNode: null,
-  lightboxVideoAudioElement: null,
   lightboxVisibilityResumePending: false,
   lightboxVisibilityResumeTime: 0,
   lightboxFavoriteKeyHoldTimer: null,
@@ -5730,9 +6032,6 @@ const state = {
   searchAbortController: null,
   mediaKindFilter: normalizeMediaKindFilter(localStorage.getItem(mediaKindFilterStorageKey)),
   pwaSettings: loadPWASettings(),
-  updateSettings: loadUpdateSettings(),
-  localUpdateCheckReady: false,
-  localUpdateHasUpdate: false,
   legacyVideoBookmarks: loadLegacyVideoBookmarks(),
   videoBookmarkSaveTimer: null,
   globalVideoVolume: loadGlobalVideoVolume(),
@@ -5749,6 +6048,7 @@ const state = {
   libraryBatchBuildCancelPending: false,
   libraryBatchWorkflowEnabled: localStorage.getItem(libraryBatchWorkflowEnabledStorageKey) === '1',
   libraryBatchWorkflowAggressive: localStorage.getItem(libraryBatchWorkflowAggressiveStorageKey) === '1',
+  libraryBatchWorkflowCompleteEXIF: localStorage.getItem(libraryBatchWorkflowEXIFStorageKey) === '1',
   libraryBatchWorkflowPhase: localStorage.getItem(libraryBatchWorkflowPhaseStorageKey) || '',
   libraryBatchWorkflowStartPending: false,
   libraryBatchThumbnailBuildStatus: { status: 'idle', message: '' },
@@ -6227,6 +6527,7 @@ function formatEXIFBackfillDetail(status = state.exifBackfillStatus) {
     copyText('app.interface.d_6ffb776acc', { v0: (skipped) }),
   ];
   if (failed > 0) parts.push(copyText('app.interface.d_43be80f0a3', { v0: (failed) }));
+  if (status && status.current_media) parts.push(settingsText('batchWorkflow.currentMedia', { name: status.current_media }));
   if (Number(status && status.eta_seconds) > 0) parts.push(`ETA ${formatDuration((Number(status.eta_seconds) || 0) * 1000)}`);
   return parts.join(' · ');
 }
@@ -6254,7 +6555,7 @@ function syncEXIFBackfillOverlay(status = state.exifBackfillStatus) {
 
 function isLibraryBatchBuildActive(status = state.libraryBatchBuildStatus) {
   const value = String(status && status.status || '');
-  return value === 'running' || value === 'cancelling';
+  return value === 'discovering' || value === 'preparing' || value === 'scanning' || value === 'building' || value === 'running' || value === 'cancelling';
 }
 
 function syncLibraryBatchBuildOverlay(status = state.libraryBatchBuildStatus) {
@@ -6263,7 +6564,7 @@ function syncLibraryBatchBuildOverlay(status = state.libraryBatchBuildStatus) {
 
 function isLibraryBatchThumbnailBuildActive(status = state.libraryBatchThumbnailBuildStatus) {
   const value = String(status && status.status || '');
-  return value === 'running' || value === 'cancelling';
+  return value === 'discovering' || value === 'preparing' || value === 'scanning' || value === 'building' || value === 'running' || value === 'cancelling';
 }
 
 function isPlaybackCacheBuildActive(status = state.playbackCacheBuildStatus) {
@@ -6331,7 +6632,7 @@ function renderPlaybackCacheRows() {
   return items.map(item => {
     const uuid = String(item.uuid || '');
     const checked = state.playbackCacheSelected.has(uuid);
-    const name = item.original_name || uuid || copyText('app.interface.s_c00806350f');
+    const name = window.EchoGalleryLightbox.displayFilename(item.original_name) || uuid || copyText('app.interface.s_c00806350f');
     const detail = [
       item.mime_type || copyText('app.interface.s_e9649f84f9'),
       formatSize(Number(item.size) || 0),
@@ -6620,7 +6921,7 @@ async function pollLibraryBatchBuildStatus() {
     }
     if (previous.status === 'running' || previous.status === 'cancelling') {
       if (state.libraryBatchBuildStatus.status === 'completed' && !workflowTransitionedToThumbnails) {
-        showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed'), 3600);
+        showToast(libraryBatchMessage(state.libraryBatchBuildStatus, copyText('app.libraryBatchScan.completed'), 'scan'), 3600);
       } else if (state.libraryBatchBuildStatus.status === 'cancelled') {
         showToast(copyText('app.libraryBatchScan.cancelled'), 3200);
       } else if (state.libraryBatchBuildStatus.status === 'failed') {
@@ -6663,7 +6964,7 @@ async function pollLibraryBatchThumbnailBuildStatus() {
     }
     if (previous.status === 'running' || previous.status === 'cancelling') {
       if (state.libraryBatchThumbnailBuildStatus.status === 'completed') {
-        showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed'), 3600);
+        showToast(libraryBatchMessage(state.libraryBatchThumbnailBuildStatus, copyText('app.libraryBatchThumbnail.completed'), 'thumbnails'), 3600);
       } else if (state.libraryBatchThumbnailBuildStatus.status === 'cancelled') {
         showToast(copyText('app.libraryBatchThumbnail.cancelled'), 3200);
       } else if (state.libraryBatchThumbnailBuildStatus.status === 'failed') {
@@ -6732,7 +7033,7 @@ async function openLibraryBatchBuildWorkflow(options = {}) {
       stopLibraryBatchBuildPolling();
       state.libraryBatchBuildPollTimer = setTimeout(pollLibraryBatchBuildStatus, 300);
     } else if (state.libraryBatchBuildStatus.status === 'completed') {
-      showToast(state.libraryBatchBuildStatus.message || copyText('app.libraryBatchScan.completed'));
+      showToast(libraryBatchMessage(state.libraryBatchBuildStatus, copyText('app.libraryBatchScan.completed'), 'scan'));
     }
   } catch (e) {
     if (options.startedByWorkflow) throw e;
@@ -6755,7 +7056,7 @@ async function openLibraryBatchThumbnailBuildWorkflow(options = {}) {
       state.libraryBatchThumbnailBuildPollTimer = setTimeout(pollLibraryBatchThumbnailBuildStatus, 300);
     } else if (state.libraryBatchThumbnailBuildStatus.status === 'completed') {
       if (!options.startedByWorkflow) {
-        showToast(state.libraryBatchThumbnailBuildStatus.message || copyText('app.libraryBatchThumbnail.completed'));
+        showToast(libraryBatchMessage(state.libraryBatchThumbnailBuildStatus, copyText('app.libraryBatchThumbnail.completed'), 'thumbnails'));
       }
     }
   } catch (e) {
@@ -7150,6 +7451,7 @@ function switchView(view) {
   if (view !== 'settings') stopSettingsAvailabilityPolling();
   setSettingsViewVisible(view === 'settings');
   state.view = view;
+  syncPhotoWallNameMode();
   state.selected.clear();
   state.selectionAnchorID = null;
   updateSelectionModeUI();
@@ -7229,6 +7531,18 @@ function estimateLibraryBuildDiscoveryPercent(found) {
   if (count <= 0) return 8;
   return Math.min(42, 8 + Math.log2(count + 1) * 4);
 }
+function libraryBuildHeading(status = {}) {
+  switch (status.status) {
+    case 'discovering':
+      return Number(status.done) > 0
+        ? copyText('app.libraryBuild.discoveredCount', { count: Number(status.done) })
+        : copyText('app.libraryBuild.discovering');
+    case 'running': return copyText('app.libraryBuild.runningTitle');
+    case 'cancelling': return copyText('app.libraryBuild.cancelling');
+    case 'error': return copyText('app.libraryBuild.failedTitle');
+    default: return copyText('app.libraryBuild.preparing');
+  }
+}
 function renderLibraryBuild() {
   const status = state.libraryBuildStatus || {};
   const running = ['discovering', 'running', 'cancelling'].includes(status.status);
@@ -7252,7 +7566,7 @@ function renderLibraryBuild() {
   <section class="library-build-panel">
     <div class="library-build-heading">
       <div>
-        <h2>${escapeHTML(status.message || copyText('app.libraryBuild.preparing'))}</h2>
+        <h2>${escapeHTML(libraryBuildHeading(status))}</h2>
         <p>${escapeHTML(running ? copyText('app.libraryBuild.runningDescription') : copyText('app.libraryBuild.pausedDescription'))}</p>
       </div>
       <span class="library-build-badge">${escapeHTML(running ? copyText('app.libraryBuild.runningBadge') : copyText('app.libraryBuild.pausedBadge'))}</span>
@@ -7278,6 +7592,7 @@ function renderLibraryBuild() {
 </div>`;
 }
 function renderView() {
+  syncPhotoWallNameMode();
   const leading = $('#topbar-leading');
   if (leading) leading.innerHTML = '';
   if (isLibraryBuildBlocking()) {
@@ -7852,11 +8167,12 @@ function renderRootDebugMediaGrid() {
   const grid = el('div', 'photo-grid');
   rootDebugMediaItems.forEach(photo => {
     const card = el('button', 'photo-thumb');
+    const photoName = window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c');
     card.type = 'button';
     card.dataset.id = photo.id;
     card.dataset.kind = photo.media_kind || 'image';
     card.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
-    card.innerHTML = `<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photo.original_name || '')}"${isVideoMedia(photo) ? ` onerror=\"this.onerror=null;this.src='${videoPosterPlaceholder}'\"` : ''}>${isVideoMedia(photo) ? `<span class="media-badge">${escapeHTML(videoFormatLabel(photo))}</span>` : ''}`;
+    card.innerHTML = `<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photoName)}"${isVideoMedia(photo) ? ` onerror=\"this.onerror=null;this.src='${videoPosterPlaceholder}'\"` : ''}>${isVideoMedia(photo) ? `<span class="media-badge">${escapeHTML(videoFormatLabel(photo))}</span>` : ''}<span class="photo-thumb-name" title="${escapeHTML(photoName)}" aria-hidden="true">${escapeHTML(photoName)}</span>`;
     const imageEl = card.querySelector('img');
     imageEl?.addEventListener('load', () => {
       requestAnimationFrame(() => requestAnimationFrame(() => card.classList.remove('thumb-loading', 'thumb-load-failed')));
@@ -8550,7 +8866,6 @@ function renderLibrarySettingsRow(library = {}, index = 0) {
               ${isPrimaryLibrary ? `<span class="settings-library-primary-mark" title="${escapeHTML(settingsText('libraries.primary'))}" aria-label="${escapeHTML(settingsText('libraries.primary'))}">${icons.superLike || ''}</span>` : ''}
             </div>
             ${available ? '' : `<span class="settings-library-state-badge is-unavailable">${escapeHTML(settingsText('libraries.unavailable'))}</span>`}
-            ${library.rebuild_required ? `<span class="settings-library-state-badge">${escapeHTML(copyText('app.interface.runtime.needsRebuild'))}</span>` : ''}
           </div>
           <div class="settings-library-path-display">${escapeHTML(path || settingsText('libraries.pathUnset'))}</div>
           <div class="settings-library-meta-row">
@@ -8770,7 +9085,7 @@ function openLibraryBatchEditorModal(bindRow = null) {
       <div class="modal-footer library-editor-actions">
         ${libraryEditorActionButton({ id: 'library-batch-editor-select-all', kind: 'switch', icon: icons.libraryBatchSelectAll, label: copyText('app.interface.s_3e44b2a933'), disabled: true })}
         ${libraryEditorActionButton({ id: 'library-batch-editor-explore', kind: 'switch', icon: icons.libraryBatchExplore, label: copyText('app.interface.s_2918633ac8') })}
-        ${libraryEditorActionButton({ id: 'library-batch-editor-create', kind: 'save', icon: icons.libraryBatchCreate, label: copyText('app.interface.commonCreate'), disabled: true })}
+        ${libraryEditorActionButton({ id: 'library-batch-editor-create', kind: 'save', icon: icons.libraryBatchCreate, label: settingsText('libraries.editor.create'), disabled: true })}
         ${libraryEditorActionButton({ id: 'library-batch-editor-cancel', kind: 'cancel', icon: icons.libraryBatchCancel, label: copyText('app.interface.commonCancel') })}
       </div>
     </div>`;
@@ -9387,7 +9702,7 @@ function renderSettingsShareRows() {
   return state.shareLinks.map(link => {
     const typeLabel = link.type === 'album' ? settingsText('shares.typeAlbum') : settingsText('shares.typeMedia');
     const knownPhoto = link.type === 'photo' ? findKnownPhotoByID(link.target_id) : null;
-    const title = String((knownPhoto && knownPhoto.original_name) || `${typeLabel} #${link.target_id}`).trim();
+    const title = window.EchoGalleryLightbox.displayFilename((knownPhoto && knownPhoto.original_name) || `${typeLabel} #${link.target_id}`).trim();
     const url = `${location.origin}/s/${link.token}`;
     const previewImage = knownPhoto ? mediaThumbURL(knownPhoto) : '';
     const detail = knownPhoto
@@ -9621,6 +9936,7 @@ function bindSettingsPanelToggles(host) {
 function persistLibraryBatchWorkflowPrefs() {
   localStorage.setItem(libraryBatchWorkflowEnabledStorageKey, state.libraryBatchWorkflowEnabled ? '1' : '0');
   localStorage.setItem(libraryBatchWorkflowAggressiveStorageKey, state.libraryBatchWorkflowAggressive ? '1' : '0');
+  localStorage.setItem(libraryBatchWorkflowEXIFStorageKey, state.libraryBatchWorkflowCompleteEXIF ? '1' : '0');
 }
 
 function setLibraryBatchWorkflowPhase(phase = '') {
@@ -9672,6 +9988,10 @@ async function setLibraryBatchWorkflowSelectionAll(enabled) {
 function libraryBatchBuildStatusLabel(status) {
   switch (String(status || '')) {
     case 'pending': return settingsText('batchWorkflow.statusPending');
+    case 'preparing': return settingsText('batchWorkflow.phasePreparing');
+    case 'checking': return settingsText('batchWorkflow.phaseChecking');
+    case 'discovering': return settingsText('batchWorkflow.phaseDiscovering');
+    case 'exif': return settingsText('batchWorkflow.phaseExif');
     case 'scanning': return settingsText('batchWorkflow.statusScanning');
     case 'building': return settingsText('batchWorkflow.statusBuilding');
     case 'completed': return settingsText('batchWorkflow.statusCompleted');
@@ -9681,6 +10001,70 @@ function libraryBatchBuildStatusLabel(status) {
     case 'cancelling': return settingsText('batchWorkflow.statusCancelling');
     default: return settingsText('batchWorkflow.statusIdle');
   }
+}
+
+function libraryBatchPhaseLabel(status = {}) {
+  if (['completed', 'failed', 'cancelled', 'cancelling'].includes(status.status)) return libraryBatchBuildStatusLabel(status.status);
+  switch (String(status.current_phase || status.status || '')) {
+    case 'scan':
+    case 'scanning': return copyText('app.interface.s_47b1409f6e');
+    case 'thumbnails':
+    case 'building': return copyText('app.interface.s_83f794b00a');
+    case 'checking': return settingsText('batchWorkflow.phaseChecking');
+    case 'discovering': return settingsText('batchWorkflow.phaseDiscovering');
+    case 'exif': return settingsText('batchWorkflow.phaseExif');
+    case 'audit': return settingsText('batchWorkflow.phaseAudit');
+    case 'repair': return settingsText('batchWorkflow.phaseRepair');
+    case 'migrate': return settingsText('batchWorkflow.phaseMigrate');
+    case 'cleanup': return settingsText('batchWorkflow.phaseCleanup');
+    case 'maintenance': return settingsText('batchWorkflow.phaseMaintenance');
+    case 'playback': return settingsText('batchWorkflow.phasePlayback');
+    default:
+      return ['running', 'cancelling'].includes(status.status)
+        ? settingsText('batchWorkflow.phasePreparing')
+        : libraryBatchBuildStatusLabel(status.status);
+  }
+}
+
+function libraryBatchActivityLabel(status = {}) {
+  const name = String(status.current_library_name || '').trim();
+  if (name && ['checking', 'discovering', 'exif', 'preparing', 'scanning', 'building', 'running', 'cancelling'].includes(status.status)) {
+    if (status.status === 'cancelling') return settingsText('batchWorkflow.taskCancelling', { name });
+    const key = {
+      checking: 'taskChecking', discovering: 'taskDiscovering', scan: 'taskScanning',
+      exif: 'taskExif', thumbnails: 'taskThumbnails', audit: 'taskAudit', repair: 'taskRepair',
+      scanning: 'taskScanning', building: 'taskThumbnails',
+    }[status.current_phase || status.status];
+    if (key) return settingsText(`batchWorkflow.${key}`, { name });
+  }
+  return libraryBatchPhaseLabel(status);
+}
+
+function libraryBatchMessage(value, fallback = '', kind = 'scan') {
+  if (!value) return fallback;
+  const failed = Math.max(0, Number(value.failed_libraries) || 0);
+  if (value.status === 'completed' && failed > 0) {
+    return settingsText(`batchWorkflow.${kind === 'thumbnails' ? 'thumbnailCompletedWithFailures' : 'scanCompletedWithFailures'}`, {
+      completed: Math.max(0, Number(value.completed_libraries) || 0), failed,
+    });
+  }
+  if (value && ['checking', 'discovering', 'exif', 'preparing', 'scanning', 'building', 'running', 'cancelling'].includes(value.status) && !value.message_key) return libraryBatchActivityLabel(value);
+  if (value && value.message_key) {
+    const translated = settingsText(value.message_key, { name: value.current_library_name || value.name || '' });
+    if (translated) return translated;
+  }
+  if (value.status === 'completed' && Number(value.total_libraries) > 0) {
+    return settingsText(`batchWorkflow.${kind === 'thumbnails' ? 'thumbnailCompleted' : 'scanCompleted'}`, {
+      count: Math.max(0, Number(value.completed_libraries) || 0),
+    });
+  }
+  if (value.status === 'failed' && (value.error || (value.path && value.message))) {
+    return `${libraryBatchBuildStatusLabel('failed')}: ${value.error || value.message}`;
+  }
+  if (['pending', 'completed', 'failed', 'cancelled', 'idle'].includes(value.status)) {
+    return value.status === 'idle' && fallback ? fallback : libraryBatchBuildStatusLabel(value.status);
+  }
+  return fallback || libraryBatchBuildStatusLabel(value.status);
 }
 
 function libraryBatchWorkflowSelectionStatus() {
@@ -9774,19 +10158,14 @@ function libraryBatchWorkflowProgressCopy() {
 function renderLibraryBatchWorkflowSummary(status, totalPercent) {
   const scanRows = Array.isArray(state.libraryBatchBuildStatus?.libraries) ? state.libraryBatchBuildStatus.libraries : [];
   const thumbRows = Array.isArray(state.libraryBatchThumbnailBuildStatus?.libraries) ? state.libraryBatchThumbnailBuildStatus.libraries : [];
-  const phase = String(status?.current_phase || '');
-  const phaseName = {
-    scan: copyText('app.interface.s_47b1409f6e'), thumbnails: copyText('app.interface.s_83f794b00a'),
-  }[phase] || (status?.status === 'completed'
-    ? settingsText('batchWorkflow.statusCompleted')
-    : settingsText('batchWorkflow.statusIdle'));
+  const phaseName = libraryBatchActivityLabel(status || {});
   const count = (rows, key) => rows.reduce((sum, row) => sum + (Number(row[key]) || 0), 0);
   const activeCount = Math.max(0, Number(status?.current_done) || 0);
   const activeTotal = Math.max(0, Number(status?.current_total) || 0);
   const values = [
     [copyText('app.interface.s_61998c8c88'), phaseName],
     [copyText('app.interface.s_e1c52eb929'), status?.current_library_name || copyText('app.interface.d_7f6f57480c', { v0: (Math.max(0, Number(status?.completed_libraries) || 0)), v1: (Math.max(0, Number(status?.total_libraries) || 0)) })],
-    [copyText('app.interface.s_073957fea3'), activeTotal ? `${Math.min(activeCount, activeTotal)} / ${activeTotal}` : copyText('app.interface.s_faf6292b7a')],
+    [copyText('app.interface.s_073957fea3'), activeTotal ? `${Math.min(activeCount, activeTotal)} / ${activeTotal}` : (activeCount > 0 ? settingsText('batchWorkflow.taskDiscovered', { count: activeCount }) : copyText('app.interface.s_faf6292b7a'))],
     [copyText('app.interface.s_562d1d2725'), `${Math.round(totalPercent)}%`],
     [copyText('app.interface.s_e7ad34645a'), count(scanRows, 'imported')],
     [copyText('app.interface.s_e952762557'), count(scanRows, 'skipped')],
@@ -9820,6 +10199,7 @@ function renderLibraryBatchWorkflowPanel() {
       ${renderSettingsToggle('settings-library-batch-workflow-select-all', settingsText('batchWorkflow.selectAll'), libraryBatchWorkflowAllSelected(), settingsText('batchWorkflow.selectAllCopy'), controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-enabled', settingsText('batchWorkflow.autoThumbnails'), state.libraryBatchWorkflowEnabled, settingsText('batchWorkflow.autoThumbnailsCopy'), controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-aggressive', settingsText('batchWorkflow.aggressive'), state.libraryBatchWorkflowAggressive, settingsText('batchWorkflow.aggressiveCopy'), controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-exif', settingsText('batchWorkflow.completeEXIF'), state.libraryBatchWorkflowCompleteEXIF, settingsText('batchWorkflow.completeEXIFCopy'), controlsDisabled)}
     </div>
     <div class="settings-actions settings-actions-fill">
       <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${controlsDisabled || !hasSelection ? 'disabled' : ''}>${escapeHTML(starting ? settingsText('batchWorkflow.startBusy') : (state.libraryBatchWorkflowEnabled ? settingsText('batchWorkflow.startFull') : settingsText('batchWorkflow.startScan')))}</button>
@@ -9875,6 +10255,7 @@ async function openLibraryBatchFullWorkflow() {
       aggressive: state.libraryBatchWorkflowAggressive,
       startedByWorkflow: true,
       buildThumbnailsAfterScan: state.libraryBatchWorkflowEnabled,
+      completeEXIF: state.libraryBatchWorkflowCompleteEXIF,
     });
   } catch (e) {
     clearLibraryBatchWorkflowPhase();
@@ -10004,36 +10385,14 @@ function renderLibraryBatchTaskProgress(status, idleLabel) {
   const completed = Math.max(0, Number(status && status.completed_libraries) || 0);
   const failed = Math.max(0, Number(status && status.failed_libraries) || 0);
   const currentLibrary = String(status && status.current_library_name || '').trim();
-  let phase = settingsText('batchWorkflow.phaseScan');
-  switch (String(status && status.current_phase || '')) {
-    case 'thumbnails':
-      phase = settingsText('batchWorkflow.phaseThumbnails');
-      break;
-    case 'migrate':
-      phase = settingsText('batchWorkflow.phaseMigrate');
-      break;
-    case 'cleanup':
-      phase = settingsText('batchWorkflow.phaseCleanup');
-      break;
-    case 'maintenance':
-      phase = settingsText('batchWorkflow.phaseMaintenance');
-      break;
-    case 'playback':
-      phase = settingsText('batchWorkflow.phasePlayback');
-      break;
-    default:
-      phase = settingsText('batchWorkflow.phaseScan');
-      break;
-  }
   const parts = [];
-  if (currentLibrary) parts.push(settingsText('batchWorkflow.taskCurrent', { name: currentLibrary }));
+  if (currentLibrary || ['discovering', 'preparing', 'scanning', 'building', 'running', 'cancelling'].includes(status && status.status)) parts.push(libraryBatchActivityLabel(status));
+  else if (idleLabel) parts.push(idleLabel);
   if (totalLibraries > 0) parts.push(settingsText('batchWorkflow.taskLibrary', { current, total: totalLibraries }));
   if (currentTotal > 0) {
-    parts.push(settingsText('batchWorkflow.taskPhase', { phase, current: currentDone, total: currentTotal }));
-  } else if (currentLibrary) {
-    parts.push(phase);
-  } else if (idleLabel) {
-    parts.push(idleLabel);
+    parts.push(settingsText('batchWorkflow.metricStage', { current: currentDone, total: currentTotal }));
+  } else if (currentDone > 0) {
+    parts.push(settingsText('batchWorkflow.taskDiscovered', { count: currentDone }));
   }
   parts.push(settingsText('batchWorkflow.taskDone', { count: completed }));
   if (failed > 0) parts.push(settingsText('batchWorkflow.taskFailed', { count: failed }));
@@ -10062,20 +10421,26 @@ function renderLibraryBatchBuildPanel() {
     if (Number(library.skipped) > 0) detailParts.push(settingsText('batchWorkflow.detailSkipped', { count: Number(library.skipped) }));
     if (Number(library.pruned) > 0) detailParts.push(settingsText('batchWorkflow.detailPruned', { count: Number(library.pruned) }));
     if (Number(library.failed) > 0) detailParts.push(settingsText('batchWorkflow.detailFailed', { count: Number(library.failed) }));
-    const meta = detailParts.length ? detailParts.join(' · ') : (library.message || library.path || '');
+    if (Number(library.exif_scanned) > 0) detailParts.push(settingsText('batchWorkflow.detailEXIFScanned', { count: Number(library.exif_scanned) }));
+    if (Number(library.exif_updated) > 0) detailParts.push(settingsText('batchWorkflow.detailEXIFUpdated', { count: Number(library.exif_updated) }));
+    if (Number(library.exif_skipped) > 0) detailParts.push(settingsText('batchWorkflow.detailEXIFSkipped', { count: Number(library.exif_skipped) }));
+    if (Number(library.exif_failed) > 0) detailParts.push(settingsText('batchWorkflow.detailEXIFFailed', { count: Number(library.exif_failed) }));
+    const meta = current && active
+      ? [libraryBatchActivityLabel(status), ...detailParts].join(' · ')
+      : (detailParts.length ? detailParts.join(' · ') : (libraryBatchMessage(library) || library.path || ''));
     return `<div class="settings-batch-build-row ${current ? 'active' : ''} is-${escapeHTML(rowStatus)}">
       <div class="settings-batch-build-row-main">
         <strong>${escapeHTML(library.name || settingsText('libraries.nameFallback', { index: index + 1 }))}</strong>
         <span>${escapeHTML(meta)}</span>
       </div>
-      <em>${escapeHTML(libraryBatchBuildStatusLabel(rowStatus))}</em>
+      <em>${escapeHTML(current && active ? libraryBatchPhaseLabel(status) : libraryBatchBuildStatusLabel(rowStatus))}</em>
     </div>`;
   }).join('') : `<div class="settings-batch-build-empty">${escapeHTML(settingsText('batchWorkflow.scanEmpty'))}</div>`;
   const progressPercent = Math.max(0, Math.min(100, Number(status.current_percent) || 0));
   return `<div class="settings-batch-build-panel">
     <div class="settings-batch-build-head">
       <div>
-        <strong>${escapeHTML(status.message || settingsText('batchWorkflow.scanTitle'))}</strong>
+        <strong>${escapeHTML(libraryBatchMessage(status, settingsText('batchWorkflow.scanTitle')))}</strong>
         <span>${escapeHTML(summary)}</span>
       </div>
       <span class="settings-batch-build-badge ${active ? 'active' : ''}">${escapeHTML(active ? settingsText('batchWorkflow.statusRunning') : libraryBatchBuildStatusLabel(status.status || 'idle'))}</span>
@@ -10199,6 +10564,11 @@ function syncLibraryBatchWorkflowPanel() {
     persistLibraryBatchWorkflowPrefs();
     syncLibraryBatchWorkflowPanel();
   });
+  $('#settings-library-batch-workflow-exif')?.addEventListener('change', e => {
+    state.libraryBatchWorkflowCompleteEXIF = !!e.target.checked;
+    persistLibraryBatchWorkflowPrefs();
+    syncLibraryBatchWorkflowPanel();
+  });
   $('#settings-start-library-batch-workflow-btn')?.addEventListener('click', openLibraryBatchFullWorkflow);
   $('#settings-cancel-library-batch-workflow-btn')?.addEventListener('click', cancelLibraryBatchWorkflow);
 }
@@ -10225,20 +10595,22 @@ function renderLibraryBatchThumbnailBuildPanel() {
     if (Number(library.generated) > 0) detailParts.push(settingsText('batchWorkflow.detailGenerated', { count: Number(library.generated) }));
     if (Number(library.skipped) > 0) detailParts.push(settingsText('batchWorkflow.detailExisting', { count: Number(library.skipped) }));
     if (Number(library.failed) > 0) detailParts.push(settingsText('batchWorkflow.detailFailed', { count: Number(library.failed) }));
-    const meta = detailParts.length ? detailParts.join(' · ') : (library.message || library.path || '');
+    const meta = current && active
+      ? [libraryBatchActivityLabel(status), ...detailParts].join(' · ')
+      : (detailParts.length ? detailParts.join(' · ') : (libraryBatchMessage(library) || library.path || ''));
     return `<div class="settings-batch-build-row ${current ? 'active' : ''} is-${escapeHTML(rowStatus)}">
       <div class="settings-batch-build-row-main">
         <strong>${escapeHTML(library.name || settingsText('libraries.nameFallback', { index: index + 1 }))}</strong>
         <span>${escapeHTML(meta)}</span>
       </div>
-      <em>${escapeHTML(libraryBatchBuildStatusLabel(rowStatus))}</em>
+      <em>${escapeHTML(current && active ? libraryBatchPhaseLabel(status) : libraryBatchBuildStatusLabel(rowStatus))}</em>
     </div>`;
   }).join('') : `<div class="settings-batch-build-empty">${escapeHTML(settingsText('batchWorkflow.thumbEmpty'))}</div>`;
   const progressPercent = Math.max(0, Math.min(100, Number(status.current_percent) || 0));
   return `<div class="settings-batch-build-panel">
     <div class="settings-batch-build-head">
       <div>
-        <strong>${escapeHTML(status.message || settingsText('batchWorkflow.thumbTitle'))}</strong>
+        <strong>${escapeHTML(libraryBatchMessage(status, settingsText('batchWorkflow.thumbTitle'), 'thumbnails'))}</strong>
         <span>${escapeHTML(summary)}</span>
       </div>
       <span class="settings-batch-build-badge ${active ? 'active' : ''}">${escapeHTML(active ? settingsText('batchWorkflow.statusRunning') : libraryBatchBuildStatusLabel(status.status || 'idle'))}</span>
@@ -10379,10 +10751,6 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
         <input class="input" id="settings-video-seek-throttle-ms" type="range" min="120" max="1000" step="20" value="${normalizeVideoSeekThrottleMS(state.videoSeekThrottleMS, 240)}" ${state.throttledVideoSeek ? '' : 'disabled'}>
       </div>
       <div class="settings-control">
-        <label for="settings-video-volume-swipe-sensitivity"><span>${escapeHTML(settingsText('display.volumeSwipeSensitivity'))}</span><span id="settings-video-volume-swipe-sensitivity-value">${normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100)}%</span></label>
-        <input class="input" id="settings-video-volume-swipe-sensitivity" type="range" min="40" max="220" step="5" value="${normalizeVideoVolumeSwipeSensitivity(state.videoVolumeSwipeSensitivity, 100)}">
-      </div>
-      <div class="settings-control">
         <label for="settings-video-volume-min-percent"><span>${escapeHTML(settingsText('display.volumeMin'))}</span><span id="settings-video-volume-min-percent-value">${normalizeVideoVolumePercent(state.videoVolumeMinPercent, 0)}%</span></label>
         <input class="input" id="settings-video-volume-min-percent" type="range" min="0" max="100" step="1" value="${normalizeVideoVolumePercent(state.videoVolumeMinPercent, 0)}">
       </div>
@@ -10448,9 +10816,18 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
     </div>
   </section>
 
+  <section class="card settings-panel settings-panel-subtitles">
+    ${renderSettingsPanelHeader(settingsText('playback.subtitlesTitle'), settingsText('playback.subtitlesCopy'), 'settingsPanelHeadSubtitle')}
+    <div class="settings-group">
+      ${renderSettingsToggle('settings-subtitles-enabled', settingsText('playback.subtitlesEnabled'), state.subtitlesEnabled)}
+      <div class="settings-static"><span>${escapeHTML(settingsText('playback.subtitlesSystemStyleCopy'))}</span></div>
+    </div>
+  </section>
+
   <section class="card settings-panel settings-panel-playback settings-panel-danmaku">
     ${renderSettingsPanelHeader(copyText('app.danmaku.settingsTitle'), copyText('app.danmaku.settingsCopy'), 'settingsPanelHeadDanmaku')}
     <div class="settings-group">
+      ${renderSettingsToggle('settings-danmaku-enabled', copyText('app.danmaku.showDanmaku'), window.EchoGalleryDanmaku?.isEnabled() ?? true)}
       ${renderDanmakuSettingControls()}
       <div class="settings-row"><div class="settings-static"><strong>${escapeHTML(copyText('app.danmaku.blockList'))}</strong><span>${escapeHTML(copyText('app.danmaku.blockListCopy'))}</span></div><div class="settings-actions settings-actions-fill"><button class="btn" id="settings-danmaku-block-btn" type="button">${escapeHTML(copyText('app.danmaku.editBlockList'))}</button></div></div>
       <div class="settings-row"><div class="settings-static"><strong>${escapeHTML(copyText('app.danmaku.updateAll'))}</strong><span>${escapeHTML(copyText('app.danmaku.updateAllCopy'))}</span></div><div class="settings-actions settings-actions-fill"><button class="btn" id="settings-danmaku-update-btn" type="button" ${canWriteMedia() && !danmakuUpdatingAll ? '' : 'disabled'}>${escapeHTML(copyText('app.danmaku.updateAll'))}</button></div></div>
@@ -10544,22 +10921,7 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
 
   <section class="card settings-panel settings-panel-update-card">
     ${renderSettingsPanelHeader(settingsText('sections.update.title'), settingsText('sections.update.copy'), settingsPanelHeadIconMap.update)}
-    <div class="settings-group settings-group-update">
-      ${renderSettingsToggle('settings-update-local-enabled', settingsText('update.local'), !!state.updateSettings.localEnabled, settingsText('update.localCopy'))}
-      <div class="settings-static settings-update-config ${state.updateSettings.localEnabled ? '' : 'settings-update-config-disabled'}">
-        <div class="settings-update-config-head">
-          <strong>local-update.toml</strong>
-        </div>
-        <div class="settings-update-config-body">
-          <textarea class="input settings-textarea settings-config-editor-textarea settings-update-config-textarea" id="settings-local-update-config" spellcheck="false" rows="8" ${state.updateSettings.localEnabled ? '' : 'disabled'}>${escapeHTML(state.serverSettings.local_update_config_text || renderLocalUpdateConfigPreview())}</textarea>
-        </div>
-      </div>
-      ${renderSettingsToggle('settings-update-github-enabled', settingsText('update.github'), !!state.updateSettings.githubEnabled, settingsText('update.githubCopy'))}
-      <div class="settings-actions settings-actions-fill settings-update-actions">
-        <button class="btn" id="settings-check-update-btn" type="button">${escapeHTML(settingsText('update.check'))}</button>
-        <button class="btn btn-primary" id="settings-run-update-btn" type="button" ${state.localUpdateCheckReady && state.localUpdateHasUpdate ? '' : 'disabled'}>${escapeHTML(settingsText('update.run'))}</button>
-      </div>
-    </div>
+    <div class="settings-group settings-group-update" id="settings-local-update-panel">${renderLocalUpdatePanel()}</div>
   </section>
 
   ${canManageSharesUI ? `
@@ -10777,12 +11139,6 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
     updateRangeProgress(e.target);
     setSettingsDirty();
   });
-  $('#settings-video-volume-swipe-sensitivity')?.addEventListener('input', e => {
-    state.videoVolumeSwipeSensitivity = normalizeVideoVolumeSwipeSensitivity(e.target.value, 100);
-    $('#settings-video-volume-swipe-sensitivity-value').textContent = `${state.videoVolumeSwipeSensitivity}%`;
-    updateRangeProgress(e.target);
-    setSettingsDirty();
-  });
   $('#settings-video-volume-min-percent')?.addEventListener('input', e => {
     state.videoVolumeMinPercent = normalizeVideoVolumePercent(e.target.value, 0);
     if (state.videoVolumeMaxPercent < state.videoVolumeMinPercent) state.videoVolumeMaxPercent = state.videoVolumeMinPercent;
@@ -10806,6 +11162,7 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
   });
   $('#settings-continue-last-video-position').addEventListener('change', e => { state.continueLastVideoPosition = !!e.target.checked; setSettingsDirty(); });
   $('#settings-prefetch-neighbors').addEventListener('change', e => { setExperimentalSetting('prefetchNeighbors', e.target.checked); setSettingsDirty(); });
+  $('#settings-subtitles-enabled')?.addEventListener('change', e => { state.subtitlesEnabled = !!e.target.checked; setSettingsDirty(); if ($('#lb-video')) loadLightboxSubtitles($('#lb-video'), state.lightboxPhotos[state.lightboxIndex]); });
   if (activate && canRunServerTasksUI) {
     void pollVideoThumbnailRefreshStatus();
     void pollEXIFBackfillStatus();
@@ -10893,72 +11250,9 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
       input.value = '';
     });
   });
-  $('#settings-update-local-enabled')?.addEventListener('change', e => {
-    state.updateSettings.localEnabled = !!e.target.checked;
-    state.localUpdateCheckReady = false;
-    state.localUpdateHasUpdate = false;
-    const runBtn = $('#settings-run-update-btn');
-    if (runBtn) runBtn.disabled = true;
-    persistUpdateSettings();
-    renderSettingsContent();
-  });
-  $('#settings-update-github-enabled')?.addEventListener('change', e => {
-    state.updateSettings.githubEnabled = !!e.target.checked;
-    state.localUpdateCheckReady = false;
-    state.localUpdateHasUpdate = false;
-    const runBtn = $('#settings-run-update-btn');
-    if (runBtn) runBtn.disabled = true;
-    persistUpdateSettings();
-    renderSettingsContent();
-  });
-  $('#settings-local-update-config')?.addEventListener('input', e => {
-    state.serverSettings.local_update_config_text = e.target.value;
-    state.localUpdateCheckReady = false;
-    state.localUpdateHasUpdate = false;
-    const runBtn = $('#settings-run-update-btn');
-    if (runBtn) runBtn.disabled = true;
-    autoGrowTextarea(e.target);
-  });
-  $('#settings-player-keymap')?.addEventListener('input', e => {
-    autoGrowTextarea(e.target);
-  });
-  $('#settings-check-update-btn')?.addEventListener('click', async e => {
-    const btn = e.currentTarget;
-    try {
-      const text = $('#settings-local-update-config')?.value || state.serverSettings.local_update_config_text || '';
-      const saved = await saveLocalUpdateConfig(text);
-      state.serverSettings.local_update_config_text = saved.text || text;
-      const result = await withButtonBusy(btn, settingsText('update.checking'), () => checkLocalUpdate());
-      state.localUpdateCheckReady = true;
-      state.localUpdateHasUpdate = !!(result && result.has_update);
-      const runBtn = $('#settings-run-update-btn');
-      if (runBtn) runBtn.disabled = !state.localUpdateHasUpdate;
-      showToast(result.has_update ? (result.message || settingsText('update.updateFound')) : (result.message || settingsText('update.upToDate')), 3200);
-    } catch (err) {
-      state.localUpdateCheckReady = false;
-      state.localUpdateHasUpdate = false;
-      const runBtn = $('#settings-run-update-btn');
-      if (runBtn) runBtn.disabled = true;
-      alert(copyText('app.interface.s_b441bb977f') + ((err && err.error) || err));
-    }
-  });
-  $('#settings-run-update-btn')?.addEventListener('click', async e => {
-    const btn = e.currentTarget;
-    if (!state.localUpdateCheckReady || !state.localUpdateHasUpdate) return;
-    try {
-      const text = $('#settings-local-update-config')?.value || state.serverSettings.local_update_config_text || '';
-      const saved = await saveLocalUpdateConfig(text);
-      state.serverSettings.local_update_config_text = saved.text || text;
-      const result = await withButtonBusy(btn, settingsText('update.running'), () => applyLocalUpdate());
-      state.localUpdateCheckReady = !!(result && result.has_update);
-      state.localUpdateHasUpdate = false;
-      const runBtn = $('#settings-run-update-btn');
-      if (runBtn) runBtn.disabled = true;
-      showToast(result.message || (result.updated > 0 ? settingsText('update.updatedPrograms', { count: result.updated }) : settingsText('update.upToDate')), 3600);
-    } catch (err) {
-      alert(copyText('app.interface.s_83c4ee7eb6') + ((err && err.error) || err));
-    }
-  });
+  bindLocalUpdatePanel();
+  if (!localUpdateUI.config && !localUpdateUI.loading && canRunServerTasksUI) void scanLocalUpdate();
+  $('#settings-player-keymap')?.addEventListener('input', e => autoGrowTextarea(e.target));
   $('#theme-btn')?.addEventListener('click', e => { e.preventDefault(); toggleTheme(); });
   $('#settings-export-config-btn')?.addEventListener('click', async e => {
     try {
@@ -12230,8 +12524,10 @@ function makePhotoThumb(photo, listRef, opts = {}) {
     ? `<span class="video-bookmark-badge" title="${escapeHTML(copyText('app.interface.d_video_bookmarks', { count: bookmarkCount }))}" aria-label="${escapeHTML(copyText('app.interface.d_video_bookmarks', { count: bookmarkCount }))}"><span class="video-bookmark-icon">${icons.bookmark}</span><span class="video-bookmark-count">${bookmarkCount}</span></span>`
     : '';
   const thumbFallback = isVideoMedia(photo) ? ` onerror="this.onerror=null;this.src='${videoPosterPlaceholder}'"` : '';
+  const photoName = window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c');
 
-  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${photo.original_name}"${thumbFallback}><span class="thumb-bottom-gradient" aria-hidden="true"></span>${videoBookmarkBadge}${mediaDurationBadge}`;
+  div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photoName)}"${thumbFallback}><span class="thumb-bottom-gradient" aria-hidden="true"></span>${videoBookmarkBadge}${mediaDurationBadge}<span class="photo-thumb-name" title="${escapeHTML(photoName)}" aria-hidden="true">${escapeHTML(photoName)}</span>`;
+  if (isVideoMedia(photo) && !isDebugMedia) enqueueSubtitleProbe(photo);
   const imageEl = div.querySelector('img');
   if (imageEl) {
     imageEl.addEventListener('load', () => {
@@ -12575,6 +12871,7 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     canWriteMedia() ? { role: 'album-add', icon: icons.plus || icons.contextAlbum, label: copyText('app.interface.albumAddToAlbum'), action: () => addSinglePhotoToAlbum(photo.id) } : null,
     { role: 'reveal', icon: icons.contextReveal, label: copyText('app.interface.mediaOpenInFileManager'), action: () => revealInFinder(photo.id) },
     { role: 'download', icon: icons.contextDownload, label: singleMediaSaveLabel(), action: () => confirmDownloadAction(copyText('app.interface.d_66274d1532', { v0: (singleMediaSaveLabel()) }), () => saveOrDownloadMedia(photo)) },
+    options.lightbox && isVideoMedia(photo) ? { role: 'switch-audio-track', icon: icons.contextSwitchSoundtrack, label: copyText('app.lightbox.switchAudioTrack'), action: () => switchLightboxAudioTrack(photo) } : null,
     isVideoMedia(photo) && !hasDanmakuMatch(photo) ? { role: 'danmaku', icon: icons.danmaku || icons.contextSearch || icons.search, label: copyText('app.danmaku.find'), action: () => openDanmakuModal(photo) } : null,
     isVideoMedia(photo) && canWriteMedia() && hasDanmakuMatch(photo) ? { role: 'danmaku-unmatch', icon: icons.danmakuDismatch || icons.danmaku, label: copyText('app.danmaku.removeMatch'), action: () => removeDanmakuMatch(photo) } : null,
     canWriteMedia() ? { role: 'rename', icon: icons.libraryCardEdit, label: copyText('app.interface.s_1cd80fd7a8'), action: () => openRenameMediaModal(photo) } : null,
@@ -12606,6 +12903,81 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     { role: 'delete', icon: icons.contextDelete, label: copyText('app.interface.commonDelete'), danger: true, action: () => deleteSinglePhoto(photo.id) },
   );
   return filterPhotoContextMenuItemsForDevice(items, options);
+}
+
+let subtitleMatchCache = { key: '', statuses: new Map(), pending: new Map(), queue: [], active: 0 };
+function resetSubtitleMatchCacheIfNeeded() {
+  const key = activeLibraryIdentity(state.serverSettings);
+  if (subtitleMatchCache.key !== key) subtitleMatchCache = { key, statuses: new Map(), pending: new Map(), queue: [], active: 0 };
+  return subtitleMatchCache;
+}
+
+function hasSubtitleMatch(photo) {
+  if (!photo || !isVideoMedia(photo)) return false;
+  if (photo.subtitle_available === true || photo.has_subtitles === true) return true;
+  return resetSubtitleMatchCacheIfNeeded().statuses.get(Number(photo.id)) === true;
+}
+
+function syncSubtitleThumbBadges() {
+  $$('.photo-thumb[data-kind="video"]').forEach(thumb => {
+    const id = Number(thumb.dataset.id || 0);
+    if (!id) return;
+    const subtitleMatched = resetSubtitleMatchCacheIfNeeded().statuses.get(id) === true;
+    if (resetSubtitleMatchCacheIfNeeded().statuses.has(id)) thumb.dataset.subtitleAvailable = subtitleMatched ? '1' : '0';
+    const markup = renderVideoDurationBadge({
+      id,
+      uuid: thumb.dataset.uuid,
+      duration_ms: Number(thumb.dataset.durationMs),
+      subtitle_available: subtitleMatched,
+    });
+    const badge = $('.media-duration-badge', thumb);
+    if (badge) {
+      badge.outerHTML = markup;
+    } else {
+      const name = $('.photo-thumb-name', thumb);
+      if (name && markup) name.insertAdjacentHTML('beforebegin', markup);
+    }
+  });
+}
+
+async function drainSubtitleProbeQueue() {
+  const cache = resetSubtitleMatchCacheIfNeeded();
+  while (cache.active < 3 && cache.queue.length) {
+    const photo = cache.queue.shift();
+    if (!photo || cache.pending.has(Number(photo.id))) continue;
+    const id = Number(photo.id);
+    cache.active++;
+    cache.pending.set(id, true);
+    api.get(`/api/media/${id}/subtitles`).then(result => {
+      if (subtitleMatchCache !== cache) return;
+      cache.statuses.set(id, Array.isArray(result?.tracks) && result.tracks.length > 0);
+      const thumb = $$('.photo-thumb[data-kind="video"]').find(node => Number(node.dataset.id || 0) === id);
+      if (thumb) thumb.dataset.subtitleAvailable = cache.statuses.get(id) ? '1' : '0';
+      syncSubtitleThumbBadges();
+    }).catch(() => {
+      // Keep an unknown result retryable. A transient API failure must not
+      // permanently suppress the badge for the current media card.
+      if (subtitleMatchCache === cache) cache.statuses.delete(id);
+    }).finally(() => {
+      if (subtitleMatchCache !== cache) return;
+      cache.pending.delete(id);
+      cache.active = Math.max(0, cache.active - 1);
+      void drainSubtitleProbeQueue();
+    });
+  }
+}
+
+function enqueueSubtitleProbe(photo) {
+  if (!photo || !isVideoMedia(photo) || !Number(photo.id)) return;
+  if (photo.subtitle_available === true || photo.has_subtitles === true) {
+    syncSubtitleThumbBadges();
+    return;
+  }
+  const cache = resetSubtitleMatchCacheIfNeeded();
+  const id = Number(photo.id);
+  if (cache.statuses.has(id) || cache.pending.has(id) || cache.queue.some(item => Number(item?.id) === id)) return;
+  cache.queue.push(photo);
+  void drainSubtitleProbeQueue();
 }
 
 let danmakuMatchCache = { key: '', uuids: new Set(), mediaIDs: new Set(), metadataByUUID: new Map(), metadataByMediaID: new Map(), ownerHydrationPending: new Set(), loaded: false, pending: null };
@@ -12648,15 +13020,17 @@ function hydrateDanmakuOwnerForPhoto(photo, metadata) {
 
 function renderVideoDurationBadge(photo) {
   const matched = hasDanmakuMatch(photo);
+  const subtitleMatched = photo.subtitle_available === true || photo.has_subtitles === true || photo.subtitleAvailable === true || hasSubtitleMatch(photo);
   const duration = Number(photo.duration_ms) > 0 ? formatDuration(photo.duration_ms) : '';
-  const icon = matched ? `<span class="media-danmaku-icon" title="${escapeHTML(copyText('app.danmaku.matched'))}" role="img" aria-label="${escapeHTML(copyText('app.danmaku.matched'))}">${icons.danmaku}</span>` : '';
-  return `<span class="media-duration-badge"${!matched && !duration ? ' hidden' : ''}>${icon}${escapeHTML(duration)}</span>`;
+  const subtitleIcon = subtitleMatched ? `<span class="media-subtitle-icon" title="${escapeHTML(settingsText('playback.subtitlesTitle'))}" role="img" aria-label="${escapeHTML(settingsText('playback.subtitlesTitle'))}">${icons.settingsPanelHeadSubtitle || ''}</span>` : '';
+  const danmakuIcon = matched ? `<span class="media-danmaku-icon" title="${escapeHTML(copyText('app.danmaku.matched'))}" role="img" aria-label="${escapeHTML(copyText('app.danmaku.matched'))}">${icons.danmaku}</span>` : '';
+  return `<span class="media-duration-badge"${!matched && !subtitleMatched && !duration ? ' hidden' : ''}>${subtitleIcon}${danmakuIcon}${escapeHTML(duration)}</span>`;
 }
 
 function syncDanmakuThumbBadges() {
   $$('.photo-thumb[data-kind="video"]').forEach(thumb => {
     const badge = $('.media-duration-badge', thumb);
-    if (badge) badge.outerHTML = renderVideoDurationBadge({ uuid: thumb.dataset.uuid, duration_ms: Number(thumb.dataset.durationMs) });
+    if (badge) badge.outerHTML = renderVideoDurationBadge({ id: Number(thumb.dataset.id), uuid: thumb.dataset.uuid, duration_ms: Number(thumb.dataset.durationMs) });
   });
 }
 
@@ -12738,6 +13112,9 @@ function renderDanmakuSettingControls() {
 }
 
 function bindDanmakuSettings() {
+  $('#settings-danmaku-enabled')?.addEventListener('change', event => {
+    window.EchoGalleryDanmaku?.setEnabled(event.target.checked);
+  });
   observeDanmakuSteppedRanges();
   requestAnimationFrame(() => $$('.settings-stepped-range input[type="range"]').forEach(updateRangeProgress));
   document.querySelectorAll('[data-danmaku-setting]').forEach(input => input.addEventListener('input', () => {
@@ -15931,8 +16308,18 @@ function bindGlobal() {
 function handlePhotoGridKeyboard(e) {
   if (state.searchOpen || state.blockingInteraction || document.querySelector('.modal-overlay.open')) return false;
   if ($('#lightbox')?.classList.contains('open')) return false;
+  if (typeof echoFrame !== 'undefined' && echoFrame) return false;
   if (shouldIgnoreGlobalShortcut(e.target)) return false;
   const key = e.key.toLowerCase();
+  if (isPhotoWallView() && !_ctxMenu && key === 'n' && !e.isComposing && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (!e.repeat) {
+      state.photoWallShowNames = !state.photoWallShowNames;
+      syncPhotoWallNameMode();
+    }
+    return true;
+  }
   const map = { w: 'up', a: 'left', s: 'down', d: 'right' };
   if (map[key]) {
     e.preventDefault();
@@ -16076,6 +16463,7 @@ async function openLightbox(photos, index, options = {}) {
   lbRender();
 }
 function closeLightbox() {
+  cancelVideoSoundtrackRequest($('#lb-video'));
   window.EchoGalleryDanmaku?.stop();
   if (typeof stopEchoFrame === 'function') stopEchoFrame();
   stopSlideshow();
@@ -16284,6 +16672,7 @@ async function lbGoTo(index, options = {}) {
   }
   state.lightboxPlaybackToken += 1;
   const video = $('#lb-video');
+  cancelVideoSoundtrackRequest(video);
   if (video) {
     saveCurrentVideoResumePosition({ quiet: true });
     flushPendingVideoPlaybackPreference();
@@ -16308,6 +16697,7 @@ async function lbGoTo(index, options = {}) {
   lbRender();
 }
 function lbRender() {
+  cancelVideoSoundtrackRequest($('#lb-video'));
   window.EchoGalleryDanmaku?.stop();
   const p = state.lightboxPhotos[state.lightboxIndex];
   if (!p) return;
@@ -16337,14 +16727,19 @@ function lbRender() {
     video.onloadeddata = () => {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
+      void loadLightboxSubtitles(video, p);
     };
     video.onloadedmetadata = () => {
       applyLightboxZoom();
-      restoreVideoResumePosition(video, p);
-      restoreVideoPlaybackPreference(video, p);
+      void loadLightboxSubtitles(video, p);
+      if (!video.dataset.soundtrackReplacing) {
+        restoreVideoResumePosition(video, p);
+        restoreVideoPlaybackPreference(video, p);
+      }
       updateVideoBookmarkProgress(video, p);
     };
     video.onerror = () => {
+      if (video.dataset.soundtrackReplacing) return;
       setLightboxMediaLoading(false);
       const mediaError = video.error;
       const errorCode = mediaError ? Number(mediaError.code) || 0 : 0;
@@ -16403,17 +16798,14 @@ function lbRender() {
       clearPendingVideoSeekCommit();
       if (!playNextVideoFromLightbox()) updateVideoBookmarkProgress(video, p);
     };
-    restoreVideoPlaybackPreference(video, p);
-    video.src = mediaPlaybackURL(p);
     video.poster = mediaThumbURL(p);
-    video.load();
+    void loadLightboxVideoSource(video, p);
     syncTouchPlaybackButton(video, p);
     syncLightboxMediaSession(p, video);
     if (video.readyState >= 2) {
       setLightboxMediaLoading(false);
       applyLightboxZoom();
     }
-    if (shouldAutoplayVideoInLightbox(p)) autoplayLightboxVideo(video);
   } else {
     state.lightboxPlaybackToken += 1;
     const renderToken = state.lightboxPlaybackToken;
@@ -16489,7 +16881,7 @@ function lbRender() {
       fullImage.src = fullURL;
     }
   }
-  $('#lb-title').textContent = p.original_name;
+  $('#lb-title').textContent = window.EchoGalleryLightbox.displayFilename(p.original_name);
   updateLightboxFavoriteButton(p);
   syncLightboxShareButton();
   updateVideoBookmarkButton(p);
@@ -16978,7 +17370,7 @@ function renderUploadModal() {
       ${icons.upload}
       <div style="margin-top:8px">${escapeHTML(copyText('app.upload.hint'))}</div>
       <div style="font-size:.8rem;margin-top:4px">${escapeHTML(copyText('app.upload.support'))}</div>
-      <input type="file" id="file-input" accept="image/*,.bmp,.tif,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi,.wmv,.wma,.ts,.mts,.m2ts,.mpg,.mpeg,.3gp,.3g2,.ogv,video/*,audio/x-ms-wma" multiple aria-hidden="true">
+      <input type="file" id="file-input" accept="image/*,.bmp,.tif,.tiff,.heic,.heif,.heics,.heifs,.hif,.mp4,.mov,.m4v,.webm,.mkv,.avi,.wmv,.wma,.ts,.mts,.m2ts,.mpg,.mpeg,.3gp,.3g2,.ogv,video/*,audio/x-ms-wma" multiple aria-hidden="true">
     </div>
     <div class="upload-queue" id="upload-queue"></div>
     <div class="modal-footer">
@@ -17458,7 +17850,7 @@ function renderSmartAlbumPreview(modal) {
     const details = searchResultDetails(photo);
     const copy = el('div', 'smart-album-preview-copy');
     const name = el('strong');
-    name.textContent = photo.original_name || copyText('app.interface.s_90a5096a0c');
+    name.textContent = window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c');
     const meta = el('span');
     meta.textContent = [details.kind, details.size].filter(value => value && value !== '—').join(' · ');
     const date = el('span');

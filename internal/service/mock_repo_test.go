@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -147,7 +149,7 @@ func (m *mockRepo) GetVideoPlaybackPreference(photoID int64, userID int64) (*sto
 	return pref, nil
 }
 
-func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error) {
 	pref := &storage.VideoPlaybackPreference{
 		PhotoID:    photoID,
 		Volume:     volume,
@@ -155,6 +157,13 @@ func (m *mockRepo) UpsertVideoPlaybackPreference(photoID int64, userID int64, vo
 		ResumeTime: resumeTime,
 		Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
 		UpdatedAt:  time.Now(),
+	}
+	if previous := m.playbackPrefs[fmt.Sprintf("%d:%d", photoID, userID)]; previous != nil {
+		pref.AudioTrack = previous.AudioTrack
+	}
+	if len(audioTrack) > 0 && audioTrack[0] != nil {
+		selected := *audioTrack[0]
+		pref.AudioTrack = &selected
 	}
 	m.playbackPrefs[fmt.Sprintf("%d:%d", photoID, userID)] = pref
 	return pref, nil
@@ -168,6 +177,34 @@ func (m *mockRepo) ListPhotos(params storage.ListPhotosParams) (*storage.PhotoPa
 		}
 	}
 	return &storage.PhotoPage{Photos: photos}, nil
+}
+
+func (m *mockRepo) ListPhotosForMetadataBackfillContext(ctx context.Context, userID, afterID int64, limit int, includeTotal bool) (*storage.PhotoPage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	page := &storage.PhotoPage{}
+	all := make([]*storage.Photo, 0, len(m.photos))
+	for _, photo := range m.photos {
+		if photo.UploadedBy == userID && photo.DeletedAt == nil {
+			if includeTotal {
+				page.Total++
+			}
+			if photo.ID > afterID {
+				all = append(all, photo)
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	if len(all) > limit {
+		page.HasMore = true
+		all = all[:limit]
+	}
+	page.Photos = all
+	return page, nil
 }
 
 func (m *mockRepo) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage.TimelineLocateResult, error) {

@@ -26,6 +26,7 @@ type LibraryBuildStatus struct {
 
 type LibraryBuildHooks struct {
 	Status               func() LibraryBuildStatus
+	RefreshMetrics       func()
 	SetExitAfterComplete func(enabled bool) (LibraryBuildStatus, error)
 	Cancel               func() (LibraryBuildStatus, error)
 }
@@ -40,7 +41,11 @@ func handleGetLibraryBuildStatus(hooks LibraryBuildHooks) gin.HandlerFunc {
 			c.JSON(http.StatusOK, LibraryBuildStatus{Status: "idle", Message: "当前没有扫描任务"})
 			return
 		}
-		c.JSON(http.StatusOK, hooks.Status())
+		status := hooks.Status()
+		if status.Status == "completed" && hooks.RefreshMetrics != nil {
+			hooks.RefreshMetrics()
+		}
+		c.JSON(http.StatusOK, status)
 	}
 }
 

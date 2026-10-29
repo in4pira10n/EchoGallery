@@ -203,10 +203,11 @@ type favoriteRequest struct {
 }
 
 type videoPlaybackPreferenceRequest struct {
-	Volume     *float64                         `json:"volume"`
-	Muted      *bool                            `json:"muted"`
-	ResumeTime *int64                           `json:"resume_time"`
-	Bookmarks  *[]storage.VideoPlaybackBookmark `json:"bookmarks"`
+	Volume     *float64                           `json:"volume"`
+	Muted      *bool                              `json:"muted"`
+	ResumeTime *int64                             `json:"resume_time"`
+	Bookmarks  *[]storage.VideoPlaybackBookmark   `json:"bookmarks"`
+	AudioTrack *storage.VideoAudioTrackPreference `json:"audio_track"`
 }
 
 type thumbnailWarmRequest struct {
@@ -389,6 +390,8 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/settings/pwa/icon", authRequired, adminRequired, handleUploadPWAIcon(cfg))
 	r.GET("/api/settings/pwa/icon", handleServePWAIcon(cfg))
 	r.PUT("/api/settings/local-update-config", authRequired, adminOrRootRequired, handleSaveLocalUpdateConfig(cfg))
+	r.GET("/api/settings/local-update/scan", authRequired, adminOrRootRequired, handleScanLocalUpdate)
+	r.GET("/api/settings/local-update/avatar", authRequired, adminOrRootRequired, handleLocalUpdateAvatar)
 	r.GET("/api/settings/local-update/check", authRequired, adminOrRootRequired, handleCheckLocalUpdate(cfg))
 	r.POST("/api/settings/local-update/apply", authRequired, adminOrRootRequired, handleApplyLocalUpdate(cfg, shutdown))
 	r.GET("/api/settings/thumbnails/build", authRequired, libraryRuntimeRequired, adminRequired, handleGetThumbnailBuildStatus(cfg, registrar))
@@ -446,6 +449,10 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.POST("/trash/albums/:groupID/restore", writableRequired, handleRestoreTrashAlbum(cfg, registrar))
 		media.DELETE("/trash/albums/:groupID", writableRequired, handleHardDeleteTrashAlbum(cfg, registrar))
 		media.GET("/:id/albums", handleListMediaAlbums(cfg, registrar))
+		media.GET("/:id/soundtracks", handleVideoSoundtracks(cfg, registrar, false))
+		media.POST("/:id/soundtracks", handleVideoSoundtracks(cfg, registrar, true))
+		media.GET("/:id/subtitles", handleVideoSubtitles(cfg, registrar, false))
+		media.POST("/:id/subtitles", handleVideoSubtitles(cfg, registrar, true))
 		media.GET("/:id/playback", handleGetVideoPlaybackPreference(cfg, registrar))
 		media.PUT("/:id/playback", handleSaveVideoPlaybackPreference(cfg, registrar))
 		media.POST("/:id/playback-cache", writableRequired, handleBuildBrowserPlaybackCache(cfg, registrar))
@@ -466,6 +473,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 
 	r.GET("/media/files/:uuid", authRequired, libraryRuntimeRequired, handleServeMediaFile(cfg, registrar))
 	r.GET("/media/playback/:uuid", authRequired, libraryRuntimeRequired, handleServeBrowserPlaybackFile(cfg, registrar))
+	r.GET("/media/subtitles/:uuid", authRequired, libraryRuntimeRequired, handleServeSubtitleFile(cfg, registrar))
 	r.GET("/media/photos/:uuid", authRequired, libraryRuntimeRequired, handleServePhotoFile(cfg, registrar))
 	r.GET("/media/thumbnails/:uuid", authRequired, libraryRuntimeRequired, handleServeThumbnailFile(cfg, registrar))
 	r.GET("/media/posters/:uuid", authRequired, libraryRuntimeRequired, handleServePoster(cfg, registrar))
@@ -692,7 +700,11 @@ func findAccessibleLibraryForLogin(cfg *config.Config, lockStore *sessionlock.St
 		if status == config.LibraryStatusMissing {
 			continue
 		}
-		if sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite")) {
+		occupied, leaseErr := sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite"))
+		if leaseErr != nil && !occupied {
+			return config.Library{}, false, leaseErr
+		}
+		if occupied {
 			continue
 		}
 		if lockStore == nil {
@@ -1320,7 +1332,7 @@ func handleGetVideoPlaybackPreference(cfg *config.Config, registrar interface{})
 func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}) gin.HandlerFunc {
 	type playbackSaver interface {
 		GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
-		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error)
+		SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error)
 	}
 	return func(c *gin.Context) {
 		scopedRegistrar := requestRegistrar(c, nil)
@@ -1375,7 +1387,7 @@ func handleSaveVideoPlaybackPreference(cfg *config.Config, registrar interface{}
 		if req.Bookmarks != nil {
 			bookmarks = append([]storage.VideoPlaybackBookmark(nil), (*req.Bookmarks)...)
 		}
-		pref, err := saver.SaveVideoPlaybackPreference(id, libraryUserID, volume, muted, resumeTime, bookmarks)
+		pref, err := saver.SaveVideoPlaybackPreference(id, libraryUserID, volume, muted, resumeTime, bookmarks, req.AudioTrack)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -1922,8 +1934,48 @@ func handleServePhotoFile(cfg *config.Config, registrar videoRegistrar) gin.Hand
 			c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 			return
 		}
+		if serveHEIFOriginalPreview(c, registrar, photo) {
+			return
+		}
 		c.File(registrar.MediaPath(photo))
 	}
+}
+
+func serveHEIFOriginalPreview(c *gin.Context, registrar videoRegistrar, photo *storage.Photo) bool {
+	if photo == nil || !(image.IsHEIFMimeType(photo.MimeType) || image.IsHEIFFilename(photo.OriginalName)) {
+		return false
+	}
+	provider, ok := registrar.(interface {
+		OriginalPreviewPath(*storage.Photo) string
+	})
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "HEIF 原图预览缓存不可用，请安装 FFmpeg 并构建缩略图", "error_key": "api.errors.heifPreviewUnavailable"})
+		return true
+	}
+	path := provider.OriginalPreviewPath(photo)
+	if path == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "HEIF 原图预览缓存不可用，请安装 FFmpeg 并构建缩略图", "error_key": "api.errors.heifPreviewUnavailable"})
+		return true
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		builder, canBuild := registrar.(interface {
+			EnsureHEIFPreview(*storage.Photo) (string, error)
+		})
+		if !canBuild {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "HEIF 原图预览尚未生成，请安装 FFmpeg 并构建缩略图", "error_key": "api.errors.heifPreviewUnavailable"})
+			return true
+		}
+		generated, buildErr := builder.EnsureHEIFPreview(photo)
+		if buildErr != nil || generated == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "HEIF 原图预览尚未生成，请安装 FFmpeg 并构建缩略图", "error_key": "api.errors.heifPreviewUnavailable"})
+			return true
+		}
+		path = generated
+	}
+	c.Header("Content-Type", "image/jpeg")
+	c.Header("Cache-Control", "private, no-cache")
+	c.File(path)
+	return true
 }
 
 func resolveExistingThumbnailPath(preferredPath string) string {
@@ -1983,6 +2035,14 @@ func enrichPhotoThumbnailFields(registrar videoRegistrar, photo *storage.Photo) 
 	thumbURL := mediaThumbURLForUUID(photo.UUID)
 	photo.ThumbnailURL = thumbURL
 	photo.ThumbnailReady = resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...) != ""
+	if photo.ThumbnailReady && (image.IsHEIFMimeType(photo.MimeType) || image.IsHEIFFilename(photo.OriginalName)) {
+		provider, ok := registrar.(interface {
+			OriginalPreviewPath(*storage.Photo) string
+		})
+		if !ok || resolveExistingThumbnailPath(provider.OriginalPreviewPath(photo)) == "" {
+			photo.ThumbnailReady = false
+		}
+	}
 	if photo.MediaKind == storage.MediaKindVideo {
 		photo.PosterURL = thumbURL
 		photo.PosterReady = photo.ThumbnailReady
@@ -2007,6 +2067,22 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 	if photo == nil {
 		return "", fmt.Errorf("媒体不存在")
 	}
+	imagePath := registrar.MediaPath(photo)
+	mimeType := photo.MimeType
+	if photo.MediaKind != storage.MediaKindVideo && (image.IsHEIFMimeType(mimeType) || image.IsHEIFFilename(photo.OriginalName)) {
+		provider, ok := registrar.(interface {
+			EnsureHEIFPreview(*storage.Photo) (string, error)
+		})
+		if !ok {
+			return "", fmt.Errorf("HEIF 预览转换不可用，请安装 FFmpeg 并构建缩略图")
+		}
+		var err error
+		imagePath, err = provider.EnsureHEIFPreview(photo)
+		if err != nil {
+			return "", err
+		}
+		mimeType = "image/jpeg"
+	}
 	thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
 	if thumbPath != "" {
 		return thumbPath, nil
@@ -2022,12 +2098,12 @@ func generateThumbnailOnDemand(cfg *config.Config, registrar videoRegistrar, pho
 		}
 		return resolveExistingThumbnailPath(preferredThumbPath), nil
 	}
-	file, err := os.Open(registrar.MediaPath(photo))
+	file, err := os.Open(imagePath)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	if err := image.GenerateThumbnail(file, photo.MimeType, preferredThumbPath, previewSize); err != nil {
+	if err := image.GenerateThumbnail(file, mimeType, preferredThumbPath, previewSize); err != nil {
 		return "", err
 	}
 	return resolveExistingThumbnailPath(preferredThumbPath), nil
@@ -2088,8 +2164,9 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			return
 		}
 		thumbPath := resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...)
+		var thumbErr error
 		if thumbPath == "" {
-			thumbPath, _ = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
+			thumbPath, thumbErr = onDemandThumbnailCoordinator.Do(photo.UUID, func() (string, error) {
 				return generateThumbnailOnDemand(cfg, registrar, photo)
 			})
 		}
@@ -2100,7 +2177,14 @@ func handleServeThumbnailFile(cfg *config.Config, registrar videoRegistrar) gin.
 			}
 		}
 		if thumbPath == "" {
+			if thumbErr != nil && (image.IsHEIFMimeType(photo.MimeType) || image.IsHEIFFilename(photo.OriginalName)) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": thumbErr.Error(), "error_key": "api.errors.heifPreviewUnavailable"})
+				return
+			}
 			if photo.MediaKind == storage.MediaKindImage {
+				if serveHEIFOriginalPreview(c, registrar, photo) {
+					return
+				}
 				c.File(registrar.MediaPath(photo))
 				return
 			}
@@ -2132,6 +2216,9 @@ func handleServeSharedMediaFile(cfg *config.Config, registrar videoRegistrar) gi
 				c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 				return
 			}
+			if serveHEIFOriginalPreview(c, registrar, photo) {
+				return
+			}
 			c.File(registrar.MediaPath(photo))
 		case storage.ShareTypeAlbum:
 			uuid := strings.TrimSuffix(c.Param("uuid"), filepath.Ext(c.Param("uuid")))
@@ -2152,6 +2239,9 @@ func handleServeSharedMediaFile(cfg *config.Config, registrar videoRegistrar) gi
 					c.JSON(http.StatusNotFound, gin.H{"error": "照片/视频不存在"})
 					return
 				}
+				if serveHEIFOriginalPreview(c, registrar, photo) {
+					return
+				}
 				c.File(registrar.MediaPath(photo))
 				return
 			}
@@ -2162,6 +2252,9 @@ func handleServeSharedMediaFile(cfg *config.Config, registrar videoRegistrar) gi
 			}
 			for _, photo := range page.Photos {
 				if photo.UUID == uuid {
+					if serveHEIFOriginalPreview(c, registrar, photo) {
+						return
+					}
 					c.File(registrar.MediaPath(photo))
 					return
 				}
@@ -2823,6 +2916,30 @@ func handleServeBrowserPlaybackFile(cfg *config.Config, registrar videoRegistrar
 			c.JSON(http.StatusNotFound, gin.H{"error": "媒体不存在"})
 			return
 		}
+		if raw, exists := c.GetQuery("soundtrack"); exists {
+			index, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || index < 0 || index > 1023 {
+				soundtrackError(c, service.ErrSoundtrackNotFound)
+				return
+			}
+			provider, ok := registrar.(interface {
+				SoundtrackPlaybackPath(*storage.Photo, int) (string, error)
+			})
+			if !ok {
+				soundtrackError(c, service.ErrSoundtrackNotFound)
+				return
+			}
+			path, err := provider.SoundtrackPlaybackPath(photo, index)
+			if err != nil {
+				soundtrackError(c, service.ErrSoundtrackNotFound)
+				return
+			}
+			c.Header("Content-Type", "video/mp4")
+			c.Header("Accept-Ranges", "bytes")
+			c.Header("Cache-Control", "private, no-cache")
+			c.File(path)
+			return
+		}
 		playbackPath, mimeType, err := registrar.BrowserPlaybackPath(photo)
 		if err != nil {
 			logServerPlaybackFailure(c, cfg, registrar, photo, "server_playback_path_error", err)
@@ -2960,7 +3077,11 @@ func handleUploadPlaceholder(cfg *config.Config, registrar videoRegistrar) gin.H
 				FileModTime:  fileModTime,
 			})
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				payload := gin.H{"error": err.Error()}
+				if image.IsHEIFFilename(file.Filename) {
+					payload["error_key"] = "api.errors.heifImportFailed"
+				}
+				c.JSON(http.StatusBadRequest, payload)
 				return
 			}
 			c.JSON(http.StatusCreated, result.Photo)
@@ -3239,7 +3360,9 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 				return
 			}
 			c.Set(string(requestRegistrarContextKey), registrar)
-			options.RuntimeProvider.rememberSession(sessionID, library.ID)
+			if options.RuntimeProvider.enterSessionLibrary(sessionID, library.ID) {
+				RefreshLibraryMetrics(cfg, library)
+			}
 		}
 		c.Next()
 	}

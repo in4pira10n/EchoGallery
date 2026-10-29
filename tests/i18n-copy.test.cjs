@@ -60,6 +60,16 @@ test('danmaku manager exposes a visible localized title', () => {
   assert.equal(englishCatalog.app.danmaku.manageTitle, 'Manage danmaku records');
 });
 
+test('batch library editor scrolls its results and uses English labels', () => {
+  assert.match(appCss, /\.modal \{[^}]*max-height:\s*calc\(100vh - 28px\);[^}]*overflow-y:\s*auto;/);
+  assert.match(appCss, /\.settings-batch-build-selection-list \{[^}]*overflow-y:\s*auto;/);
+  assert.equal(englishCatalog.app.settings.libraries.editor.create, 'Create');
+  assert.equal(englishCatalog.app.settings.libraries.editor.batchTitle, 'Add libraries in batch');
+  assert.equal(englishCatalog.app.interface.commonCreate, 'Create');
+  assert.equal(englishCatalog.app.interface.s_3e44b2a933, 'Select all');
+  assert.equal(englishCatalog.app.interface.s_2918633ac8, 'Explore');
+});
+
 test('every App interface copy entry is referenced by UI code', () => {
   const sources = [appSource, echoFrameSource, lightboxSource];
   const used = new Set();
@@ -88,6 +98,102 @@ test('EchoFrame and lightbox UI copy is catalog-backed', () => {
 test('app date formatting follows catalog locale metadata', () => {
   assert.match(appSource, /function copyLocale\(\)/);
   assert.doesNotMatch(appSource, /toLocale(?:DateString|String)\('zh-CN'/);
+});
+
+test('library build page localizes backend status and all duration units', () => {
+  for (const [copy, language] of [[catalog, 'zh-CN'], [englishCatalog, 'en-US']]) {
+    const nodes = new Map();
+    const context = vm.createContext({
+      copyCatalog: copy, window: {},
+      state: { libraryBuildStatus: { status: 'running', message: '正在扫描与构建资源库', done: 395, total: 979, elapsed_seconds: 3, eta_seconds: 5 } },
+      $: selector => {
+        if (!nodes.has(selector)) nodes.set(selector, {});
+        return nodes.get(selector);
+      },
+      escapeHTML: value => String(value || ''),
+      renderSettingsToggle: (_id, label) => label,
+    });
+    for (const name of ['interpolateCopy', 'copyText', 'formatSecondsShort', 'estimateLibraryBuildDiscoveryPercent', 'libraryBuildHeading', 'renderLibraryBuild']) {
+      const fn = appSource.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'));
+      assert.ok(fn, `Missing ${name}`);
+      vm.runInContext(fn[0], context);
+    }
+    context.renderLibraryBuild();
+    const html = nodes.get('#content').innerHTML;
+    assert.ok(html.includes(copy.app.libraryBuild.runningTitle));
+    assert.ok(html.includes('395 / 979'));
+    for (const status of ['discovering', 'running', 'cancelling', 'error']) {
+      const heading = context.libraryBuildHeading({ status, done: 12, message: '后台中文状态' });
+      assert.ok(heading.trim());
+      if (language === 'en-US') assert.doesNotMatch(heading, /[\u4e00-\u9fff]/);
+    }
+    if (language === 'en-US') {
+      assert.doesNotMatch(html, /[\u4e00-\u9fff]/);
+      assert.equal(context.formatSecondsShort(3), '3s');
+      assert.equal(context.formatSecondsShort(65), '1m 5s');
+      assert.equal(context.formatSecondsShort(3660), '1h 1m');
+    } else {
+      assert.equal(context.formatSecondsShort(3), '3 秒');
+    }
+  }
+});
+
+test('versioned catalogs keep audio track menu labels present with an older PWA cache', async () => {
+  for (const copy of [catalog, englishCatalog]) {
+    const requests = [];
+    const window = {
+      document: { currentScript: { src: 'http://localhost/static/i18n.js?v=eg-current' }, documentElement: {}, addEventListener() {} },
+      navigator: { languages: [copy.locale] },
+      localStorage: { getItem: () => null },
+      fetch: async url => {
+        requests.push(url);
+        const parsed = new URL(url, 'http://localhost');
+        // The previous cache contains catalogs from before audio track switching.
+        const data = parsed.pathname.endsWith('/locales.json') ? localeManifest
+          : parsed.searchParams.get('v') === 'eg-current' ? copy
+          : { locale: copy.locale, app: { lightbox: {} } };
+        return { ok: true, json: async () => data };
+      },
+    };
+    vm.runInNewContext(i18nSource, { window, Promise, encodeURIComponent });
+    const loaded = await window.EchoGalleryI18n.load();
+    const context = vm.createContext({ window, copyCatalog: loaded });
+    for (const name of ['interpolateCopy', 'copyText']) {
+      vm.runInContext(appSource.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'))[0], context);
+    }
+    assert.equal(context.copyText('app.lightbox.switchAudioTrack'), copy.app.lightbox.switchAudioTrack);
+    assert.match(appSource, /role: 'switch-audio-track'[^\n]+label: copyText\('app\.lightbox\.switchAudioTrack'\)/);
+    assert.ok(requests.every(url => new URL(url, 'http://localhost').searchParams.get('v') === 'eg-current'));
+  }
+});
+
+test('PWA catalogs refresh online and use only JSON cache entries offline', async () => {
+  const listeners = {};
+  const fresh = { ok: true, clone() { return this; } };
+  const cached = { cachedCatalog: true };
+  let online = true;
+  let cachedCatalog = cached;
+  const windowOrigin = 'http://localhost';
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'web/static/sw.js'), 'utf8'), {
+    URL, location: { origin: windowOrigin },
+    self: { addEventListener: (name, listener) => { listeners[name] = listener; } },
+    fetch: async () => { if (!online) throw new Error('offline'); return fresh; },
+    caches: {
+      match: async request => request === '/' ? { htmlShell: true } : cachedCatalog,
+      open: async () => ({ put: async () => {} }),
+    },
+  });
+  const request = { method: 'GET', mode: 'cors', url: windowOrigin + '/static/strings/en-US.json?v=eg-current' };
+  function fetchCatalog() {
+    let response;
+    listeners.fetch({ request, respondWith: promise => { response = promise; } });
+    return response;
+  }
+  assert.equal(await fetchCatalog(), fresh);
+  online = false;
+  assert.equal(await fetchCatalog(), cached);
+  cachedCatalog = undefined;
+  await assert.rejects(fetchCatalog(), /offline/);
 });
 
 test('setup UI text helper paths exist in the catalog', () => {

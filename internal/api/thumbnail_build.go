@@ -74,7 +74,11 @@ func handleGetThumbnailBuildStatus(cfg *config.Config, registrar interface{}) gi
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, buildThumbnailBuildStatusResponse(manager.GetThumbnailBuildStatus(userID)))
+		status := manager.GetThumbnailBuildStatus(userID)
+		if status.Status == "completed" {
+			RefreshCurrentLibraryMetrics(cfg)
+		}
+		c.JSON(http.StatusOK, buildThumbnailBuildStatusResponse(status))
 	}
 }
 

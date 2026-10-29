@@ -52,8 +52,20 @@ func ProbeVideo(path string) (*VideoMeta, error) {
 	return probeVideoWithRunner(path, execRunner)
 }
 
+// ProbeVideoContext inspects a video and terminates ffprobe when the caller cancels.
+func ProbeVideoContext(parent context.Context, path string) (*VideoMeta, error) {
+	return probeVideoWithRunnerContext(parent, path, execRunner)
+}
+
 func probeVideoWithRunner(path string, runner commandRunner) (*VideoMeta, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return probeVideoWithRunnerContext(context.Background(), path, runner)
+}
+
+func probeVideoWithRunnerContext(parent context.Context, path string, runner commandRunner) (*VideoMeta, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	out, err := runner(ctx, "ffprobe",

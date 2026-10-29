@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"os"
 	"path/filepath"
@@ -462,6 +463,9 @@ func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string)
 	if photo == nil {
 		return false
 	}
+	if isHEIFPhoto(photo) && !resolveManagedFile(s.OriginalPreviewPath(photo)) {
+		return false
+	}
 	targetPath := s.ThumbnailPath(photo)
 	if resolveManagedFile(targetPath) {
 		s.cleanupRedundantThumbnailFiles(photo)
@@ -477,7 +481,10 @@ func (s *PhotoService) thumbnailExistsForTier(photo *storage.Photo, tier string)
 }
 
 func (s *PhotoService) thumbnailTargetExists(photo *storage.Photo) bool {
-	return photo != nil && resolveManagedFile(s.ThumbnailPath(photo))
+	if photo == nil || !resolveManagedFile(s.ThumbnailPath(photo)) {
+		return false
+	}
+	return !isHEIFPhoto(photo) || resolveManagedFile(s.OriginalPreviewPath(photo))
 }
 
 func resolveManagedFile(path string) bool {
@@ -519,15 +526,68 @@ func (s *PhotoService) writeThumbnailForPhoto(photo *storage.Photo) error {
 		return nil
 	}
 	srcPath := s.resolveFinderPath(photo)
-	file, err := os.Open(srcPath)
+	imagePath := srcPath
+	mimeType := photo.MimeType
+	if isHEIFPhoto(photo) {
+		var err error
+		imagePath, err = s.ensureHEIFPreview(photo, srcPath)
+		if err != nil {
+			return err
+		}
+		if err := s.syncHEIFPreviewDimensions(photo, imagePath); err != nil {
+			return err
+		}
+		mimeType = "image/jpeg"
+	}
+	file, err := os.Open(imagePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	if err := imgpkg.GenerateThumbnail(file, photo.MimeType, destPath, maxEdge); err != nil {
+	if err := imgpkg.GenerateThumbnail(file, mimeType, destPath, maxEdge); err != nil {
 		return err
 	}
+	if isHEIFPhoto(photo) {
+		s.cleanupStaleHEIFPreviewFiles(photo)
+	}
 	s.cleanupRedundantThumbnailFiles(photo)
+	return nil
+}
+
+func (s *PhotoService) syncHEIFPreviewDimensions(photo *storage.Photo, previewPath string) error {
+	if s == nil || s.repo == nil || photo == nil {
+		return nil
+	}
+	file, err := os.Open(previewPath)
+	if err != nil {
+		return fmt.Errorf("打开 HEIF 预览以读取尺寸失败: %w", err)
+	}
+	config, decodeErr := jpeg.DecodeConfig(file)
+	_ = file.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("读取 HEIF 预览尺寸失败: %w", decodeErr)
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return fmt.Errorf("HEIF 预览尺寸无效: %dx%d", config.Width, config.Height)
+	}
+	if photo.Width == config.Width && photo.Height == config.Height && (photo.EXIF == nil || (photo.EXIF.Width == config.Width && photo.EXIF.Height == config.Height)) {
+		return nil
+	}
+	var exif *storage.PhotoEXIF
+	if photo.EXIF != nil {
+		exifCopy := *photo.EXIF
+		exif = &exifCopy
+	}
+	if exif != nil {
+		exif.Width = config.Width
+		exif.Height = config.Height
+	}
+	if err := s.repo.UpdatePhotoCapturedMetadata(photo.ID, photo.UploadedBy, photo.TakenAt, exif, config.Width, config.Height, photo.DurationMS); err != nil {
+		return fmt.Errorf("更新 HEIF 图片尺寸失败: %w", err)
+	}
+	photo.Width = config.Width
+	photo.Height = config.Height
+	photo.EXIF = exif
 	return nil
 }
 
@@ -656,7 +716,7 @@ func (s *PhotoService) Upload(input UploadInput) (*UploadResult, error) {
 
 	// 5. 生成缩略图（生产环境异步，测试环境同步）
 	if s.syncThumbnail {
-		s.generateThumbnail(photo, destPath, meta.MimeType)
+		s.generateThumbnail(photo)
 	} else {
 		s.background(func() { s.enqueueThumbnailGeneration(photo, true) })
 	}
@@ -687,13 +747,8 @@ func copyPhotoEXIF(src *imgpkg.EXIFData) *storage.PhotoEXIF {
 }
 
 // generateThumbnail 生成缩略图（在后台 goroutine 中调用）
-func (s *PhotoService) generateThumbnail(photo *storage.Photo, srcPath string, mimeType string) {
-	f, err := os.Open(srcPath)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	imgpkg.GenerateThumbnail(f, mimeType, s.ThumbnailPath(photo), s.thumbnailLongEdge()) //nolint:errcheck
+func (s *PhotoService) generateThumbnail(photo *storage.Photo) {
+	_ = s.writeThumbnailForPhoto(photo)
 	s.cleanupRedundantThumbnailFiles(photo)
 }
 
@@ -708,6 +763,62 @@ func (s *PhotoService) ThumbnailPath(photo *storage.Photo) string {
 		return s.PosterPath(photo)
 	}
 	return imgpkg.ThumbnailShardPath(s.managedThumbnailRoot(), photo.UUID)
+}
+
+func isHEIFPhoto(photo *storage.Photo) bool {
+	return photo != nil && (imgpkg.IsHEIFMimeType(photo.MimeType) || imgpkg.IsHEIFFilename(photo.OriginalName))
+}
+
+// OriginalPreviewPath returns the prebuilt browser-friendly full-size image cache for HEIF files.
+func (s *PhotoService) OriginalPreviewPath(photo *storage.Photo) string {
+	if s == nil || !isHEIFPhoto(photo) {
+		return ""
+	}
+	size := photo.Size
+	modUnix := photo.SourceModUnix
+	// v4 invalidates previews generated before HEIC orientation normalization.
+	filename := fmt.Sprintf("%s.heif-v4-%d-%d.jpg", photo.UUID, size, modUnix)
+	return filepath.Join(filepath.Dir(s.ThumbnailPath(photo)), filename)
+}
+
+// EnsureHEIFPreview creates the full-resolution JPEG cache used by the lightbox.
+func (s *PhotoService) EnsureHEIFPreview(photo *storage.Photo) (string, error) {
+	if s == nil || !isHEIFPhoto(photo) {
+		return "", fmt.Errorf("不是 HEIF 图片")
+	}
+	return s.ensureHEIFPreview(photo, s.MediaPath(photo))
+}
+
+func (s *PhotoService) ensureHEIFPreview(photo *storage.Photo, sourcePath string) (string, error) {
+	previewPath := s.OriginalPreviewPath(photo)
+	if previewPath == "" {
+		return "", fmt.Errorf("HEIF 预览缓存路径不可用")
+	}
+	if info, err := os.Stat(previewPath); err == nil && !info.IsDir() && info.Size() > 0 {
+		return previewPath, nil
+	}
+	if err := imgpkg.ConvertHEIFToJPEG(sourcePath, previewPath); err != nil {
+		return "", err
+	}
+	s.cleanupStaleHEIFPreviewFiles(photo)
+	return previewPath, nil
+}
+
+func (s *PhotoService) cleanupStaleHEIFPreviewFiles(photo *storage.Photo) {
+	if s == nil || !isHEIFPhoto(photo) {
+		return
+	}
+	current := s.OriginalPreviewPath(photo)
+	pattern := filepath.Join(filepath.Dir(current), photo.UUID+".heif-*.jpg")
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		return
+	}
+	for _, path := range paths {
+		if filepath.Clean(path) != filepath.Clean(current) {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func (s *PhotoService) managedThumbnailRoot() string {
@@ -798,6 +909,7 @@ func (s *PhotoService) thumbnailCleanupPaths(photo *storage.Photo) []string {
 	}
 	return []string{
 		s.ThumbnailPath(photo),
+		s.OriginalPreviewPath(photo),
 		s.legacyShardedThumbnailPath(photo),
 		s.legacyFlatThumbnailPath(photo),
 		s.legacyThumbnailPreviewPath(photo),

@@ -246,6 +246,77 @@ func TestThumbnailExistsForTier_CleansLegacyPreviewFilesWhenFullExists(t *testin
 	}
 }
 
+func TestHEIFThumbnailTargetRequiresFullResolutionPreview(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	photo := &storage.Photo{
+		UUID:          "heif-photo",
+		OriginalName:  "camera.heic",
+		MediaKind:     storage.MediaKindImage,
+		MimeType:      "image/heic",
+		Size:          4096,
+		SourceModUnix: 12345,
+	}
+	if !isHEIFPhoto(photo) {
+		t.Fatal("HEIC photo was not detected")
+	}
+	initialPreviewPath := svc.OriginalPreviewPath(photo)
+	photo.SourceModUnix++
+	if nextPreviewPath := svc.OriginalPreviewPath(photo); nextPreviewPath == initialPreviewPath {
+		t.Fatal("HEIF preview cache path should change with source modification time")
+	}
+	photo.SourceModUnix--
+	thumbPath := svc.ThumbnailPath(photo)
+	previewPath := svc.OriginalPreviewPath(photo)
+	for _, path := range []string{thumbPath, previewPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("cache"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !svc.thumbnailTargetExists(photo) {
+		t.Fatal("HEIF should be complete when both thumbnail and original preview exist")
+	}
+	if err := os.Remove(previewPath); err != nil {
+		t.Fatal(err)
+	}
+	if svc.thumbnailTargetExists(photo) {
+		t.Fatal("HEIF should remain queued until full-resolution preview exists")
+	}
+}
+
+func TestSyncHEIFPreviewDimensionsRepairsExistingPhotoMetadata(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	repo := svc.repo.(*mockRepo)
+	photo := &storage.Photo{
+		UUID:         "heif-dimensions",
+		OriginalName: "camera.heic",
+		MediaKind:    storage.MediaKindImage,
+		MimeType:     "image/heic",
+		Width:        512,
+		Height:       512,
+		EXIF:         &storage.PhotoEXIF{Width: 512, Height: 512},
+		UploadedBy:   1,
+	}
+	if err := repo.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+	previewPath := filepath.Join(t.TempDir(), "full-preview.jpg")
+	if err := os.WriteFile(previewPath, createJPEGBytes(3024, 4032), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.syncHEIFPreviewDimensions(photo, previewPath); err != nil {
+		t.Fatalf("sync HEIF preview dimensions: %v", err)
+	}
+	if photo.Width != 3024 || photo.Height != 4032 || photo.EXIF.Width != 3024 || photo.EXIF.Height != 4032 {
+		t.Fatalf("photo metadata was not repaired: %+v", photo)
+	}
+	if stored := repo.photos[photo.ID]; stored.Width != 3024 || stored.Height != 4032 {
+		t.Fatalf("stored metadata was not repaired: %+v", stored)
+	}
+}
+
 func TestThumbnailExistsForTier_DoesNotUseLegacyPreviewOnly(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	photo := &storage.Photo{UUID: "thumb-2", MediaKind: storage.MediaKindImage}

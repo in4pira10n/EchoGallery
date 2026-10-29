@@ -114,12 +114,22 @@ type FolderAlbumTrashEntry struct {
 
 // VideoPlaybackPreference 保存单个视频的播放偏好。
 type VideoPlaybackPreference struct {
-	PhotoID    int64                   `json:"photo_id"`
-	Volume     float64                 `json:"volume"`
-	Muted      bool                    `json:"muted"`
-	ResumeTime int64                   `json:"resume_time,omitempty"`
-	Bookmarks  []VideoPlaybackBookmark `json:"bookmarks,omitempty"`
-	UpdatedAt  time.Time               `json:"updated_at"`
+	PhotoID    int64                      `json:"photo_id"`
+	Volume     float64                    `json:"volume"`
+	Muted      bool                       `json:"muted"`
+	ResumeTime int64                      `json:"resume_time,omitempty"`
+	Bookmarks  []VideoPlaybackBookmark    `json:"bookmarks,omitempty"`
+	AudioTrack *VideoAudioTrackPreference `json:"audio_track,omitempty"`
+	UpdatedAt  time.Time                  `json:"updated_at"`
+}
+
+// VideoAudioTrackPreference identifies a zero-based audio-stream ordinal (FFmpeg 0:a:N).
+// Existing playback preferences store this without a library schema change.
+type VideoAudioTrackPreference struct {
+	Index    int    `json:"index" binding:"gte=0,lte=1023"`
+	ID       string `json:"id,omitempty" binding:"max=512"`
+	Language string `json:"language,omitempty" binding:"max=128"`
+	Label    string `json:"label,omitempty" binding:"max=512"`
 }
 
 type VideoPlaybackBookmark struct {
@@ -177,6 +187,9 @@ type LibraryScanSnapshot struct {
 	RootModUnixNano      int64             `json:"root_mod_unix_nano"`
 	DirectoryModTimes    map[string]int64  `json:"directory_mod_times,omitempty"`
 	DirectoryEntryHashes map[string]string `json:"directory_entry_hashes,omitempty"`
+	DirectoryMediaCounts map[string]int    `json:"directory_media_counts,omitempty"`
+	DirectoryMediaHashes map[string]string `json:"directory_media_hashes,omitempty"`
+	ChangedDirectories   []string          `json:"changed_directories,omitempty"`
 	DirectoryCount       int               `json:"directory_count,omitempty"`
 	DirectoryModHash     string            `json:"directory_mod_hash,omitempty"`
 	MediaFileHash        string            `json:"media_file_hash,omitempty"`

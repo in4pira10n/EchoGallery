@@ -1,6 +1,7 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,8 @@ var SupportedMimeTypes = map[string]bool{
 	"image/webp": true,
 	"image/bmp":  true,
 	"image/tiff": true,
+	"image/heic": true,
+	"image/heif": true,
 }
 
 // Meta 图片元数据
@@ -62,9 +65,40 @@ type EXIFData struct {
 // ExtractMeta 从 ReadSeeker 中提取图片元数据
 // fileCreateTime 作为没有 EXIF 时的后备时间
 func ExtractMeta(rs io.ReadSeeker, filename string, fileCreateTime time.Time) (*Meta, error) {
+	return ExtractMetaContext(context.Background(), rs, filename, fileCreateTime)
+}
+
+// ExtractMetaContext extracts image metadata while honoring task cancellation.
+func ExtractMetaContext(ctx context.Context, rs io.ReadSeeker, filename string, fileCreateTime time.Time) (*Meta, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	mimeType := DetectMimeType(filename)
 	if !SupportedMimeTypes[mimeType] {
 		return nil, fmt.Errorf("不支持的图片格式: %s", mimeType)
+	}
+	if IsHEIFMimeType(mimeType) {
+		tmp, err := os.CreateTemp("", "echogallery-heif-*"+filepath.Ext(filename))
+		if err != nil {
+			return nil, fmt.Errorf("创建 HEIF 元数据临时文件失败: %w", err)
+		}
+		tmpPath := tmp.Name()
+		defer os.Remove(tmpPath)
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			_ = tmp.Close()
+			return nil, fmt.Errorf("读取 HEIF 文件失败: %w", err)
+		}
+		if _, err := io.Copy(tmp, contextReader{ctx: ctx, reader: rs}); err != nil {
+			_ = tmp.Close()
+			return nil, fmt.Errorf("复制 HEIF 文件失败: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			return nil, fmt.Errorf("关闭 HEIF 临时文件失败: %w", err)
+		}
+		return extractHEIFMetaFromPathContext(ctx, tmpPath, filename, fileCreateTime)
 	}
 
 	// 尝试读取 EXIF
@@ -72,11 +106,14 @@ func ExtractMeta(rs io.ReadSeeker, filename string, fileCreateTime time.Time) (*
 	takenAt := fileCreateTime
 
 	if mimeType == "image/jpeg" {
-		if ed, t, err := parseEXIF(rs); err == nil {
+		if ed, t, err := parseEXIFReaderContext(ctx, rs, true); err == nil {
 			exifData = ed
 			if !t.IsZero() {
 				takenAt = t
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		// 重置读取位置
 		if _, err := rs.Seek(0, io.SeekStart); err != nil {
@@ -85,7 +122,7 @@ func ExtractMeta(rs io.ReadSeeker, filename string, fileCreateTime time.Time) (*
 	}
 
 	// 解码图片尺寸
-	cfg, _, err := image.DecodeConfig(rs)
+	cfg, _, err := image.DecodeConfig(contextReader{ctx: ctx, reader: rs})
 	if err != nil {
 		return nil, fmt.Errorf("解析图片尺寸失败: %w", err)
 	}
@@ -106,9 +143,50 @@ func ExtractMeta(rs io.ReadSeeker, filename string, fileCreateTime time.Time) (*
 	}, nil
 }
 
+// ExtractMetaFromPath extracts image metadata without copying the media file.
+func ExtractMetaFromPath(path, filename string, fileCreateTime time.Time) (*Meta, error) {
+	return ExtractMetaFromPathContext(context.Background(), path, filename, fileCreateTime)
+}
+
+// ExtractMetaFromPathContext extracts metadata from a path and supports cancellation.
+func ExtractMetaFromPathContext(ctx context.Context, path, filename string, fileCreateTime time.Time) (*Meta, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if IsHEIFMimeType(DetectMimeType(filename)) {
+		return extractHEIFMetaFromPathContext(ctx, path, filename, fileCreateTime)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return ExtractMetaContext(ctx, file, filename, fileCreateTime)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
 // parseEXIF 从 JPEG 中解析 EXIF 数据
 func parseEXIF(rs io.ReadSeeker) (*EXIFData, time.Time, error) {
-	x, err := exif.Decode(rs)
+	return parseEXIFReader(rs, true)
+}
+
+func parseEXIFReader(reader io.Reader, resolveLocation bool) (*EXIFData, time.Time, error) {
+	return parseEXIFReaderContext(context.Background(), reader, resolveLocation)
+}
+
+func parseEXIFReaderContext(ctx context.Context, reader io.Reader, resolveLocation bool) (*EXIFData, time.Time, error) {
+	x, err := exif.Decode(contextReader{ctx: ctx, reader: reader})
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -117,9 +195,15 @@ func parseEXIF(rs io.ReadSeeker) (*EXIFData, time.Time, error) {
 	var takenAt time.Time
 
 	// 拍摄时间
-	if t, err := x.DateTime(); err == nil {
-		takenAt = t
-		data.TakenAt = t
+	for _, field := range []exif.FieldName{exif.DateTimeOriginal, exif.DateTimeDigitized, exif.DateTime} {
+		if tag, err := x.Get(field); err == nil {
+			if value, err := tag.StringVal(); err == nil {
+				if parsed, err := parseEXIFDate(value); err == nil {
+					takenAt, data.TakenAt = parsed, parsed
+					break
+				}
+			}
+		}
 	}
 
 	// 相机品牌
@@ -166,28 +250,70 @@ func parseEXIF(rs io.ReadSeeker) (*EXIFData, time.Time, error) {
 		data.Latitude = lat
 		data.Longitude = lon
 		data.HasGPS = true
-		data.Location = reverseGeocodeLocation(lat, lon)
+		if resolveLocation {
+			data.Location = reverseGeocodeLocationContext(ctx, lat, lon)
+		}
 	}
 
 	return data, takenAt, nil
 }
 
+func parseEXIFDate(value string) (time.Time, error) {
+	value = strings.TrimSpace(strings.TrimRight(value, "\x00"))
+	for _, layout := range []string{"2006:01:02 15:04:05", time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported EXIF date %q", value)
+}
+
+func parseHEIFEXIF(data []byte, resolveLocation bool) (*EXIFData, time.Time, error) {
+	return parseHEIFEXIFContext(context.Background(), data, resolveLocation)
+}
+
+func parseHEIFEXIFContext(ctx context.Context, data []byte, resolveLocation bool) (*EXIFData, time.Time, error) {
+	signature := []byte("Exif\x00\x00")
+	for offset := 0; ; {
+		if err := ctx.Err(); err != nil {
+			return nil, time.Time{}, err
+		}
+		index := bytes.Index(data[offset:], signature)
+		if index < 0 {
+			break
+		}
+		offset += index + len(signature)
+		if parsed, takenAt, err := parseEXIFReaderContext(ctx, bytes.NewReader(data[offset:]), resolveLocation); err == nil {
+			return parsed, takenAt, nil
+		}
+	}
+	return nil, time.Time{}, fmt.Errorf("HEIF EXIF 数据不存在或无法解析")
+}
+
 func reverseGeocodeLocation(lat, lon float64) string {
-	if location := reverseGeocodeViaAmap(lat, lon); location != "" {
+	return reverseGeocodeLocationContext(context.Background(), lat, lon)
+}
+
+func reverseGeocodeLocationContext(ctx context.Context, lat, lon float64) string {
+	if location := reverseGeocodeViaAmapContext(ctx, lat, lon); location != "" {
 		return location
 	}
-	if location := reverseGeocodeViaNominatim(lat, lon); location != "" {
+	if location := reverseGeocodeViaNominatimContext(ctx, lat, lon); location != "" {
 		return location
 	}
 	return ""
 }
 
 func reverseGeocodeViaAmap(lat, lon float64) string {
+	return reverseGeocodeViaAmapContext(context.Background(), lat, lon)
+}
+
+func reverseGeocodeViaAmapContext(parent context.Context, lat, lon float64) string {
 	key := strings.TrimSpace(os.Getenv("ECHO_GALLERY_AMAP_KEY"))
 	if key == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parent, 1800*time.Millisecond)
 	defer cancel()
 	endpoint := "https://restapi.amap.com/v3/geocode/regeo"
 	params := url.Values{}
@@ -247,7 +373,11 @@ func reverseGeocodeViaAmap(lat, lon float64) string {
 }
 
 func reverseGeocodeViaNominatim(lat, lon float64) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 1800*time.Millisecond)
+	return reverseGeocodeViaNominatimContext(context.Background(), lat, lon)
+}
+
+func reverseGeocodeViaNominatimContext(parent context.Context, lat, lon float64) string {
+	ctx, cancel := context.WithTimeout(parent, 1800*time.Millisecond)
 	defer cancel()
 
 	endpoint := "https://nominatim.openstreetmap.org/reverse"
@@ -315,11 +445,36 @@ func DetectMimeType(filename string) string {
 		return "image/bmp"
 	case ".tif", ".tiff":
 		return "image/tiff"
+	case ".heic", ".heics":
+		return "image/heic"
+	case ".heif", ".heifs", ".hif":
+		return "image/heif"
 	default:
 		t := mime.TypeByExtension(ext)
 		if t == "" {
 			return "application/octet-stream"
 		}
 		return t
+	}
+}
+
+// IsHEIFMimeType reports whether a MIME type identifies a HEIF-family image.
+func IsHEIFMimeType(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+	switch mimeType {
+	case "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/x-heic":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsHEIFFilename reports whether a filename uses a common HEIF-family extension.
+func IsHEIFFilename(filename string) bool {
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".heic", ".heif", ".heics", ".heifs", ".hif":
+		return true
+	default:
+		return false
 	}
 }

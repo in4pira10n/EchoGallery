@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"mime/multipart"
@@ -78,7 +79,7 @@ type stubRegistrar struct {
 	getVideoThumbnailRefreshStatus func(userID int64) service.VideoThumbnailRefreshStatus
 	cancelVideoThumbnailRefresh    func(userID int64) (service.VideoThumbnailRefreshStatus, error)
 	getVideoPlaybackPreference     func(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error)
-	saveVideoPlaybackPreference    func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error)
+	saveVideoPlaybackPreference    func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error)
 	revealAlbumInFinder            func(id int64, userID int64) error
 	revealInFinder                 func(id int64, userID int64) error
 	restorePhoto                   func(id int64, userID int64) error
@@ -86,6 +87,8 @@ type stubRegistrar struct {
 	hardDeleteFolderAlbum          func(groupID string, userID int64) error
 	setPhotoFavorite               func(id int64, userID int64, favorite bool, superFavorite bool) error
 	thumbnailPath                  func(photo *storage.Photo) string
+	originalPreviewPath            func(photo *storage.Photo) string
+	ensureHEIFPreview              func(photo *storage.Photo) (string, error)
 }
 
 type smartAlbumRegistrarStub struct {
@@ -320,6 +323,20 @@ func (s stubRegistrar) ThumbnailPath(photo *storage.Photo) string {
 	return ""
 }
 
+func (s stubRegistrar) OriginalPreviewPath(photo *storage.Photo) string {
+	if s.originalPreviewPath == nil {
+		return ""
+	}
+	return s.originalPreviewPath(photo)
+}
+
+func (s stubRegistrar) EnsureHEIFPreview(photo *storage.Photo) (string, error) {
+	if s.ensureHEIFPreview == nil {
+		return "", fmt.Errorf("HEIF preview not configured")
+	}
+	return s.ensureHEIFPreview(photo)
+}
+
 func (s stubRegistrar) ThumbnailCandidates(photo *storage.Photo) []string {
 	if photo == nil {
 		return nil
@@ -373,17 +390,22 @@ func (s stubRegistrar) GetVideoPlaybackPreference(photoID int64, userID int64) (
 	return s.getVideoPlaybackPreference(photoID, userID)
 }
 
-func (s stubRegistrar) SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+func (s stubRegistrar) SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error) {
 	if s.saveVideoPlaybackPreference == nil {
+		var selected *storage.VideoAudioTrackPreference
+		if len(audioTrack) > 0 {
+			selected = audioTrack[0]
+		}
 		return &storage.VideoPlaybackPreference{
 			PhotoID:    photoID,
 			Volume:     volume,
 			Muted:      muted,
 			ResumeTime: resumeTime,
 			Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
+			AudioTrack: selected,
 		}, nil
 	}
-	return s.saveVideoPlaybackPreference(photoID, userID, volume, muted, resumeTime, bookmarks)
+	return s.saveVideoPlaybackPreference(photoID, userID, volume, muted, resumeTime, bookmarks, audioTrack...)
 }
 
 func (s stubRegistrar) RevealInFinder(id int64, userID int64) error {
@@ -1049,13 +1071,19 @@ func TestVideoPlaybackPreference_UsesLibraryOwnerRecordForAllUsers(t *testing.T)
 			}
 			return nil, nil
 		},
-		saveVideoPlaybackPreference: func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+		saveVideoPlaybackPreference: func(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error) {
 			pref := &storage.VideoPlaybackPreference{
 				PhotoID:    photoID,
 				Volume:     volume,
 				Muted:      muted,
 				ResumeTime: resumeTime,
 				Bookmarks:  append([]storage.VideoPlaybackBookmark(nil), bookmarks...),
+			}
+			if previous := savedByUser[userID]; previous != nil {
+				pref.AudioTrack = previous.AudioTrack
+			}
+			if len(audioTrack) > 0 && audioTrack[0] != nil {
+				pref.AudioTrack = audioTrack[0]
 			}
 			savedByUser[userID] = pref
 			return pref, nil
@@ -1093,6 +1121,40 @@ func TestVideoPlaybackPreference_UsesLibraryOwnerRecordForAllUsers(t *testing.T)
 	}
 	if visitorPref := savedByUser[2]; visitorPref != nil {
 		t.Fatalf("visitor 不应写入自己的播放记录，得到 %+v", visitorPref)
+	}
+
+	trackReq := httptest.NewRequest(http.MethodPut, "/api/media/9/playback", strings.NewReader(`{"audio_track":{"index":0,"id":"first","language":"zh","label":"中文"}}`))
+	trackReq.Header.Set("Content-Type", "application/json")
+	trackReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	trackResp := httptest.NewRecorder()
+	router.ServeHTTP(trackResp, trackReq)
+	if trackResp.Code != http.StatusOK {
+		t.Fatalf("audio track save failed: %d %s", trackResp.Code, trackResp.Body.String())
+	}
+	if err := json.Unmarshal(trackResp.Body.Bytes(), &prefResp); err != nil {
+		t.Fatal(err)
+	}
+	if prefResp.AudioTrack == nil || prefResp.AudioTrack.Index != 0 || prefResp.AudioTrack.ID != "first" || prefResp.ResumeTime != 45000 || len(prefResp.Bookmarks) != 1 {
+		t.Fatalf("audio track response lost playback state: %+v", prefResp)
+	}
+	readTrackReq := httptest.NewRequest(http.MethodGet, "/api/media/9/playback", nil)
+	readTrackReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	readTrackResp := httptest.NewRecorder()
+	router.ServeHTTP(readTrackResp, readTrackReq)
+	if readTrackResp.Code != http.StatusOK {
+		t.Fatalf("audio track read failed: %d %s", readTrackResp.Code, readTrackResp.Body.String())
+	}
+	var restored storage.VideoPlaybackPreference
+	if err := json.Unmarshal(readTrackResp.Body.Bytes(), &restored); err != nil || restored.AudioTrack == nil || restored.AudioTrack.ID != "first" {
+		t.Fatalf("audio track not restored: %+v, err=%v", restored, err)
+	}
+	invalidTrackReq := httptest.NewRequest(http.MethodPut, "/api/media/9/playback", strings.NewReader(`{"audio_track":{"index":-1}}`))
+	invalidTrackReq.Header.Set("Content-Type", "application/json")
+	invalidTrackReq.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	invalidTrackResp := httptest.NewRecorder()
+	router.ServeHTTP(invalidTrackResp, invalidTrackReq)
+	if invalidTrackResp.Code != http.StatusBadRequest {
+		t.Fatalf("invalid audio track must be rejected: %d %s", invalidTrackResp.Code, invalidTrackResp.Body.String())
 	}
 
 	saveReq := httptest.NewRequest(http.MethodPut, "/api/media/9/playback", strings.NewReader(`{"bookmarks":[{"slot":2,"time":45000,"name":"Shared"}]}`))
@@ -2410,6 +2472,39 @@ func TestServePhotoFile_Success(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("期望 200，得到 %d", w.Code)
+	}
+}
+
+func TestServePhotoFile_HEIFUsesPrebuiltJPEGPreview(t *testing.T) {
+	cfg := testConfig()
+	storageDir := t.TempDir()
+	previewPath := filepath.Join(storageDir, "preview.jpg")
+	var previewBuffer bytes.Buffer
+	if err := jpeg.Encode(&previewBuffer, image.NewRGBA(image.Rect(0, 0, 32, 24)), nil); err != nil {
+		t.Fatalf("编码测试 JPEG 失败: %v", err)
+	}
+	previewBytes := previewBuffer.Bytes()
+	if err := os.WriteFile(previewPath, previewBytes, 0644); err != nil {
+		t.Fatalf("创建 JPEG 预览失败: %v", err)
+	}
+	reg := okRegistrar()
+	reg.getByUUID = func(uuid string, userID int64) (*storage.Photo, error) {
+		return &storage.Photo{ID: 21, UUID: uuid, OriginalName: "camera.heic", MediaKind: storage.MediaKindImage, MimeType: "image/heic", UploadedBy: userID}, nil
+	}
+	reg.originalPreviewPath = func(photo *storage.Photo) string { return previewPath }
+	router := NewRouter(cfg, reg)
+	req := httptest.NewRequest(http.MethodGet, "/media/photos/heif-photo", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "image/jpeg") {
+		t.Fatalf("预览应以 JPEG 返回，得到 Content-Type %q", got)
+	}
+	if !bytes.Equal(w.Body.Bytes(), previewBytes) {
+		t.Fatal("服务返回的不是预生成 JPEG 预览")
 	}
 }
 

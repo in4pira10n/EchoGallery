@@ -79,7 +79,9 @@ func handleFallbackLibrary(cfg *config.Config, options RouterOptions) gin.Handle
 			if options.LockStore != nil {
 				_ = options.LockStore.ReleaseScopeForSessionExcept(sessionID, "browse", library.ID)
 			}
-			options.RuntimeProvider.rememberSession(sessionID, library.ID)
+			if options.RuntimeProvider.enterSessionLibrary(sessionID, library.ID) {
+				RefreshLibraryMetrics(cfg, library)
+			}
 			c.JSON(200, gin.H{"library_id": library.ID, "library_name": library.Name})
 			return
 		}

@@ -16,9 +16,74 @@ import (
 )
 
 func TestRuntimeReleaseEvictsWorkingCopyAndReloads(t *testing.T) {
-	root := t.TempDir()
-	library := config.Library{ID: "handoff", Name: "Handoff", Path: root}
-	cfg := &config.Config{AppDataDir: t.TempDir(), StoragePath: root, Libraries: []config.Library{library}}
+	for _, mode := range []string{"live", "expired", "bootstrap"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			library := config.Library{ID: "handoff", Name: "Handoff", Path: root}
+			cfg := &config.Config{AppDataDir: t.TempDir(), StoragePath: root, Libraries: []config.Library{library}}
+			provider, err := NewLibraryRuntimeProvider(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer provider.Close()
+			locks, err := sessionlock.New(filepath.Join(t.TempDir(), "locks.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer locks.Close()
+			if _, err := locks.Acquire(library, "admin", "admin", "page", "browse"); err != nil {
+				t.Fatal(err)
+			}
+			first, err := provider.ForLibrary(cfg, library)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "bootstrap" {
+				provider.rememberSession("page", library.ID)
+			}
+			if mode != "live" {
+				if err := locks.ReleaseSession("page"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := provider.SyncBeforeRelease(locks, "page", ""); err != nil {
+				t.Fatal(err)
+			}
+			if len(provider.repos) != 0 || len(provider.services) != 0 {
+				t.Fatal("released runtime retained")
+			}
+			locks.ReleaseSession("page")
+			path, err := cfg.DatabasePathForStorage(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			durable, err := sqlite.New(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := durable.CreateAlbum(&storage.Album{Name: "from another Gallery", CreatedBy: 1, CreatedAt: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			durable.Close()
+			next, err := provider.ForLibrary(cfg, library)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next == first {
+				t.Fatal("reused released service")
+			}
+			albums, err := provider.repos[library.ID].ListAlbums(1)
+			if err != nil || len(albums) != 1 {
+				t.Fatalf("did not reload latest state: %v %v", albums, err)
+			}
+
+		})
+	}
+}
+
+func TestRuntimeReleasePreservesOtherActiveReader(t *testing.T) {
+	library := config.Library{ID: "shared", Name: "Shared", Path: t.TempDir()}
+	cfg := &config.Config{AppDataDir: t.TempDir(), StoragePath: library.Path, Libraries: []config.Library{library}}
 	provider, err := NewLibraryRuntimeProvider(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -29,43 +94,34 @@ func TestRuntimeReleaseEvictsWorkingCopyAndReloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer locks.Close()
-	if _, err := locks.Acquire(library, "admin", "admin", "page", "browse"); err != nil {
+	for _, page := range []string{"one", "two"} {
+		if _, err := locks.Acquire(library, "admin", "admin", page, "browse"); err != nil {
+			t.Fatal(err)
+		}
+		provider.rememberSession(page, library.ID)
+	}
+	if _, err := provider.ForLibrary(cfg, library); err != nil {
 		t.Fatal(err)
 	}
-	first, err := provider.ForLibrary(cfg, library)
-	if err != nil {
+	if err := provider.SyncBeforeRelease(locks, "one", ""); err != nil {
 		t.Fatal(err)
 	}
-	provider.rememberSession("page", library.ID)
-	if err := provider.SyncBeforeRelease(locks, "page", ""); err != nil {
+	if len(provider.repos) != 1 {
+		t.Fatal("closed another active reader's runtime")
+	}
+	if err := locks.ReleaseSession("one"); err != nil {
 		t.Fatal(err)
 	}
-	if len(provider.repos) != 0 || len(provider.services) != 0 {
-		t.Fatal("released runtime retained")
-	}
-	locks.ReleaseSession("page")
-	path, err := cfg.DatabasePathForStorage(root)
-	if err != nil {
+	provider.rememberSession("one", "")
+	// The final reader's advisory lock expires before its close request.
+	if err := locks.ReleaseSession("two"); err != nil {
 		t.Fatal(err)
 	}
-	durable, err := sqlite.New(path)
-	if err != nil {
+	if err := provider.SyncBeforeRelease(locks, "two", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := durable.CreateAlbum(&storage.Album{Name: "from another Gallery", CreatedBy: 1, CreatedAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	durable.Close()
-	next, err := provider.ForLibrary(cfg, library)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next == first {
-		t.Fatal("reused released service")
-	}
-	albums, err := provider.repos[library.ID].ListAlbums(1)
-	if err != nil || len(albums) != 1 {
-		t.Fatalf("did not reload latest state: %v %v", albums, err)
+	if len(provider.repos) != 0 {
+		t.Fatal("last expired reader retained the portable lease")
 	}
 }
 

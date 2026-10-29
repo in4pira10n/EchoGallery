@@ -58,6 +58,14 @@
       .replace(/'/g, '&#39;');
   }
 
+  // Decode printable macOS SMB/SFM filename escapes for display only.
+  // Keep stored names and filesystem operations unchanged.
+  function displayFilename(value) {
+    const characters = ['"', '*', ':', '<', '>', '?', '\\', '|', ' ', '.'];
+    return String(value == null ? '' : value).replace(/[\uf020-\uf029]/g,
+      character => characters[character.charCodeAt(0) - 0xf020]);
+  }
+
   function addPanguSpacing(text) {
     return String(text || '')
       .replace(/([\u4e00-\u9fff])([A-Za-z0-9@#&%+=/.-])/g, '$1 $2')
@@ -386,7 +394,7 @@
           });
         }
       }
-      byID('lb-title').textContent = name;
+      byID('lb-title').textContent = displayFilename(name);
       byID('lb-info').innerHTML = renderInfoItems([
         [isVideo ? icons.video : icons.image, copyText('type'), isVideo ? copyText('video') : copyText('image')],
         [icons.mime, 'MIME', item.mime_type || item.target_mime_type || ''],
@@ -565,6 +573,7 @@
   }
 
   window.EchoGalleryLightbox = {
+    displayFilename,
     renderShell,
     createShareController,
     loadIcons,

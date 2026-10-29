@@ -74,12 +74,15 @@ type Preferences struct {
 	LightboxUIIdleSeconds         int                   `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool                  `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int                   `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int                   `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                   `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                   `json:"video_volume_max_percent"`
 	Danmaku                       *DanmakuPreferences   `json:"danmaku,omitempty"`
 	LowResourceMode               bool                  `json:"low_resource_mode"`
 	PlayerKeymap                  string                `json:"player_keymap"`
+	SubtitlesEnabled              bool                  `json:"subtitles_enabled"`
+	SubtitleFontSize              int                   `json:"subtitle_font_size"`
+	SubtitleColor                 string                `json:"subtitle_color"`
+	SubtitleBackgroundOpacity     int                   `json:"subtitle_background_opacity"`
 }
 
 type configDefaultsProbe struct {
@@ -103,11 +106,14 @@ type configDefaultsProbe struct {
 		LightboxUIIdleSeconds         *int    `json:"lightbox_ui_idle_seconds"`
 		ThrottledVideoSeek            *bool   `json:"throttled_video_seek"`
 		VideoSeekThrottleMS           *int    `json:"video_seek_throttle_ms"`
-		VideoVolumeSwipeSensitivity   *int    `json:"video_volume_swipe_sensitivity"`
 		VideoVolumeMinPercent         *int    `json:"video_volume_min_percent"`
 		VideoVolumeMaxPercent         *int    `json:"video_volume_max_percent"`
 		LowResourceMode               *bool   `json:"low_resource_mode"`
 		PlayerKeymap                  *string `json:"player_keymap"`
+		SubtitlesEnabled              *bool   `json:"subtitles_enabled"`
+		SubtitleFontSize              *int    `json:"subtitle_font_size"`
+		SubtitleColor                 *string `json:"subtitle_color"`
+		SubtitleBackgroundOpacity     *int    `json:"subtitle_background_opacity"`
 	} `json:"preferences"`
 }
 
@@ -193,6 +199,16 @@ func Load() (*Config, error) {
 
 func LocalUpdatePath() (string, error) {
 	return localUpdatePath()
+}
+
+// LibraryMetricsPath returns the application-level cache for library summary
+// metrics. It lives beside config.json, rather than inside a library root.
+func LibraryMetricsPath() (string, error) {
+	path, err := configPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "library_metrics.json"), nil
 }
 
 // loadFromPath 从指定路径加载配置文件
@@ -463,9 +479,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Preferences.LightboxUIIdleSeconds < 0 || c.Preferences.LightboxUIIdleSeconds > 15 {
 		c.Preferences.LightboxUIIdleSeconds = 0
-	}
-	if c.Preferences.VideoVolumeSwipeSensitivity < 40 || c.Preferences.VideoVolumeSwipeSensitivity > 220 {
-		c.Preferences.VideoVolumeSwipeSensitivity = 100
 	}
 	if c.Preferences.VideoVolumeMinPercent < 0 || c.Preferences.VideoVolumeMinPercent > 100 {
 		c.Preferences.VideoVolumeMinPercent = 0
@@ -868,14 +881,23 @@ func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	if probe.Preferences.VideoSeekThrottleMS == nil {
 		c.Preferences.VideoSeekThrottleMS = 240
 	}
-	if probe.Preferences.VideoVolumeSwipeSensitivity == nil {
-		c.Preferences.VideoVolumeSwipeSensitivity = 100
-	}
 	if probe.Preferences.VideoVolumeMinPercent == nil {
 		c.Preferences.VideoVolumeMinPercent = 0
 	}
 	if probe.Preferences.VideoVolumeMaxPercent == nil {
 		c.Preferences.VideoVolumeMaxPercent = 100
+	}
+	if probe.Preferences.SubtitlesEnabled == nil {
+		c.Preferences.SubtitlesEnabled = true
+	}
+	if probe.Preferences.SubtitleFontSize == nil {
+		c.Preferences.SubtitleFontSize = 100
+	}
+	if probe.Preferences.SubtitleColor == nil {
+		c.Preferences.SubtitleColor = "#ffffff"
+	}
+	if probe.Preferences.SubtitleBackgroundOpacity == nil {
+		c.Preferences.SubtitleBackgroundOpacity = 72
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		c.Preferences.LowResourceMode = false

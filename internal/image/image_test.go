@@ -42,12 +42,24 @@ func TestDetectMimeType(t *testing.T) {
 		{"photo.bmp", "image/bmp"},
 		{"photo.tif", "image/tiff"},
 		{"photo.tiff", "image/tiff"},
+		{"photo.heic", "image/heic"},
+		{"photo.HEIF", "image/heif"},
+		{"photo.hif", "image/heif"},
 		{"document.pdf", "application/pdf"},
 	}
 	for _, c := range cases {
 		got := DetectMimeType(c.filename)
 		if got != c.expected {
 			t.Errorf("DetectMimeType(%q) = %q, 期望 %q", c.filename, got, c.expected)
+		}
+	}
+}
+
+func TestHEIFFormatsAreRecognizedAsImages(t *testing.T) {
+	for _, name := range []string{"photo.heic", "photo.heif", "photo.heics", "photo.heifs", "photo.hif"} {
+		mimeType := DetectMimeType(name)
+		if !SupportedMimeTypes[mimeType] || !IsHEIFFilename(name) || !IsHEIFMimeType(mimeType) {
+			t.Errorf("HEIF image %q not recognized: mime=%q", name, mimeType)
 		}
 	}
 }

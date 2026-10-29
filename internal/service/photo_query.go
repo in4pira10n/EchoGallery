@@ -1031,6 +1031,14 @@ func (s *PhotoService) removeThumbnailFiles(photo *storage.Photo) {
 			_ = os.Remove(path)
 		}
 	}
+	s.cleanupStaleHEIFPreviewFiles(photo)
+	if photo != nil && isHEIFPhoto(photo) {
+		pattern := filepath.Join(filepath.Dir(s.ThumbnailPath(photo)), photo.UUID+".heif-*.jpg")
+		paths, _ := filepath.Glob(pattern)
+		for _, path := range paths {
+			_ = os.Remove(path)
+		}
+	}
 }
 
 func moveFileToTrash(src, dest string) error {

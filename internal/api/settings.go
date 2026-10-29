@@ -129,12 +129,15 @@ type settingsResponse struct {
 	LightboxUIIdleSeconds         int                          `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool                         `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int                          `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
 	Danmaku                       *config.DanmakuPreferences   `json:"danmaku"`
 	LowResourceMode               bool                         `json:"low_resource_mode"`
 	PlayerKeymap                  string                       `json:"player_keymap"`
+	SubtitlesEnabled              bool                         `json:"subtitles_enabled"`
+	SubtitleFontSize              int                          `json:"subtitle_font_size"`
+	SubtitleColor                 string                       `json:"subtitle_color"`
+	SubtitleBackgroundOpacity     int                          `json:"subtitle_background_opacity"`
 	PWAIconURL                    string                       `json:"pwa_icon_url,omitempty"`
 	LocalUpdateConfigText         string                       `json:"local_update_config_text,omitempty"`
 }
@@ -169,12 +172,15 @@ type settingsUpdateRequest struct {
 	LightboxUIIdleSeconds         int                          `json:"lightbox_ui_idle_seconds"`
 	ThrottledVideoSeek            bool                         `json:"throttled_video_seek"`
 	VideoSeekThrottleMS           int                          `json:"video_seek_throttle_ms"`
-	VideoVolumeSwipeSensitivity   int                          `json:"video_volume_swipe_sensitivity"`
 	VideoVolumeMinPercent         int                          `json:"video_volume_min_percent"`
 	VideoVolumeMaxPercent         int                          `json:"video_volume_max_percent"`
 	Danmaku                       *config.DanmakuPreferences   `json:"danmaku"`
 	LowResourceMode               bool                         `json:"low_resource_mode"`
 	PlayerKeymap                  string                       `json:"player_keymap"`
+	SubtitlesEnabled              bool                         `json:"subtitles_enabled"`
+	SubtitleFontSize              int                          `json:"subtitle_font_size"`
+	SubtitleColor                 string                       `json:"subtitle_color"`
+	SubtitleBackgroundOpacity     int                          `json:"subtitle_background_opacity"`
 }
 
 type refreshLibraryLogosRequest struct {
@@ -259,6 +265,7 @@ type libraryResponse struct {
 	Status                string `json:"status,omitempty"`
 	Available             bool   `json:"available"`
 	UnavailableReason     string `json:"unavailable_reason,omitempty"`
+	UnavailableReasonKey  string `json:"unavailable_reason_key,omitempty"`
 	LockedByUsername      string `json:"locked_by_username,omitempty"`
 	CreatedAt             string `json:"created_at,omitempty"`
 	LastScannedAt         string `json:"last_scanned_at,omitempty"`
@@ -267,13 +274,13 @@ type libraryResponse struct {
 	TotalSizeText         string `json:"total_size_text,omitempty"`
 	PhotoCount            int64  `json:"photo_count,omitempty"`
 	VideoCount            int64  `json:"video_count,omitempty"`
-	RebuildRequired       bool   `json:"rebuild_required,omitempty"`
 }
 
 type LibraryAvailabilityState struct {
 	Available     bool   `json:"available"`
 	Status        string `json:"status,omitempty"`
 	Reason        string `json:"reason,omitempty"`
+	ReasonKey     string `json:"reason_key,omitempty"`
 	OwnerUsername string `json:"owner_username,omitempty"`
 	Scope         string `json:"scope,omitempty"`
 }
@@ -401,19 +408,23 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		LightboxUIIdleSeconds:         profile.Preferences.LightboxUIIdleSeconds,
 		ThrottledVideoSeek:            profile.Preferences.ThrottledVideoSeek,
 		VideoSeekThrottleMS:           profile.Preferences.VideoSeekThrottleMS,
-		VideoVolumeSwipeSensitivity:   profile.Preferences.VideoVolumeSwipeSensitivity,
 		VideoVolumeMinPercent:         profile.Preferences.VideoVolumeMinPercent,
 		VideoVolumeMaxPercent:         profile.Preferences.VideoVolumeMaxPercent,
 		Danmaku:                       config.NormalizeDanmaku(profile.Preferences.Danmaku),
 		LowResourceMode:               profile.Preferences.LowResourceMode,
 		PlayerKeymap:                  playerKeymap,
+		SubtitlesEnabled:              profile.Preferences.SubtitlesEnabled,
+		SubtitleFontSize:              profile.Preferences.SubtitleFontSize,
+		SubtitleColor:                 profile.Preferences.SubtitleColor,
+		SubtitleBackgroundOpacity:     profile.Preferences.SubtitleBackgroundOpacity,
 		PWAIconURL:                    pwaIconURL(cfg.Workshop.FaviconAsset),
 		LocalUpdateConfigText:         localUpdateText,
 	}
 }
 
 type localUpdateConfigRequest struct {
-	Text string `json:"text"`
+	Config *update.LocalUpdateConfig `json:"config"`
+	Text   string                    `json:"text"`
 }
 
 func handleSaveLocalUpdateConfig(cfg *config.Config) gin.HandlerFunc {
@@ -428,12 +439,15 @@ func handleSaveLocalUpdateConfig(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		_, text, err := update.SaveLocalUpdateConfig(path, req.Text)
+		if req.Config != nil {
+			req.Text = update.NormalizeLocalUpdateConfigText(*req.Config)
+		}
+		conf, text, err := update.SaveLocalUpdateConfig(path, req.Text)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"text": text})
+		c.JSON(http.StatusOK, gin.H{"text": text, "config": conf})
 	}
 }
 
@@ -454,7 +468,7 @@ func handleCheckLocalUpdate(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, result)
+		c.JSON(http.StatusOK, gin.H{"check": result, "targets": updateGalleryRows(result.Targets, currentUsername(c))})
 	}
 }
 
@@ -479,8 +493,17 @@ func handleApplyLocalUpdate(cfg *config.Config, shutdown func() error) gin.Handl
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		var req struct {
+			CheckID string   `json:"check_id"`
+			Targets []string `json:"targets"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.CheckID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "check for updates before applying"})
+			return
+		}
 		wd, _ := os.Getwd()
 		result, err := update.StartLocalUpdate(conf, update.StartOptions{
+			ExpectedCheckID: req.CheckID, SelectedTargets: req.Targets,
 			CurrentPID:        os.Getpid(),
 			CurrentExecutable: exe,
 			RestartArgs:       append([]string(nil), os.Args[1:]...),
@@ -501,42 +524,96 @@ func handleApplyLocalUpdate(cfg *config.Config, shutdown func() error) gin.Handl
 	}
 }
 
-func buildLibraryStats(cfg *config.Config, library config.Library) libraryResponse {
+func isCurrentLibrary(cfg *config.Config, library config.Library) bool {
+	if cfg == nil {
+		return false
+	}
+	if strings.TrimSpace(cfg.ActiveLibraryID) != "" && strings.TrimSpace(cfg.ActiveLibraryID) == strings.TrimSpace(library.ID) {
+		return true
+	}
+	return config.NormalizeStoragePath(cfg.StoragePath) != "" &&
+		config.NormalizeStoragePath(cfg.StoragePath) == config.NormalizeStoragePath(library.Path)
+}
+
+func buildLibraryStats(cfg *config.Config, library config.Library, cached map[string]libraryResponse) libraryResponse {
+	if stats, ok := cachedLibraryMetric(cached, library); ok {
+		return stats
+	}
+	return libraryResponse{}
+}
+
+func refreshLibraryMetric(cfg *config.Config, library config.Library) libraryResponse {
 	dbPath, err := cfg.DatabasePathForStorage(library.Path)
 	if err != nil {
 		return libraryResponse{}
 	}
-	if value, ok := libraryStatsCache.Load(dbPath); ok {
-		cached, _ := value.(cachedLibraryStats)
-		if !cached.Refreshing && time.Now().After(cached.ExpiresAt) {
-			cached.Refreshing = true
-			libraryStatsCache.Store(dbPath, cached)
-			go refreshLibraryStats(dbPath)
-		}
-		return cached.Response
+	stats, err := readLibraryStatsFromDB(dbPath)
+	if err != nil {
+		return libraryResponse{}
 	}
-	libraryStatsCache.Store(dbPath, cachedLibraryStats{Refreshing: true})
-	go refreshLibraryStats(dbPath)
-	return libraryResponse{}
+	_ = writeLibraryMetric(library, stats)
+	return stats
 }
 
-func refreshLibraryStats(dbPath string) {
+func refreshCompletedLibraryMetrics(cfg *config.Config, rows []LibraryBatchBuildLibraryStatus) {
+	if cfg == nil {
+		return
+	}
+	for _, row := range rows {
+		if strings.ToLower(strings.TrimSpace(row.Status)) != "completed" {
+			continue
+		}
+		for _, library := range cfg.Libraries {
+			if (strings.TrimSpace(row.ID) != "" && row.ID == library.ID) ||
+				(row.ID == "" && config.NormalizeStoragePath(row.Path) == config.NormalizeStoragePath(library.Path)) {
+				_ = refreshLibraryMetric(cfg, library)
+				break
+			}
+		}
+	}
+}
+
+// RefreshCurrentLibraryMetrics persists the active library's current SQLite
+// summary. It is used by single-library build completion callbacks.
+func RefreshCurrentLibraryMetrics(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	for _, library := range cfg.Libraries {
+		if isCurrentLibrary(cfg, library) {
+			_ = refreshLibraryMetric(cfg, library)
+			return
+		}
+	}
+}
+
+// RefreshLibraryMetrics persists one explicitly opened library's SQLite summary.
+// It is intentionally separate from settings rendering so opening settings does
+// not cause a database read or cache write.
+func RefreshLibraryMetrics(cfg *config.Config, library config.Library) {
+	if cfg == nil {
+		return
+	}
+	_ = refreshLibraryMetric(cfg, library)
+}
+
+func readLibraryStatsFromDB(dbPath string) (libraryResponse, error) {
 	stats := libraryResponse{}
 	info, err := os.Stat(dbPath)
-	if err != nil || info.IsDir() {
-		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
-		return
+	if err != nil {
+		return stats, err
+	}
+	if info.IsDir() {
+		return stats, fmt.Errorf("library metadata path is a directory: %s", dbPath)
 	}
 	stats.CreatedAt = formatLibraryStatTime(info.ModTime())
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
-		return
+		return stats, err
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		libraryStatsCache.Store(dbPath, cachedLibraryStats{ExpiresAt: time.Now().Add(time.Minute)})
-		return
+		return stats, err
 	}
 	if createdAt, ok := readLibraryCreatedAt(db); ok {
 		stats.CreatedAt = formatLibraryStatTime(createdAt)
@@ -551,7 +628,7 @@ func refreshLibraryStats(dbPath string) {
 		stats.VideoCount = videoCount
 		stats.UnsupportedMediaCount = unsupportedCount
 	}
-	storeCachedLibraryStats(dbPath, info, stats)
+	return stats, nil
 }
 
 func loadCachedLibraryStats(dbPath string, info os.FileInfo) (libraryResponse, bool) {
@@ -696,6 +773,7 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 		availabilityByID = hooks.DescribeLibraryAvailability(cfg, username, libraries)
 	}
 	resp := make([]libraryResponse, 0, len(libraries))
+	cachedMetrics := loadLibraryMetricsForSettings(cfg)
 	for index, library := range libraries {
 		globalIndex := findGlobalLibraryIndex(cfg, library)
 		status := strings.TrimSpace(library.Status)
@@ -726,7 +804,7 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 			Status:      status,
 			Available:   status != config.LibraryStatusMissing && status != config.LibraryStatusLocked,
 		}
-		stats := buildLibraryStats(cfg, library)
+		stats := buildLibraryStats(cfg, library, cachedMetrics)
 		item.CreatedAt = stats.CreatedAt
 		item.LastScannedAt = stats.LastScannedAt
 		item.UnsupportedMediaCount = stats.UnsupportedMediaCount
@@ -734,11 +812,6 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 		item.TotalSizeText = stats.TotalSizeText
 		item.PhotoCount = stats.PhotoCount
 		item.VideoCount = stats.VideoCount
-		item.RebuildRequired = cfg.LegacyDataLayoutDetected() &&
-			stats.LastScannedAt == "" && stats.PhotoCount == 0 && stats.VideoCount == 0
-		if item.RebuildRequired {
-			item.UnavailableReason = "检测到旧版服务器数据，请重新构建全部数据"
-		}
 		if !item.Available && status == config.LibraryStatusMissing {
 			item.UnavailableReason = "资源库路径当前不可用"
 		}
@@ -749,6 +822,7 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 			if !availability.Available {
 				item.Available = false
 				item.UnavailableReason = strings.TrimSpace(availability.Reason)
+				item.UnavailableReasonKey = strings.TrimSpace(availability.ReasonKey)
 				item.LockedByUsername = strings.TrimSpace(availability.OwnerUsername)
 			}
 		}
@@ -1082,12 +1156,15 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 				LightboxUIIdleSeconds:         req.LightboxUIIdleSeconds,
 				ThrottledVideoSeek:            req.ThrottledVideoSeek,
 				VideoSeekThrottleMS:           req.VideoSeekThrottleMS,
-				VideoVolumeSwipeSensitivity:   req.VideoVolumeSwipeSensitivity,
 				VideoVolumeMinPercent:         req.VideoVolumeMinPercent,
 				VideoVolumeMaxPercent:         req.VideoVolumeMaxPercent,
 				Danmaku:                       config.NormalizeDanmaku(req.Danmaku),
 				LowResourceMode:               req.LowResourceMode,
 				PlayerKeymap:                  req.PlayerKeymap,
+				SubtitlesEnabled:              req.SubtitlesEnabled,
+				SubtitleFontSize:              req.SubtitleFontSize,
+				SubtitleColor:                 req.SubtitleColor,
+				SubtitleBackgroundOpacity:     req.SubtitleBackgroundOpacity,
 			},
 		}
 		nextPort := req.Port
@@ -1792,6 +1869,7 @@ func handleCancelBackfillPhotoEXIF(cfg *config.Config, registrar interface{}) gi
 type exifBackfillStatusResponse struct {
 	Status         string   `json:"status"`
 	Message        string   `json:"message"`
+	CurrentMedia   string   `json:"current_media,omitempty"`
 	Done           int      `json:"done"`
 	Total          int      `json:"total"`
 	Scanned        int      `json:"scanned"`
@@ -1812,6 +1890,7 @@ func buildEXIFBackfillStatusResponse(status service.EXIFBackfillStatus) exifBack
 	return exifBackfillStatusResponse{
 		Status:         status.Status,
 		Message:        status.Message,
+		CurrentMedia:   status.CurrentMedia,
 		Done:           status.Done,
 		Total:          status.Total,
 		Scanned:        status.Scanned,

@@ -31,6 +31,7 @@ It is designed for people who want:
 - Video thumbnail refresh
 
 > Video poster generation depends on `ffmpeg`. Videos can still be managed without `ffmpeg`, but their thumbnails may not be generated.
+> HEIC/HEIF files can be indexed and previewed when `ffmpeg` and `ffprobe` include HEIF/HEVC support. Building thumbnails also prepares a full-resolution JPEG cache for instant lightbox viewing; the original file is kept unchanged.
 
 ## Keyboard Shortcuts
 
@@ -67,7 +68,7 @@ It is designed for people who want:
 
 ## Quick Start
 
-_Install `ffmpeg` first if you want video thumbnails to be generated._
+_Install `ffmpeg` (including `ffprobe` and HEIF/HEVC decoding support) before importing HEIC/HEIF files or building media thumbnails._
 
 1. Download a release
    - Download the archive or executable for your platform from the GitHub Releases page.
@@ -92,7 +93,7 @@ _Install `ffmpeg` first if you want video thumbnails to be generated._
 ### Requirements
 
 - Go 1.26+
-- ffmpeg
+- `ffmpeg` and `ffprobe` (HEIF/HEVC-enabled builds are required for HEIC/HEIF previews)
 
 ### Build
 

@@ -37,8 +37,10 @@ coverage.*
 /echogallery-data/
 /config.json
 /local-update.toml
+/library_metrics.json
 
 # Personal scripts and working notes intentionally kept out of the repository
+/AGENTS.md
 /build.sh
 /publish.sh
 /generate_qr_code.py
@@ -49,3 +51,4 @@ coverage.*
 /GAMEPAD-CONTROLS.md
 /.gamepad-button-assets/
 handoff
+TheEchoAppTestBuild

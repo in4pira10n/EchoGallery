@@ -47,7 +47,7 @@ func (s *PhotoService) GetVideoPlaybackPreference(photoID int64, userID int64) (
 }
 
 // SaveVideoPlaybackPreference 保存单个视频的音量/静音偏好。
-func (s *PhotoService) SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+func (s *PhotoService) SaveVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error) {
 	photo, err := s.GetPhoto(photoID, userID)
 	if err != nil {
 		return nil, err
@@ -62,7 +62,7 @@ func (s *PhotoService) SaveVideoPlaybackPreference(photoID int64, userID int64, 
 	if err := s.repo.SaveLibraryVideoVolume(normalizedVolume); err != nil {
 		return nil, err
 	}
-	return s.repo.UpsertVideoPlaybackPreference(photoID, userID, normalizedVolume, muted, normalizeVideoResumeTime(resumeTime), normalizeVideoBookmarks(bookmarks))
+	return s.repo.UpsertVideoPlaybackPreference(photoID, userID, normalizedVolume, muted, normalizeVideoResumeTime(resumeTime), normalizeVideoBookmarks(bookmarks), audioTrack...)
 }
 
 func normalizeVideoVolume(volume float64) float64 {

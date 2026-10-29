@@ -28,23 +28,37 @@ const (
 )
 
 type LocalUpdateConfig struct {
-	Distribute        []string `toml:"distribute"`
-	UpdatePackagePath string   `toml:"update_package_path"`
+	Distribute        []string `toml:"distribute" json:"distribute"`
+	Include           []string `toml:"include" json:"include"`
+	Exclude           []string `toml:"exclude" json:"exclude"`
+	UpdatePackageDir  string   `toml:"update_package_dir" json:"update_package_dir"`
+	UpdatePackagePath string   `toml:"update_package_path" json:"update_package_path"`
 }
 
 type TargetStatus struct {
-	Path              string `json:"path"`
-	Exists            bool   `json:"exists"`
-	NeedsUpdate       bool   `json:"needs_update"`
-	CurrentHash       string `json:"current_hash,omitempty"`
-	PackageHash       string `json:"package_hash,omitempty"`
-	CurrentBinary     string `json:"current_binary,omitempty"`
-	CurrentUpdater    string `json:"current_updater,omitempty"`
-	PackageBinaryName string `json:"package_binary_name,omitempty"`
-	PackageUpdater    string `json:"package_updater,omitempty"`
+	SourcePath         string `json:"source_path,omitempty"`
+	Manual             bool   `json:"manual"`
+	Error              string `json:"error,omitempty"`
+	CurrentVersion     string `json:"current_version,omitempty"`
+	CurrentVersionCode string `json:"current_version_code,omitempty"`
+	CurrentUpdaterHash string `json:"current_updater_hash,omitempty"`
+	Path               string `json:"path"`
+	Exists             bool   `json:"exists"`
+	NeedsUpdate        bool   `json:"needs_update"`
+	CurrentHash        string `json:"current_hash,omitempty"`
+	PackageHash        string `json:"package_hash,omitempty"`
+	CurrentBinary      string `json:"current_binary,omitempty"`
+	CurrentUpdater     string `json:"current_updater,omitempty"`
+	PackageBinaryName  string `json:"package_binary_name,omitempty"`
+	PackageUpdater     string `json:"package_updater,omitempty"`
 }
 
 type CheckResult struct {
+	CheckID            string         `json:"check_id"`
+	PackageVersion     string         `json:"package_version,omitempty"`
+	PackageVersionCode string         `json:"package_version_code,omitempty"`
+	PackageUpdaterHash string         `json:"package_updater_hash,omitempty"`
+	Warnings           []string       `json:"warnings,omitempty"`
 	HasUpdate          bool           `json:"has_update"`
 	Blocked            bool           `json:"blocked"`
 	Compared           int            `json:"compared"`
@@ -68,6 +82,8 @@ type ApplyResult struct {
 }
 
 type StartOptions struct {
+	ExpectedCheckID   string
+	SelectedTargets   []string
 	CurrentPID        int
 	CurrentExecutable string
 	RestartArgs       []string
@@ -88,9 +104,11 @@ type ApplyPlan struct {
 }
 
 type ReplaceTarget struct {
-	RequestedPath string `json:"requested_path"`
-	MainDest      string `json:"main_dest"`
-	UpdaterDest   string `json:"updater_dest"`
+	ExpectedHash        string `json:"expected_hash,omitempty"`
+	ExpectedUpdaterHash string `json:"expected_updater_hash,omitempty"`
+	RequestedPath       string `json:"requested_path"`
+	MainDest            string `json:"main_dest"`
+	UpdaterDest         string `json:"updater_dest"`
 }
 
 type preparedPackage struct {
@@ -99,6 +117,9 @@ type preparedPackage struct {
 	UpdaterPath     string
 	MainBinaryName  string
 	UpdaterBinName  string
+	Version         string
+	VersionCode     string
+	UpdaterHash     string
 	MainHash        string
 	PersistentStage bool
 }
@@ -109,7 +130,7 @@ func DefaultLocalUpdateConfigText() string {
 			"/path/to/EchoGallery_1",
 			"/path/to/EchoGallery_2",
 		},
-		UpdatePackagePath: "/path/to/latest/EchoGallery",
+		UpdatePackageDir: "/path/to/updates",
 	}
 	data, _ := toml.Marshal(cfg)
 	return strings.TrimSpace(string(data)) + "\n"
@@ -154,28 +175,51 @@ func ParseLocalUpdateConfig(text string) (LocalUpdateConfig, error) {
 		return LocalUpdateConfig{}, err
 	}
 	cfg.Distribute = normalizePaths(cfg.Distribute)
+	cfg.Include = normalizePaths(cfg.Include)
+	cfg.Exclude = normalizePaths(cfg.Exclude)
+	cfg.UpdatePackageDir = strings.TrimSpace(cfg.UpdatePackageDir)
 	cfg.UpdatePackagePath = strings.TrimSpace(cfg.UpdatePackagePath)
+	if cfg.UpdatePackageDir != "" && cfg.UpdatePackagePath != "" {
+		return LocalUpdateConfig{}, errors.New("choose update_package_dir or update_package_path, not both")
+	}
 	return cfg, nil
 }
 
 func NormalizeLocalUpdateConfigText(cfg LocalUpdateConfig) string {
 	cfg.Distribute = normalizePaths(cfg.Distribute)
+	cfg.Include = normalizePaths(cfg.Include)
+	cfg.Exclude = normalizePaths(cfg.Exclude)
+	cfg.UpdatePackageDir = strings.TrimSpace(cfg.UpdatePackageDir)
 	cfg.UpdatePackagePath = strings.TrimSpace(cfg.UpdatePackagePath)
 	data, _ := toml.Marshal(cfg)
 	return strings.TrimSpace(string(data)) + "\n"
 }
 
 func CheckLocalPackage(cfg LocalUpdateConfig) (CheckResult, error) {
-	prepared, cleanup, err := preparePackage(cfg.UpdatePackagePath, false)
+	path, err := selectPackage(cfg)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	prepared, cleanup, err := preparePackage(path, false)
 	if err != nil {
 		return CheckResult{}, err
 	}
 	defer cleanup()
-	return comparePackage(cfg, prepared)
+	result, err := comparePackage(cfg, prepared)
+	result.PackagePath = path
+	result.CheckID = checkFingerprint(cfg, result)
+	return result, err
 }
 
 func StartLocalUpdate(cfg LocalUpdateConfig, options StartOptions) (ApplyResult, error) {
-	prepared, cleanup, err := preparePackage(cfg.UpdatePackagePath, true)
+	if options.ExpectedCheckID == "" {
+		return ApplyResult{}, errors.New("check for updates before applying")
+	}
+	path, err := selectPackage(cfg)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	prepared, cleanup, err := preparePackage(path, true)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -183,6 +227,24 @@ func StartLocalUpdate(cfg LocalUpdateConfig, options StartOptions) (ApplyResult,
 	if err != nil {
 		cleanup()
 		return ApplyResult{}, err
+	}
+	result.PackagePath = path
+	if checkFingerprint(cfg, result) != options.ExpectedCheckID {
+		cleanup()
+		return ApplyResult{}, errors.New("update package, configuration or installations changed; check again")
+	}
+	if len(options.SelectedTargets) > 0 {
+		selected := map[string]bool{}
+		for _, p := range options.SelectedTargets {
+			selected[canonicalPath(p)] = true
+		}
+		for i := range result.Targets {
+			result.Targets[i].NeedsUpdate = result.Targets[i].NeedsUpdate && selected[result.Targets[i].Path]
+		}
+		result.HasUpdate = false
+		for _, target := range result.Targets {
+			result.HasUpdate = result.HasUpdate || target.NeedsUpdate
+		}
 	}
 	applyResult := ApplyResult{
 		Targets:   append([]TargetStatus(nil), result.Targets...),
@@ -279,6 +341,14 @@ func RunApplyPlan(planPath string) error {
 	}
 	var failures []error
 	for _, target := range plan.Targets {
+		if target.ExpectedHash != "" {
+			hash, err := fileSHA256(target.MainDest)
+			updaterHash, _ := fileSHA256(target.UpdaterDest)
+			if err != nil || hash != target.ExpectedHash || updaterHash != target.ExpectedUpdaterHash {
+				failures = append(failures, fmt.Errorf("installation changed after check: %s", target.MainDest))
+				continue
+			}
+		}
 		if err := replaceFileFromSource(target.MainDest, plan.MainSourcePath); err != nil {
 			failures = append(failures, fmt.Errorf("failed to replace %s (another instance may still be running): %w", target.MainDest, err))
 			continue
@@ -416,54 +486,40 @@ func shellQuote(value string) string {
 }
 
 func comparePackage(cfg LocalUpdateConfig, prepared preparedPackage) (CheckResult, error) {
+	targets, warnings := DiscoverTargets(cfg)
 	result := CheckResult{
-		PackagePath:        strings.TrimSpace(cfg.UpdatePackagePath),
-		PackageBinaryName:  prepared.MainBinaryName,
-		PackageUpdaterName: prepared.UpdaterBinName,
-		PackageHash:        prepared.MainHash,
-		Targets:            make([]TargetStatus, 0, len(cfg.Distribute)),
+		PackageVersion: prepared.Version, PackageVersionCode: prepared.VersionCode,
+		PackageUpdaterHash: prepared.UpdaterHash,
+		PackagePath:        cfg.UpdatePackagePath, PackageBinaryName: prepared.MainBinaryName,
+		PackageUpdaterName: prepared.UpdaterBinName, PackageHash: prepared.MainHash,
+		Targets: targets, Warnings: warnings,
 	}
-	for _, target := range normalizePaths(cfg.Distribute) {
-		status := TargetStatus{
-			Path:              target,
-			PackageHash:       prepared.MainHash,
-			PackageBinaryName: prepared.MainBinaryName,
-			PackageUpdater:    prepared.UpdaterBinName,
-		}
-		if target == "" {
-			result.Targets = append(result.Targets, status)
+	for i := range result.Targets {
+		status := &result.Targets[i]
+		status.PackageHash = prepared.MainHash
+		status.PackageBinaryName = prepared.MainBinaryName
+		status.PackageUpdater = prepared.UpdaterBinName
+		if !status.Exists {
+			result.SkippedMissing++
 			continue
 		}
-		info, err := os.Stat(target)
+		status.CurrentUpdater = filepath.Join(filepath.Dir(status.Path), prepared.UpdaterBinName)
+		currentHash, err := fileSHA256(status.Path)
 		if err != nil {
-			if os.IsNotExist(err) {
-				result.SkippedMissing++
-				result.Targets = append(result.Targets, status)
-				continue
-			}
-			return CheckResult{}, err
-		}
-		status.Exists = true
-		mainDest, updaterDest := resolveTargetBinaryPaths(target, info.IsDir(), prepared.MainBinaryName, prepared.UpdaterBinName)
-		status.CurrentBinary = mainDest
-		status.CurrentUpdater = updaterDest
-		currentHash, err := fileSHA256(mainDest)
-		if err != nil {
-			if os.IsNotExist(err) {
-				result.SkippedMissing++
-				result.Targets = append(result.Targets, status)
-				continue
-			}
 			return CheckResult{}, err
 		}
 		status.CurrentHash = currentHash
-		status.NeedsUpdate = currentHash != prepared.MainHash
+		status.CurrentUpdaterHash, _ = fileSHA256(status.CurrentUpdater)
+		status.NeedsUpdate = currentHash != prepared.MainHash || status.CurrentUpdaterHash != prepared.UpdaterHash
+		if isDowngrade(prepared.Version, prepared.VersionCode, status.CurrentVersion, status.CurrentVersionCode) {
+			status.NeedsUpdate = false
+		}
 		result.Compared++
 		if status.NeedsUpdate {
 			result.Updatable++
 		}
-		result.Targets = append(result.Targets, status)
 	}
+
 	result.HasUpdate = result.Updatable > 0
 	if result.HasUpdate && runtime.GOOS == "windows" {
 		if err := validateWindowsUpdateTargets(replaceTargetsFromCheckResult(result)); err != nil {
@@ -488,9 +544,9 @@ func replaceTargetsFromCheckResult(result CheckResult) []ReplaceTarget {
 			continue
 		}
 		targets = append(targets, ReplaceTarget{
-			RequestedPath: target.Path,
-			MainDest:      target.CurrentBinary,
-			UpdaterDest:   target.CurrentUpdater,
+			RequestedPath: target.Path, ExpectedHash: target.CurrentHash, ExpectedUpdaterHash: target.CurrentUpdaterHash,
+			MainDest:    target.CurrentBinary,
+			UpdaterDest: target.CurrentUpdater,
 		})
 	}
 	return targets
@@ -516,6 +572,55 @@ func preparePackage(packagePath string, keepStage bool) (preparedPackage, func()
 		cleanup()
 		return preparedPackage{}, nil, err
 	}
+	if filepath.Dir(mainPath) != filepath.Dir(updaterPath) {
+		cleanup()
+		return preparedPackage{}, nil, errors.New("package executables must share a directory")
+	}
+	for _, binary := range []struct {
+		path    string
+		updater bool
+	}{{mainPath, false}, {updaterPath, true}} {
+		if err := validateBinary(binary.path, binary.updater); err != nil {
+			cleanup()
+			return preparedPackage{}, nil, err
+		}
+	}
+	updaterHash, err := fileSHA256(updaterPath)
+	if err != nil {
+		cleanup()
+		return preparedPackage{}, nil, err
+	}
+	version := binaryVersion(mainPath)
+	versionCode := binaryBuildSetting(mainPath, "VersionCode")
+	manifestPath := filepath.Join(filepath.Dir(mainPath), ManifestName)
+	if f, err := os.Open(manifestPath); err == nil {
+		manifest, manifestErr := decodeManifest(f)
+		f.Close()
+		if manifestErr != nil {
+			cleanup()
+			return preparedPackage{}, nil, manifestErr
+		}
+		if manifest.Files[mainName] != hash || manifest.Files[updaterName] != updaterHash {
+			cleanup()
+			return preparedPackage{}, nil, errors.New("package executable checksum mismatch")
+		}
+		if version != "" && version != manifest.Version {
+			cleanup()
+			return preparedPackage{}, nil, errors.New("manifest version does not match executable")
+		}
+		if manifest.VersionCode != "" && manifest.VersionCode != versionCode {
+			cleanup()
+			return preparedPackage{}, nil, errors.New("manifest build code does not match executable")
+		}
+		version = manifest.Version
+		if manifest.VersionCode != "" {
+			versionCode = manifest.VersionCode
+		}
+	} else if !os.IsNotExist(err) {
+		cleanup()
+		return preparedPackage{}, nil, err
+	}
+
 	if keepStage {
 		// Never run the updater from a distribution directory: it might also be
 		// a replacement target, and separate instances need separate signals.
@@ -535,18 +640,25 @@ func preparePackage(packagePath string, keepStage bool) (preparedPackage, func()
 				return preparedPackage{}, nil, err
 			}
 		}
+		stagedMain, err := fileSHA256(filepath.Join(stage, mainName))
+		stagedUpdater, updaterErr := fileSHA256(filepath.Join(stage, updaterName))
+		if err != nil || updaterErr != nil || stagedMain != hash || stagedUpdater != updaterHash {
+			_ = os.RemoveAll(stage)
+			cleanup()
+			return preparedPackage{}, nil, errors.New("package changed while staging; check again")
+		}
 		root, mainPath, updaterPath = stage, filepath.Join(stage, mainName), filepath.Join(stage, updaterName)
 		persistent = true
 		previousCleanup := cleanup
 		cleanup = func() { previousCleanup(); _ = os.RemoveAll(stage) }
 	}
 	return preparedPackage{
-		Root:            root,
-		MainPath:        mainPath,
-		UpdaterPath:     updaterPath,
-		MainBinaryName:  mainName,
-		UpdaterBinName:  updaterName,
-		MainHash:        hash,
+		Root:           root,
+		MainPath:       mainPath,
+		UpdaterPath:    updaterPath,
+		MainBinaryName: mainName,
+		UpdaterBinName: updaterName,
+		MainHash:       hash, UpdaterHash: updaterHash, Version: version, VersionCode: versionCode,
 		PersistentStage: persistent,
 	}, cleanup, nil
 }
@@ -566,11 +678,7 @@ func materializePackageRoot(packagePath string, keepStage bool) (string, bool, f
 	if err != nil {
 		return "", false, nil, err
 	}
-	cleanup := func() {
-		if !keepStage {
-			_ = os.RemoveAll(stageDir)
-		}
-	}
+	cleanup := func() { _ = os.RemoveAll(stageDir) }
 	lower := strings.ToLower(packagePath)
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
@@ -594,7 +702,13 @@ func extractZipToDir(path, dir string) error {
 	}
 	defer reader.Close()
 	for _, file := range reader.File {
-		targetPath := filepath.Join(dir, file.Name)
+		targetPath, err := safeArchivePath(dir, file.Name)
+		if err != nil {
+			return err
+		}
+		if file.Mode()&os.ModeSymlink != 0 || (!file.FileInfo().IsDir() && !file.Mode().IsRegular()) {
+			return errors.New("unsupported archive entry type")
+		}
 		if file.FileInfo().IsDir() {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return err
@@ -643,7 +757,13 @@ func extractTarGzToDir(path, dir string) error {
 		if err != nil {
 			return err
 		}
-		targetPath := filepath.Join(dir, header.Name)
+		targetPath, err := safeArchivePath(dir, header.Name)
+		if err != nil {
+			return err
+		}
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return errors.New("unsupported archive entry type")
+		}
 		if header.FileInfo().IsDir() {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return err
@@ -684,15 +804,21 @@ func findBinaryRecursive(root string, names []string) (string, string, error) {
 		if d.IsDir() {
 			return nil
 		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return errors.New("package contains symlink")
+		}
 		base := strings.ToLower(filepath.Base(path))
 		if _, ok := nameSet[base]; !ok {
 			return nil
 		}
+		if foundPath != "" {
+			return errors.New("package contains multiple matching executables")
+		}
 		foundPath = path
 		foundName = filepath.Base(path)
-		return io.EOF
+		return nil
 	})
-	if errors.Is(err, io.EOF) && foundPath != "" {
+	if err == nil && foundPath != "" {
 		return foundPath, foundName, nil
 	}
 	if err != nil {

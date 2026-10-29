@@ -2,7 +2,6 @@ package config
 
 import (
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -34,22 +33,4 @@ func sqliteReadOnlyURI(databasePath string) string {
 		path = "/" + path
 	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
-}
-
-// LegacyDataLayoutDetected only detects the old server-local layout. It does
-// not open, migrate, or delete any old database or media file.
-func (c *Config) LegacyDataLayoutDetected() bool {
-	if c == nil || c.AppDataDir == "" {
-		return false
-	}
-	for _, name := range []string{"media", "thumbnails"} {
-		if _, err := os.Stat(filepath.Join(c.AppDataDir, name)); err == nil {
-			return true
-		}
-	}
-	files, err := filepath.Glob(filepath.Join(c.AppDataDir, "db", "echogallery-*.db"))
-	if err == nil && len(files) > 0 {
-		return true
-	}
-	return false
 }

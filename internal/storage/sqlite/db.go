@@ -257,6 +257,9 @@ func (s *DB) migrate() error {
 	if err := s.ensureColumn("video_playback_preferences", "bookmarks_json", `ALTER TABLE video_playback_preferences ADD COLUMN bookmarks_json TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("video_playback_preferences", "audio_track_json", `ALTER TABLE video_playback_preferences ADD COLUMN audio_track_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	return nil
 }
 

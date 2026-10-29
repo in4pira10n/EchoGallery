@@ -2,7 +2,6 @@ package config
 
 import (
 	"net/url"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -34,29 +33,6 @@ func TestLibraryDataPathsAreScopedToStoragePath(t *testing.T) {
 	}
 	if filepath.Dir(db) == filepath.Join(cfg.AppDataDir, "db") || media == filepath.Join(cfg.AppDataDir, "media") || thumbs == filepath.Join(cfg.AppDataDir, "thumbnails") {
 		t.Fatal("library data unexpectedly points to server-local data")
-	}
-}
-
-func TestLegacyDataLayoutDetectedWithoutOpeningIt(t *testing.T) {
-	appDataDir := t.TempDir()
-	cfg := &Config{AppDataDir: appDataDir}
-	if cfg.LegacyDataLayoutDetected() {
-		t.Fatal("empty app data directory should not be legacy layout")
-	}
-	if err := os.MkdirAll(filepath.Join(appDataDir, "db"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(appDataDir, "db", "library-locks.db"), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.LegacyDataLayoutDetected() {
-		t.Fatal("新版锁数据库不应被误判为旧版媒体数据")
-	}
-	if err := os.WriteFile(filepath.Join(appDataDir, "db", "echogallery-12345678.db"), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.LegacyDataLayoutDetected() {
-		t.Fatal("旧版媒体数据库未被检测")
 	}
 }
 

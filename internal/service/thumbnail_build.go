@@ -31,8 +31,9 @@ type ThumbnailBuildStatus struct {
 }
 
 type thumbnailBuildTask struct {
-	userID int64
-	cancel context.CancelFunc
+	userID      int64
+	cancel      context.CancelFunc
+	changedDirs map[string]bool
 
 	mu     sync.Mutex
 	status ThumbnailBuildStatus
@@ -99,6 +100,12 @@ func videoThumbnailBuildWorkerCount() int {
 }
 
 func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, error) {
+	return s.StartThumbnailBuildForDirectories(userID, nil)
+}
+
+// StartThumbnailBuildForDirectories builds only media in changed directories.
+// A nil or empty set keeps the compatibility behavior and checks all media.
+func (s *PhotoService) StartThumbnailBuildForDirectories(userID int64, changedDirs map[string]bool) (ThumbnailBuildStatus, error) {
 	if s == nil {
 		return ThumbnailBuildStatus{}, fmt.Errorf("媒体服务不可用")
 	}
@@ -114,8 +121,9 @@ func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	task := &thumbnailBuildTask{
-		userID: userID,
-		cancel: cancel,
+		userID:      userID,
+		cancel:      cancel,
+		changedDirs: cloneChangedDirectories(changedDirs),
 		status: ThumbnailBuildStatus{
 			Status:    "running",
 			Message:   thumbnailBuildStartMessage(),
@@ -127,6 +135,19 @@ func (s *PhotoService) StartThumbnailBuild(userID int64) (ThumbnailBuildStatus, 
 	s.thumbnailBuildActive.Store(true)
 	s.background(func() { s.runThumbnailBuild(ctx, task) })
 	return task.snapshot(), nil
+}
+
+func cloneChangedDirectories(source map[string]bool) map[string]bool {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make(map[string]bool, len(source))
+	for path, changed := range source {
+		if changed {
+			clone[filepath.ToSlash(filepath.Clean(path))] = true
+		}
+	}
+	return clone
 }
 
 func (s *PhotoService) GetThumbnailBuildStatus(userID int64) ThumbnailBuildStatus {
@@ -231,6 +252,10 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 			if err := ctx.Err(); err != nil {
 				break
 			}
+			if len(task.changedDirs) > 0 && !thumbnailPhotoInChangedDirectory(photo, task.changedDirs) && s.thumbnailTargetExists(photo) {
+				task.incrementSkipped(targetLabel)
+				continue
+			}
 			missingTarget := !s.thumbnailTargetExists(photo)
 			if !missingTarget {
 				task.incrementSkipped(targetLabel)
@@ -268,6 +293,30 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 		return
 	}
 	task.finish("completed", thumbnailBuildCompletedMessage(), "")
+}
+
+func thumbnailPhotoInChangedDirectory(photo *storage.Photo, changedDirs map[string]bool) bool {
+	if photo == nil || len(changedDirs) == 0 {
+		return true
+	}
+	parent := filepath.ToSlash(filepath.Dir(filepath.Clean(photo.SourceRelPath)))
+	if parent == "" {
+		parent = "."
+	}
+	for dir := parent; ; {
+		if changedDirs[dir] {
+			return true
+		}
+		if dir == "." {
+			break
+		}
+		next := filepath.ToSlash(filepath.Dir(dir))
+		if next == "" || next == dir {
+			break
+		}
+		dir = next
+	}
+	return false
 }
 
 func thumbnailBuildTierLabel(tier string) string {

@@ -15,14 +15,14 @@ import (
 func (s *DB) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.VideoPlaybackPreference, error) {
 	_ = userID
 	row := s.db.QueryRow(`
-		SELECT photo_id, volume, muted, resume_time, bookmarks_json, updated_at
+		SELECT photo_id, volume, muted, resume_time, bookmarks_json, audio_track_json, updated_at
 		FROM video_playback_preferences
 		WHERE photo_id = ?`, photoID)
 
 	var pref storage.VideoPlaybackPreference
 	var muted int
-	var bookmarksJSON string
-	if err := row.Scan(&pref.PhotoID, &pref.Volume, &muted, &pref.ResumeTime, &bookmarksJSON, &pref.UpdatedAt); err != nil {
+	var bookmarksJSON, audioTrackJSON string
+	if err := row.Scan(&pref.PhotoID, &pref.Volume, &muted, &pref.ResumeTime, &bookmarksJSON, &audioTrackJSON, &pref.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -30,11 +30,17 @@ func (s *DB) GetVideoPlaybackPreference(photoID int64, userID int64) (*storage.V
 	}
 	pref.Muted = muted != 0
 	pref.Bookmarks = decodePlaybackBookmarks(bookmarksJSON)
+	if audioTrackJSON != "" {
+		var selected storage.VideoAudioTrackPreference
+		if json.Unmarshal([]byte(audioTrackJSON), &selected) == nil && selected.Index >= 0 {
+			pref.AudioTrack = &selected
+		}
+	}
 	return &pref, nil
 }
 
 // UpsertVideoPlaybackPreference 保存单个视频的共享播放偏好。
-func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark) (*storage.VideoPlaybackPreference, error) {
+func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume float64, muted bool, resumeTime int64, bookmarks []storage.VideoPlaybackBookmark, audioTrack ...*storage.VideoAudioTrackPreference) (*storage.VideoPlaybackPreference, error) {
 	_ = userID
 	updatedAt := time.Now()
 	mutedValue := 0
@@ -43,27 +49,30 @@ func (s *DB) UpsertVideoPlaybackPreference(photoID int64, userID int64, volume f
 	}
 	normalizedBookmarks := normalizePlaybackBookmarks(bookmarks)
 	bookmarksJSON := encodePlaybackBookmarks(normalizedBookmarks)
+	// An omitted selection must survive volume, resume-time and bookmark updates.
+	var audioTrackJSON any
+	if len(audioTrack) > 0 && audioTrack[0] != nil {
+		data, err := json.Marshal(audioTrack[0])
+		if err != nil {
+			return nil, err
+		}
+		audioTrackJSON = string(data)
+	}
 	if _, err := s.db.Exec(`
-		INSERT INTO video_playback_preferences (photo_id, volume, muted, resume_time, bookmarks_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO video_playback_preferences (photo_id, volume, muted, resume_time, bookmarks_json, audio_track_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, COALESCE(?, ''), ?)
 		ON CONFLICT(photo_id) DO UPDATE SET
 		    volume = excluded.volume,
 		    muted = excluded.muted,
 		    resume_time = excluded.resume_time,
 		    bookmarks_json = excluded.bookmarks_json,
+		    audio_track_json = COALESCE(?, video_playback_preferences.audio_track_json),
 		    updated_at = excluded.updated_at`,
-		photoID, volume, mutedValue, resumeTime, bookmarksJSON, updatedAt,
+		photoID, volume, mutedValue, resumeTime, bookmarksJSON, audioTrackJSON, updatedAt, audioTrackJSON,
 	); err != nil {
 		return nil, fmt.Errorf("保存视频播放偏好失败: %w", err)
 	}
-	return &storage.VideoPlaybackPreference{
-		PhotoID:    photoID,
-		Volume:     volume,
-		Muted:      muted,
-		ResumeTime: resumeTime,
-		Bookmarks:  normalizedBookmarks,
-		UpdatedAt:  updatedAt,
-	}, nil
+	return s.GetVideoPlaybackPreference(photoID, userID)
 }
 
 func encodePlaybackBookmarks(bookmarks []storage.VideoPlaybackBookmark) string {

@@ -70,3 +70,21 @@ func TestSaveVideoPlaybackPreference_PersistsLibraryVolumeAndMediaState(t *testi
 		t.Fatalf("期望保存媒体级播放状态，得到 %+v", pref)
 	}
 }
+
+func TestVideoPlaybackPreferencePersistsAudioTrack(t *testing.T) {
+	repo := newMockRepo()
+	svc := newPhotoServiceSync(repo, t.TempDir(), t.TempDir(), t.TempDir())
+	photo := saveTestVideo(t, svc, repo, 1, "clip.mp4")
+	selected := &storage.VideoAudioTrackPreference{Index: 0, ID: "first", Language: "zh"}
+	pref, err := svc.SaveVideoPlaybackPreference(photo.ID, 1, 0.5, false, 42, nil, selected)
+	if err != nil || pref == nil || pref.AudioTrack == nil || pref.AudioTrack.ID != "first" {
+		t.Fatalf("audio track not saved: pref=%+v err=%v", pref, err)
+	}
+	if _, err := svc.SaveVideoPlaybackPreference(photo.ID, 1, 0.7, true, 50, nil); err != nil {
+		t.Fatal(err)
+	}
+	pref, err = svc.GetVideoPlaybackPreference(photo.ID, 1)
+	if err != nil || pref == nil || pref.AudioTrack == nil || pref.AudioTrack.Index != 0 || pref.AudioTrack.ID != "first" {
+		t.Fatalf("audio track not retained: pref=%+v err=%v", pref, err)
+	}
+}

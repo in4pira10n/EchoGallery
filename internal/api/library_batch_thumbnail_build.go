@@ -26,7 +26,11 @@ func handleGetLibraryBatchThumbnailBuildStatus(cfg *config.Config, hooks Library
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, hooks.Status(cfg, profile, currentUsername(c)))
+		status := hooks.Status(cfg, profile, currentUsername(c))
+		if status.Status == "completed" {
+			refreshCompletedLibraryMetrics(cfg, status.Libraries)
+		}
+		c.JSON(http.StatusOK, status)
 	}
 }
 
