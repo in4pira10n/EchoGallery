@@ -61,8 +61,8 @@ func TestLocateTimelineWindow_DefaultOrderAndListBefore(t *testing.T) {
 	if located.TargetIndex != 2 {
 		t.Fatalf("目标索引错误，得到 %d，期望 2", located.TargetIndex)
 	}
-	if located.MissingBeforeCount != 3 {
-		t.Fatalf("目标前缺口数量错误，得到 %d，期望 3", located.MissingBeforeCount)
+	if located.MissingBeforeCount != 1 {
+		t.Fatalf("窗口前缺口数量错误，得到 %d，期望 1", located.MissingBeforeCount)
 	}
 	if !located.HasBefore || !located.HasAfter {
 		t.Fatalf("定位窗口前后更多标记错误: before=%v after=%v", located.HasBefore, located.HasAfter)
@@ -116,8 +116,8 @@ func TestLocateTimelineWindow_ReverseOrderAndListBefore(t *testing.T) {
 	if located.TargetIndex != 2 {
 		t.Fatalf("目标索引错误，得到 %d，期望 2", located.TargetIndex)
 	}
-	if located.MissingBeforeCount != 4 {
-		t.Fatalf("正序目标前缺口数量错误，得到 %d，期望 4", located.MissingBeforeCount)
+	if located.MissingBeforeCount != 2 {
+		t.Fatalf("正序窗口前缺口数量错误，得到 %d，期望 2", located.MissingBeforeCount)
 	}
 	if !located.HasBefore || !located.HasAfter {
 		t.Fatalf("定位窗口前后更多标记错误: before=%v after=%v", located.HasBefore, located.HasAfter)
@@ -135,5 +135,31 @@ func TestLocateTimelineWindow_ReverseOrderAndListBefore(t *testing.T) {
 	assertPhotoIDs(t, before1.Photos, []int64{photos[0].ID, photos[1].ID})
 	if before1.HasMore {
 		t.Fatal("正序第一段前置页面不应还有更多")
+	}
+}
+
+func TestLocateTimelineWindowCountsOnlyUnloadedPrefix(t *testing.T) {
+	db := newTestDB(t)
+	photos := makeTimelinePhotos(t, db, 8)
+	for _, reverse := range []bool{false, true} {
+		for rank := range photos {
+			i := len(photos) - 1 - rank
+			if reverse {
+				i = rank
+			}
+			located, err := db.LocateTimelineWindow(storage.LocateTimelineParams{
+				UserID: 1, PhotoID: photos[i].ID, Limit: 2, Reverse: reverse,
+			})
+			if err != nil || located == nil {
+				t.Fatalf("reverse=%v rank=%d: locate failed: %v", reverse, rank, err)
+			}
+			want := max(0, rank-2)
+			if located.MissingBeforeCount != want || located.HasBefore != (want > 0) {
+				t.Fatalf("reverse=%v rank=%d: missing=%d before=%v, want missing=%d", reverse, rank, located.MissingBeforeCount, located.HasBefore, want)
+			}
+			if located.MissingBeforeCount+located.TargetIndex != rank {
+				t.Fatalf("reverse=%v rank=%d: target was shifted by duplicate placeholders", reverse, rank)
+			}
+		}
 	}
 }

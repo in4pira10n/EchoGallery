@@ -36,6 +36,8 @@ var errSnapshotMismatch = errors.New("library scan snapshot mismatch")
 
 // ImportSummary 汇总一次启动扫描导入的结果。
 type ImportSummary struct {
+	// Changed covers moves and metadata updates as well as additions/deletions.
+	Changed  bool
 	Imported int
 	Skipped  int
 	Pruned   int
@@ -57,6 +59,7 @@ type sourceMoveJob struct {
 }
 
 type libraryDirectorySnapshot struct {
+	mediaEntries         []scanMediaEntry
 	rootInfo             fs.FileInfo
 	directoryModTimes    map[string]int64
 	directoryEntryHashes map[string]string
@@ -67,6 +70,19 @@ type libraryDirectorySnapshot struct {
 	dirModHash           string
 	mediaFileHash        string
 	mediaFileCount       int
+}
+
+// Background checks share the disk with interactive media reads. Keep their
+// metadata import serial; explicit batch builds retain their configured workers.
+type backgroundLibraryScanKey struct{}
+
+func WithBackgroundLibraryScan(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundLibraryScanKey{}, true)
+}
+
+func backgroundLibraryScan(ctx context.Context) bool {
+	background, _ := ctx.Value(backgroundLibraryScanKey{}).(bool)
+	return background
 }
 
 // ImportExistingPhotos 扫描 storagePath 中现有的图片文件并导入数据库。
@@ -87,7 +103,14 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		case <-ctx.Done():
 		}
 	}()
-	s.scanMu.Lock()
+	reportScan(ctx, "waiting", "scan_lock", s.sourcePath, 0, 0, 0)
+	for !s.scanMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
 	defer s.scanMu.Unlock()
 	s.lifecycleMu.Lock()
 	closing := s.closing
@@ -100,7 +123,8 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
-	rootInfo, err := os.Stat(s.sourcePath)
+	reportScan(ctx, "checking", "metadata", s.sourcePath, 0, 0, 0)
+	rootInfo, err := scanStat(ctx, s.sourcePath)
 	if err != nil {
 		return summary, err
 	}
@@ -108,7 +132,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		return summary, fmt.Errorf("资源库路径不是目录: %s", s.sourcePath)
 	}
 	previousSnapshot, snapshotErr := s.repo.GetLibraryScanSnapshot()
-	if snapshotErr == nil && quickLibraryScanSnapshotMatches(ctx, previousSnapshot, s.sourcePath, rootInfo) {
+	if snapshotErr == nil && !s.IsSMBLibrary() && quickLibraryScanSnapshotMatches(ctx, previousSnapshot, s.sourcePath, rootInfo) {
 		summary.Skipped = previousSnapshot.FileCount
 		if progress != nil {
 			progress(previousSnapshot.FileCount, previousSnapshot.FileCount)
@@ -117,10 +141,20 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	} else if snapshotErr != nil {
 		return summary, snapshotErr
 	}
-	dirSnapshot, err := collectLibraryDirectorySnapshot(ctx, s.sourcePath, previousSnapshot)
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+	reportScan(ctx, "discovering", "metadata", s.sourcePath, 0, 0, 0)
+	var dirSnapshot libraryDirectorySnapshot
+	if s.IsSMBLibrary() {
+		dirSnapshot, err = collectSMBLibrarySnapshot(ctx, s.sourcePath, previousSnapshot)
+	} else {
+		dirSnapshot, err = collectLibraryDirectorySnapshot(ctx, s.sourcePath, previousSnapshot)
+	}
 	if err != nil {
 		return summary, err
 	}
+	reportScan(ctx, "indexing", "database", s.sourcePath, -1, 0, 0)
 	albumCache, err := s.loadAlbumCache(uploadedBy)
 	if err != nil {
 		return summary, err
@@ -147,6 +181,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	seenSourcePaths := make(map[string]bool)
 	seenFolderAlbums := make(map[string]bool)
 	changedDirs := changedLibraryDirectories(previousSnapshot, dirSnapshot)
+	summary.Changed = len(changedDirs) > 0
 	for sourceRelPath := range sourceIndex {
 		parent := filepath.ToSlash(filepath.Dir(sourceRelPath))
 		if parent == "" {
@@ -170,7 +205,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	totalCandidates = indexSkippedCandidates
 	summary.Skipped = indexSkippedCandidates
 
-	err = filepath.WalkDir(s.sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+	visitMedia := func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -277,7 +312,17 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		}
 		pendingJobs = append(pendingJobs, importJob{path: path, originalName: name, sourceRelPath: sourceRelPath, info: info})
 		return nil
-	})
+	}
+	if s.IsSMBLibrary() {
+		for _, entry := range dirSnapshot.mediaEntries {
+			if err = visitMedia(entry.path, entry.entry, nil); err != nil {
+				break
+			}
+		}
+		dirSnapshot.mediaEntries = nil
+	} else {
+		err = walkScanDir(ctx, s.sourcePath, visitMedia)
+	}
 	if err != nil {
 		return summary, err
 	}
@@ -294,7 +339,7 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		}
 		info := job.info
 		if info == nil {
-			info, err = os.Stat(job.path)
+			info, err = scanStat(ctx, job.path)
 			if err != nil {
 				return summary, err
 			}
@@ -361,12 +406,17 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 			progress(totalCandidates, totalCandidates)
 		}
 		dirSnapshot.changedDirectories = changedDirectoryList(changedDirs)
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+		reportScan(ctx, "saving", "save", s.sourcePath, -1, 0, 0)
 		if err := s.saveLibraryScanSnapshot(dirSnapshot, totalCandidates); err != nil {
 			return summary, err
 		}
 		return summary, nil
 	}
 
+	reportScan(ctx, "importing", "import_media", s.sourcePath, -1, 0, 0)
 	var (
 		importedCount  int64
 		skippedCount   int64
@@ -380,6 +430,9 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 	)
 
 	workerCount := importWorkerCount()
+	if backgroundLibraryScan(ctx) {
+		workerCount = 1
+	}
 	wg.Add(workerCount)
 	for i := 0; i < workerCount; i++ {
 		go func() {
@@ -388,7 +441,8 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 				if ctx.Err() != nil {
 					return
 				}
-				photo, imported, jobErr := s.importExistingPhotoFile(job, uploadedBy)
+				reportScan(ctx, "importing", "import_media", job.path, -1, 0, 0)
+				photo, imported, jobErr := s.importExistingPhotoFileContext(ctx, job, uploadedBy)
 				if jobErr != nil {
 					atomic.AddInt64(&skippedCount, 1)
 					fmt.Fprintf(os.Stderr, "警告: 跳过导入失败的文件 %s: %v\n", job.path, jobErr)
@@ -465,6 +519,10 @@ func (s *PhotoService) ImportExistingPhotosContext(ctx context.Context, uploaded
 		return summary, err
 	}
 	dirSnapshot.changedDirectories = changedDirectoryList(changedDirs)
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
+	reportScan(ctx, "saving", "save", s.sourcePath, -1, 0, 0)
 	if err := s.saveLibraryScanSnapshot(dirSnapshot, totalCandidates); err != nil {
 		return summary, err
 	}
@@ -482,7 +540,8 @@ func (s *PhotoService) NeedsLibraryBuild(ctx context.Context) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	rootInfo, err := os.Stat(s.sourcePath)
+	reportScan(ctx, "checking", "metadata", s.sourcePath, 0, 0, 0)
+	rootInfo, err := scanStat(ctx, s.sourcePath)
 	if err != nil {
 		return false, err
 	}
@@ -524,7 +583,7 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string, pre
 		directoryMediaCounts: make(map[string]int),
 		directoryMediaHashes: make(map[string]string),
 	}
-	rootInfo, err := os.Stat(sourcePath)
+	rootInfo, err := scanStat(ctx, sourcePath)
 	if err != nil {
 		return snapshot, err
 	}
@@ -537,7 +596,7 @@ func collectLibraryDirectorySnapshot(ctx context.Context, sourcePath string, pre
 	stableDirs := stableLibraryDirectories(ctx, sourcePath, previous)
 	entryHashers := make(map[string]hash.Hash64)
 	mediaHashers := make(map[string]hash.Hash64)
-	err = filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+	err = walkScanDir(ctx, sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -648,12 +707,9 @@ func stableLibraryDirectories(ctx context.Context, sourcePath string, previous *
 	if previous == nil || previous.Version != libraryScanSnapshotVersion || len(previous.DirectoryModTimes) == 0 || len(previous.DirectoryEntryHashes) == 0 {
 		return stable
 	}
-	_ = filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+	_ = walkLibraryDirectories(ctx, sourcePath, func(path string) ([]fs.DirEntry, error) { return readScanDir(ctx, path) }, func(path string, d fs.DirEntry, entries []fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if walkErr != nil {
-			return walkErr
 		}
 		if !d.IsDir() {
 			return nil
@@ -675,10 +731,6 @@ func stableLibraryDirectories(ctx context.Context, sourcePath string, previous *
 		}
 		if previous.DirectoryModTimes[relPath] != info.ModTime().UnixNano() {
 			return nil
-		}
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err
 		}
 		if libraryDirectoryEntriesMatch(previous, relPath, entries) {
 			stable[relPath] = true
@@ -729,6 +781,65 @@ func changedDirectoryList(changed map[string]bool) []string {
 	return result
 }
 
+// Enumerate each directory once, reusing its entries for validation and child
+// traversal. WalkDir plus an extra ReadDir doubled HDD directory enumeration.
+// Iteration is serial and retains only pending directory entries, not media.
+func walkLibraryDirectories(ctx context.Context, root string, readDir func(string) ([]fs.DirEntry, error), visit func(string, fs.DirEntry, []fs.DirEntry) error) error {
+	info, err := scanStat(ctx, root)
+	if err != nil {
+		return err
+	}
+	type directory struct {
+		path  string
+		entry fs.DirEntry
+	}
+	pending := []directory{{root, fs.FileInfoToDirEntry(info)}}
+	visited := 0
+	mediaCount := 0
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		next := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		reportScan(ctx, "", "read_directory", next.path, visited, len(pending)+1, mediaCount)
+		entries, err := readDir(next.path)
+		if err != nil {
+			return err
+		}
+		if err := visit(next.path, next.entry, entries); err != nil {
+			if err == filepath.SkipDir {
+				continue
+			}
+			return err
+		}
+		for _, entry := range entries {
+			if isScanMedia(entry) {
+				mediaCount++
+			}
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+				pending = append(pending, directory{filepath.Join(next.path, entry.Name()), entry})
+			}
+		}
+		visited++
+		reportScan(ctx, "", "directory_complete", next.path, visited, len(pending), mediaCount)
+		if backgroundLibraryScan(ctx) && visited%32 == 0 {
+			// Give foreground thumbnail/original reads a chance between directories.
+			timer := time.NewTimer(2 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return nil
+}
+
 func quickLibraryScanSnapshotMatches(ctx context.Context, snapshot *storage.LibraryScanSnapshot, sourcePath string, rootInfo fs.FileInfo) bool {
 	if snapshot == nil || snapshot.Version != libraryScanSnapshotVersion || rootInfo == nil || len(snapshot.DirectoryModTimes) == 0 ||
 		len(snapshot.DirectoryEntryHashes) != len(snapshot.DirectoryModTimes) {
@@ -737,20 +848,9 @@ func quickLibraryScanSnapshotMatches(ctx context.Context, snapshot *storage.Libr
 	if filepath.Clean(snapshot.RootPath) != filepath.Clean(sourcePath) {
 		return false
 	}
-	seenDirs := make(map[string]struct{}, len(snapshot.DirectoryModTimes))
-	err := filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() && path != sourcePath && strings.HasPrefix(d.Name(), ".") {
-			return filepath.SkipDir
-		}
-		if !d.IsDir() {
-			return nil
-		}
+	checked := 0
+	err := walkLibraryDirectories(ctx, sourcePath, func(path string) ([]fs.DirEntry, error) { return readScanDir(ctx, path) }, func(path string, d fs.DirEntry, entries []fs.DirEntry) error {
+		checked++
 		relPath := "."
 		if path != sourcePath {
 			rel, err := filepath.Rel(sourcePath, path)
@@ -764,20 +864,13 @@ func quickLibraryScanSnapshotMatches(ctx context.Context, snapshot *storage.Libr
 			return errSnapshotMismatch
 		}
 		info, err := d.Info()
-		if err != nil || info.ModTime().UnixNano() != expectedModTime {
+		if err != nil || info.ModTime().UnixNano() != expectedModTime || !libraryDirectoryEntriesMatch(snapshot, relPath, entries) {
 			return errSnapshotMismatch
 		}
-		entries, err := os.ReadDir(path)
-		if err != nil || !libraryDirectoryEntriesMatch(snapshot, relPath, entries) {
-			return errSnapshotMismatch
-		}
-		seenDirs[relPath] = struct{}{}
 		return nil
 	})
-	if err != nil {
-		return false
-	}
-	return len(seenDirs) == len(snapshot.DirectoryModTimes)
+	matched := err == nil && checked == len(snapshot.DirectoryModTimes)
+	return matched
 }
 
 // Older v2 incremental scans omitted stable child directories from their
@@ -1086,11 +1179,11 @@ func (s *PhotoService) relocateExistingSourceMedia(job sourceMoveJob, uploadedBy
 	return photo, nil
 }
 
-func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) (*storage.Photo, bool, error) {
+func (s *PhotoService) importExistingPhotoFileContext(ctx context.Context, job importJob, uploadedBy int64) (*storage.Photo, bool, error) {
 	info := job.info
 	if info == nil {
 		var err error
-		info, err = os.Stat(job.path)
+		info, err = scanStat(ctx, job.path)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1111,7 +1204,7 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 			existing.DeletedBy = nil
 			existing.DeletedGroupID = ""
 		}
-		if err := s.refreshExistingImportedPhotoMetadata(existing, job, uploadedBy, sourceChanged); err != nil {
+		if err := s.refreshExistingImportedPhotoMetadata(ctx, existing, job, uploadedBy, sourceChanged); err != nil {
 			return nil, false, err
 		}
 		if sourceChanged {
@@ -1130,7 +1223,9 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 
 	mimeType := imgpkg.DetectMimeType(job.originalName)
 	if imgpkg.SupportedMimeTypes[mimeType] {
-		meta, err := imgpkg.ExtractMetaFromPath(job.path, job.originalName, info.ModTime())
+		meta, err := scanIO(ctx, job.path, func() (*imgpkg.Meta, error) {
+			return imgpkg.ExtractMetaFromPathContext(ctx, job.path, job.originalName, info.ModTime())
+		})
 		if err != nil {
 			return nil, false, fmt.Errorf("解析图片失败 %s: %w", job.path, err)
 		}
@@ -1152,6 +1247,9 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 			UploadedBy:    uploadedBy,
 		}
 
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		if err := s.repo.SavePhoto(photo); err != nil {
 			return nil, false, fmt.Errorf("保存图片记录失败: %w", err)
 		}
@@ -1159,7 +1257,10 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		return photo, true, nil
 	}
 
-	videoMeta, err := media.ProbeVideo(job.path)
+	videoMeta, err := media.ProbeVideoContext(ctx, job.path)
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
 	if err != nil {
 		videoMeta = &media.VideoMeta{FormatName: strings.TrimPrefix(filepath.Ext(job.originalName), ".")}
 	}
@@ -1185,31 +1286,39 @@ func (s *PhotoService) importExistingPhotoFile(job importJob, uploadedBy int64) 
 		UploadedBy:    uploadedBy,
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if err := s.repo.SavePhoto(photo); err != nil {
 		return nil, false, fmt.Errorf("保存视频记录失败: %w", err)
 	}
 	return photo, true, nil
 }
 
-func (s *PhotoService) refreshExistingImportedPhotoMetadata(existing *storage.Photo, job importJob, uploadedBy int64, force bool) error {
+func (s *PhotoService) refreshExistingImportedPhotoMetadata(ctx context.Context, existing *storage.Photo, job importJob, uploadedBy int64, force bool) error {
 	if existing == nil || (!force && !shouldRefreshCapturedMetadata(existing)) {
 		return nil
 	}
 	info := job.info
 	if info == nil {
 		var err error
-		info, err = os.Stat(job.path)
+		info, err = scanStat(ctx, job.path)
 		if err != nil {
 			return err
 		}
 	}
 	mimeType := imgpkg.DetectMimeType(job.originalName)
 	if imgpkg.SupportedMimeTypes[mimeType] {
-		meta, err := imgpkg.ExtractMetaFromPath(job.path, job.originalName, info.ModTime())
+		meta, err := scanIO(ctx, job.path, func() (*imgpkg.Meta, error) {
+			return imgpkg.ExtractMetaFromPathContext(ctx, job.path, job.originalName, info.ModTime())
+		})
 		if err != nil {
 			return nil
 		}
 		exif := copyPhotoEXIF(meta.EXIF)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.repo.UpdatePhotoCapturedMetadata(existing.ID, uploadedBy, meta.TakenAt, exif, meta.Width, meta.Height, existing.DurationMS); err != nil {
 			return err
 		}
@@ -1220,7 +1329,7 @@ func (s *PhotoService) refreshExistingImportedPhotoMetadata(existing *storage.Ph
 		return nil
 	}
 
-	videoMeta, err := media.ProbeVideo(job.path)
+	videoMeta, err := media.ProbeVideoContext(ctx, job.path)
 	if err != nil || videoMeta == nil {
 		return nil
 	}
@@ -1229,6 +1338,9 @@ func (s *PhotoService) refreshExistingImportedPhotoMetadata(existing *storage.Ph
 		takenAt = videoMeta.TakenAt
 	}
 	exif := videoMetaEXIF(videoMeta)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.repo.UpdatePhotoCapturedMetadata(existing.ID, uploadedBy, takenAt, exif, videoMeta.Width, videoMeta.Height, videoMeta.DurationMS); err != nil {
 		return err
 	}
@@ -1276,12 +1388,12 @@ func (s *PhotoService) loadAlbumCache(uploadedBy int64) (map[string]int64, error
 		if album == nil {
 			continue
 		}
-		if path := autoFolderAlbumPath(album); path != "" {
-			cache[path] = album.ID
+		if album.SourceKind == folderAlbumSourceKind && strings.TrimSpace(album.Name) == rootFolderAlbumName && strings.TrimSpace(album.SourceRelPath) == "" {
+			cache[rootFolderAlbumKey] = album.ID
 			continue
 		}
-		if album.SourceKind == folderAlbumSourceKind && album.Name == rootFolderAlbumName {
-			cache[rootFolderAlbumKey] = album.ID
+		if path := autoFolderAlbumPath(album); path != "" {
+			cache[path] = album.ID
 			continue
 		}
 		cache[album.Name] = album.ID

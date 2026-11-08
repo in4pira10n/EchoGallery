@@ -1,15 +1,18 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -50,13 +53,17 @@ func (s *PhotoService) LocateTimelineWindow(params storage.LocateTimelineParams)
 	if err != nil || result == nil {
 		return result, err
 	}
-	page := s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos})
-	result.Photos = page.Photos
-	if result.TargetIndex >= len(result.Photos) {
-		result.TargetIndex = len(result.Photos) - 1
+	targetID := int64(0)
+	if result.TargetIndex >= 0 && result.TargetIndex < len(result.Photos) {
+		targetID = result.Photos[result.TargetIndex].ID
 	}
-	if result.TargetIndex < 0 {
-		result.TargetIndex = 0
+	result.Photos = s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos}).Photos
+	result.TargetIndex = 0
+	for i, photo := range result.Photos {
+		if photo.ID == targetID {
+			result.TargetIndex = i
+			break
+		}
 	}
 	return result, nil
 }
@@ -74,13 +81,17 @@ func (s *PhotoService) LocateAlbumWindow(params storage.LocateAlbumParams) (*sto
 	if err != nil || result == nil {
 		return result, err
 	}
-	page := s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos})
-	result.Photos = page.Photos
-	if result.TargetIndex >= len(result.Photos) {
-		result.TargetIndex = len(result.Photos) - 1
+	targetID := int64(0)
+	if result.TargetIndex >= 0 && result.TargetIndex < len(result.Photos) {
+		targetID = result.Photos[result.TargetIndex].ID
 	}
-	if result.TargetIndex < 0 {
-		result.TargetIndex = 0
+	result.Photos = s.filterExistingMediaPage(&storage.PhotoPage{Photos: result.Photos}).Photos
+	result.TargetIndex = 0
+	for i, photo := range result.Photos {
+		if photo.ID == targetID {
+			result.TargetIndex = i
+			break
+		}
 	}
 	return result, nil
 }
@@ -133,11 +144,35 @@ func (s *PhotoService) SearchMedia(params storage.SearchPhotosParams) (*storage.
 
 // GetRandomMedia 获取乱序相册媒体（游标分页）。
 func (s *PhotoService) GetRandomMedia(params storage.RandomPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.ListRandomPhotos(params)
-	if err != nil {
-		return nil, err
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 30
 	}
-	return s.filterExistingMediaPage(page), nil
+	result := &storage.PhotoPage{}
+	// Filtering missing files must not strand a short/empty page. Advance the
+	// underlying cursor and refill, with bounded work per HTTP request.
+	for attempt := 0; attempt < 4; attempt++ {
+		params.Limit = limit - len(result.Photos)
+		page, err := s.repo.ListRandomPhotos(params)
+		if err != nil {
+			return nil, err
+		}
+		if attempt == 0 {
+			result.Total = page.Total
+		}
+		page = s.filterExistingMediaPage(page)
+		result.Photos = append(result.Photos, page.Photos...)
+		result.HasMore, result.NextCursor = page.HasMore, page.NextCursor
+		if !page.HasMore || len(result.Photos) >= limit {
+			break
+		}
+		if page.NextCursor == "" || page.NextCursor == params.Cursor {
+			return nil, fmt.Errorf("random media cursor did not advance")
+		}
+		params.Cursor = page.NextCursor
+		params.SkipTotal = true
+	}
+	return result, nil
 }
 
 // GetAlbumMedia 获取相册内媒体（游标分页）。
@@ -214,6 +249,16 @@ func (s *PhotoService) syncPortableDatabase() error {
 	return nil
 }
 
+func (s *PhotoService) scheduleAlbumDatabaseSync() error {
+	if s == nil || s.repo == nil {
+		return nil
+	}
+	if scheduler, ok := s.repo.(interface{ SchedulePortableSync() error }); ok {
+		return scheduler.SchedulePortableSync()
+	}
+	return s.syncPortableDatabase()
+}
+
 // CreateAlbum 创建相册。
 func (s *PhotoService) CreateAlbum(name, description string, userID int64) (*storage.Album, error) {
 	if name == "" {
@@ -228,7 +273,7 @@ func (s *PhotoService) CreateAlbum(name, description string, userID int64) (*sto
 	if err := s.repo.CreateAlbum(album); err != nil {
 		return nil, err
 	}
-	if err := s.syncPortableDatabase(); err != nil {
+	if err := s.scheduleAlbumDatabaseSync(); err != nil {
 		return nil, fmt.Errorf("保存相册到资源库数据库失败: %w", err)
 	}
 	return album, nil
@@ -263,7 +308,7 @@ func (s *PhotoService) CreateSmartAlbum(name, description, matchMode string, rul
 	if err := s.repo.CreateAlbum(album); err != nil {
 		return nil, err
 	}
-	if err := s.syncPortableDatabase(); err != nil {
+	if err := s.scheduleAlbumDatabaseSync(); err != nil {
 		return nil, fmt.Errorf("保存智能相册到资源库数据库失败: %w", err)
 	}
 	return s.repo.GetAlbumByID(album.ID, userID)
@@ -300,7 +345,7 @@ func (s *PhotoService) UpdateSmartAlbum(id int64, name, description, matchMode s
 	if err := s.repo.UpdateAlbum(album); err != nil {
 		return nil, err
 	}
-	if err := s.syncPortableDatabase(); err != nil {
+	if err := s.scheduleAlbumDatabaseSync(); err != nil {
 		return nil, fmt.Errorf("保存智能相册到资源库数据库失败: %w", err)
 	}
 	return s.repo.GetAlbumByID(id, userID)
@@ -323,7 +368,7 @@ func (s *PhotoService) UpdateAlbum(id int64, name, description string, coverPhot
 	if err := s.repo.UpdateAlbum(album); err != nil {
 		return nil, err
 	}
-	if err := s.syncPortableDatabase(); err != nil {
+	if err := s.scheduleAlbumDatabaseSync(); err != nil {
 		return nil, fmt.Errorf("保存相册到资源库数据库失败: %w", err)
 	}
 	return album, nil
@@ -346,12 +391,12 @@ func (s *PhotoService) DeleteAlbum(id int64, userID int64) error {
 		if _, err := trashRepo.SoftDeleteFolderAlbumTree(id, userID, userID, uuid.NewString()); err != nil {
 			return err
 		}
-		return s.syncPortableDatabase()
+		return s.scheduleAlbumDatabaseSync()
 	}
 	if err := s.repo.DeleteAlbum(id, userID); err != nil {
 		return err
 	}
-	return s.syncPortableDatabase()
+	return s.scheduleAlbumDatabaseSync()
 }
 
 // GetAlbumDownloadEntries 获取相册下载条目。
@@ -427,7 +472,39 @@ func (s *PhotoService) AddPhoto(albumID int64, photoID int64, userID int64) erro
 	if err := s.repo.AddPhotoToAlbum(albumID, photoID, userID); err != nil {
 		return err
 	}
-	return s.syncPortableDatabase()
+	return s.scheduleAlbumDatabaseSync()
+}
+
+func (s *PhotoService) AddPhotosToAlbum(albumID int64, photoIDs []int64, userID int64) error {
+	uniqueIDs := make([]int64, 0, len(photoIDs))
+	seen := make(map[int64]struct{}, len(photoIDs))
+	for _, id := range photoIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return fmt.Errorf("没有可添加的媒体")
+	}
+	if batcher, ok := s.repo.(interface {
+		AddPhotosToAlbum(albumID int64, photoIDs []int64, userID int64) error
+	}); ok {
+		if err := batcher.AddPhotosToAlbum(albumID, uniqueIDs, userID); err != nil {
+			return err
+		}
+	} else {
+		for _, id := range uniqueIDs {
+			if err := s.repo.AddPhotoToAlbum(albumID, id, userID); err != nil {
+				return err
+			}
+		}
+	}
+	return s.scheduleAlbumDatabaseSync()
 }
 
 // RemovePhoto 将媒体从相册移除。
@@ -435,7 +512,7 @@ func (s *PhotoService) RemovePhoto(albumID int64, photoID int64, userID int64) e
 	if err := s.repo.RemovePhotoFromAlbum(albumID, photoID, userID); err != nil {
 		return err
 	}
-	return s.syncPortableDatabase()
+	return s.scheduleAlbumDatabaseSync()
 }
 
 // GetPhoto 获取单张图片
@@ -925,23 +1002,61 @@ func (s *PhotoService) mediaFileCandidates(photo *storage.Photo) []string {
 	return candidates
 }
 
+// Foreground existence checks have a shared short deadline and bounded
+// concurrency. Slow disks, denied access and disconnected shares retain indexed
+// cards; they must not block browsing or be mistaken for deleted media.
 func (s *PhotoService) filterExistingMediaPage(page *storage.PhotoPage) *storage.PhotoPage {
 	if page == nil || len(page.Photos) == 0 {
 		return page
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	root := s.sourcePath
+	if root == "" {
+		root = s.dataPath
+	}
+	if err := CheckLibraryReachable(ctx, root); err != nil {
+		return page
+	}
+	missing := make([]bool, len(page.Photos))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for worker := 0; worker < min(8, len(page.Photos)); worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := range jobs {
+				paths := s.mediaFileCandidates(page.Photos[i])
+				absent := len(paths) > 0
+				for _, path := range paths {
+					info, err := scanStat(ctx, path)
+					if err == nil && !info.IsDir() {
+						absent = false
+						break
+					}
+					if err == nil || !errors.Is(err, fs.ErrNotExist) {
+						absent = false
+						break
+					}
+				}
+				missing[i] = absent
+			}
+		}()
+	}
+	for i := range page.Photos {
+		jobs <- i
+	}
+	close(jobs)
+	workers.Wait()
 	filtered := page.Photos[:0]
-	removed := 0
-	for _, photo := range page.Photos {
-		if s.mediaFileExists(photo) {
+	for i, photo := range page.Photos {
+		if !missing[i] {
 			filtered = append(filtered, photo)
-			continue
 		}
-		removed++
 	}
 	page.Photos = filtered
-	if removed > 0 && page.Total >= removed {
-		page.Total -= removed
-	}
+	// Total describes the indexed query, not just missing files in this page.
+	// Only a successful scan/explicit cleanup can establish a new global count.
 	return page
 }
 

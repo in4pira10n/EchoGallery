@@ -570,6 +570,44 @@ func TestListRandomPhotos_PaginatesWithoutLoadingAll(t *testing.T) {
 	}
 }
 
+func TestListRandomPhotosToleratesUnparseableTakenAt(t *testing.T) {
+	db := newTestDB(t)
+	uploadedAt := time.Date(2025, 6, 7, 8, 9, 10, 0, time.UTC)
+	photo := makePhoto(1, uploadedAt.Add(-24*time.Hour))
+	photo.UUID = "random-invalid-taken-at"
+	photo.MediaKind = storage.MediaKindVideo
+	photo.UploadedAt = uploadedAt
+	photo.RandomSortKey = 25
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.Exec(`UPDATE photos SET taken_at = ? WHERE id = ?`, "not-a-date", photo.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := db.ListRandomPhotos(storage.RandomPhotosParams{UserID: 1, Seed: 1, Limit: 10, MediaKind: storage.MediaKindVideo})
+	if err != nil {
+		t.Fatalf("random listing should tolerate an invalid capture timestamp: %v", err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
+		t.Fatalf("invalid timestamp row missing from random page: %+v", page.Photos)
+	}
+	if !page.Photos[0].TakenAt.Equal(uploadedAt) {
+		t.Fatalf("invalid capture timestamp should fall back to upload time: got %v, want %v", page.Photos[0].TakenAt, uploadedAt)
+	}
+}
+
+func TestParseFlexibleSQLiteTimeSupportsLegacyTimeString(t *testing.T) {
+	got, ok := parseFlexibleSQLiteTime("2025-06-07 08:09:10.123456789 +0000 UTC")
+	if !ok {
+		t.Fatal("expected Go time.String format to parse")
+	}
+	want := time.Date(2025, 6, 7, 8, 9, 10, 123456789, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("unexpected parsed time: got %v, want %v", got, want)
+	}
+}
+
 func TestListPhotos_UserIsolation(t *testing.T) {
 	db := newTestDB(t)
 	db.SavePhoto(makePhoto(1, time.Now()))
@@ -666,6 +704,11 @@ func TestSearchPhotos_FiltersAndPaginates(t *testing.T) {
 	}
 	if len(videoPage.Photos) != 1 || videoPage.Photos[0].ID != items[1].ID {
 		t.Fatalf("期望按 mime/media kind 命中视频，得到 %d 条", len(videoPage.Photos))
+	}
+
+	punctuationPage, err := db.SearchPhotos(storage.SearchPhotosParams{UserID: 1, Query: "tain S", Limit: 10})
+	if err != nil || len(punctuationPage.Photos) != 1 || punctuationPage.Photos[0].ID != items[0].ID {
+		t.Fatalf("FTS 子串搜索应命中带空格的文件名: page=%+v err=%v", punctuationPage, err)
 	}
 }
 

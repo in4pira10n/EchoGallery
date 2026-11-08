@@ -19,7 +19,7 @@ func TestBatchBuildHandlersRejectPausedStages(t *testing.T) {
 		handler gin.HandlerFunc
 	}{
 		{"scan migration", `{"move_legacy_thumbnails":true}`, handleStartLibraryBatchBuild(testConfig(), LibraryBatchBuildHooks{
-			Start: func(*config.Config, *config.Profile, string, int64, bool, bool, bool, bool, bool, bool) (LibraryBatchBuildStatus, error) {
+			Start: func(*config.Config, *config.Profile, string, int64, bool, bool, bool, bool, bool, bool, bool) (LibraryBatchBuildStatus, error) {
 				t.Fatal("迁移任务不应启动")
 				return LibraryBatchBuildStatus{}, nil
 			},

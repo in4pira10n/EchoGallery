@@ -48,6 +48,7 @@ type libraryBatchBuildTask struct {
 
 	buildThumbnailsAfterScan bool
 	completeEXIFAfterScan    bool
+	cleanFilesAfterScan      bool
 	autoThumbnailAggressive  bool
 	autoMoveLegacyThumbnails bool
 	autoCleanThumbnailFiles  bool
@@ -1077,7 +1078,7 @@ func (m *libraryBatchBuildManager) Status(cfg *config.Config, profile *config.Pr
 	return loadPersistedBatchStatus(cfg, batchLibrariesForWorkflow(cfg), batchTaskKindScan, defaultExitAfter, idleMessage)
 }
 
-func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (api.LibraryBatchBuildStatus, error) {
+func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool, cleanFiles bool) (api.LibraryBatchBuildStatus, error) {
 	if cfg == nil || profile == nil {
 		return api.LibraryBatchBuildStatus{Status: "idle", Message: m.idleMessage}, fmt.Errorf("invalid batch scan parameters")
 	}
@@ -1106,6 +1107,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.idleMessage = m.idleMessage
 	task.buildThumbnailsAfterScan = buildThumbnailsAfterScan
 	task.completeEXIFAfterScan = completeEXIF
+	task.cleanFilesAfterScan = cleanFiles
 	task.autoThumbnailAggressive = aggressive
 	task.autoMoveLegacyThumbnails = moveLegacyThumbnails
 	task.autoCleanThumbnailFiles = cleanThumbnailFiles
@@ -1120,6 +1122,7 @@ func (m *libraryBatchBuildManager) Start(cfg *config.Config, profile *config.Pro
 	task.status.SelectedLibraryIDs = selectedLibraryIDsFromLibraries(libraries)
 	task.status.SelectedPaths = selectedPathsFromLibraries(libraries)
 	task.status.SelectionConfigured = true
+	task.status.CleanFiles = cleanFiles
 	// Each explicit start must revalidate the current filesystem snapshot,
 	// including libraries completed by an earlier or interrupted task.
 	// NeedsLibraryBuild still skips unchanged libraries without reimporting media.
@@ -1388,6 +1391,13 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			return
 		}
 		m.beginLibrary(task, index, library)
+		// Never recreate a missing mount or library root before a destructive audit.
+		if task.cleanFilesAfterScan {
+			if err := service.CheckLibraryReachable(ctx, library.Path); err != nil {
+				m.failLibrary(task, index, err)
+				continue
+			}
+		}
 		if m.lockStore != nil {
 			if _, err := m.lockStore.Acquire(library, task.username, config.UserRoleAdmin, m.sessionID, "batch_scan"); err != nil {
 				var conflict *sessionlock.ConflictError
@@ -1422,7 +1432,20 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			m.failLibrary(task, index, err)
 			continue
 		}
-		needsBuild, checkErr := svc.NeedsLibraryBuild(ctx)
+		scanCtx := service.WithLibraryScanProgress(ctx, func(detail service.LibraryScanProgress) {
+			task.mutate(func(status *api.LibraryBatchBuildStatus) {
+				status.Discovery = &detail
+				if status.CurrentTotal == 0 && detail.Phase == "discovering" {
+					status.CurrentDone = detail.Media
+				}
+			})
+			task.persist(false)
+		})
+		needsBuild, checkErr := true, error(nil)
+		// SMB import validates the snapshot during its one directory traversal.
+		if !svc.IsSMBLibrary() && !task.cleanFilesAfterScan {
+			needsBuild, checkErr = svc.NeedsLibraryBuild(scanCtx)
+		}
 		if checkErr != nil {
 			_ = repo.Close()
 			if m.lockStore != nil {
@@ -1488,7 +1511,7 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 		libraryUserID := svc.LibraryUserID(batchLibraryOwnerUserID(cfg, library, userID))
 		setBatchScanLibraryProgress(task, index, library, "discovering", 0, 0)
 		task.persist(true)
-		summary, err := svc.ImportExistingPhotosContext(ctx, libraryUserID, func(done, total int) {
+		summary, err := svc.ImportExistingPhotosContext(scanCtx, libraryUserID, func(done, total int) {
 			setBatchScanLibraryProgress(task, index, library, "scan", done, total)
 			task.persist(false)
 		})
@@ -1503,6 +1526,31 @@ func (m *libraryBatchBuildManager) run(ctx context.Context, task *libraryBatchBu
 			}
 			m.failLibrary(task, index, fmt.Errorf("扫描资源库失败: %w", err))
 			continue
+		}
+		// Import's legacy Pruned count describes missing paths, not actual removals.
+		// Batch cleanup is opt-in; only report records that were really cleaned.
+		summary.Pruned = 0
+		if task.cleanFilesAfterScan {
+			setBatchScanLibraryProgress(task, index, library, "cleanup", 0, 0)
+			task.persist(true)
+			cleaned, cleanErr := svc.CleanMissingMediaContext(scanCtx, libraryUserID, func(done, total int) {
+				setBatchScanLibraryProgress(task, index, library, "cleanup", done, total)
+				task.persist(false)
+			})
+			summary.Pruned = cleaned
+			task.mutate(func(status *api.LibraryBatchBuildStatus) { status.Libraries[index].Pruned = cleaned })
+			if cleanErr != nil {
+				_ = repo.Close()
+				if m.lockStore != nil {
+					_ = m.lockStore.Release(library.ID, m.sessionID, "batch_scan")
+				}
+				if ctx.Err() != nil {
+					m.cancelTask(task, index)
+					return
+				}
+				m.failLibrary(task, index, cleanErr)
+				continue
+			}
 		}
 		if task.completeEXIFAfterScan {
 			setBatchScanLibraryProgress(task, index, library, "exif", 0, 0)
@@ -1617,6 +1665,9 @@ func setBatchScanLibraryProgress(task *libraryBatchBuildTask, index int, library
 			status.Message = fmt.Sprintf("正在发现资源库 %s 中的媒体，已发现 %d 条", library.Name, done)
 		case "exif":
 			status.Message = fmt.Sprintf("正在补全资源库 %s 的 EXIF", library.Name)
+		case "cleanup":
+			status.MessageKey = "batchWorkflow.taskCleanup"
+			status.Message = fmt.Sprintf("正在清理资源库 %s 中已删除媒体的文件", library.Name)
 		default:
 			status.Message = fmt.Sprintf("正在扫描资源库 %s", library.Name)
 		}
@@ -1625,6 +1676,9 @@ func setBatchScanLibraryProgress(task *libraryBatchBuildTask, index int, library
 		status.CurrentLibraryName = library.Name
 		status.CurrentLibraryPath = library.Path
 		status.CurrentPhase = phase
+		if phase == "checking" || phase == "exif" {
+			status.Discovery = nil
+		}
 		status.CurrentDone = done
 		status.CurrentTotal = total
 		status.CurrentPercent = 0
@@ -2189,7 +2243,12 @@ func describeLibraryAvailability(lockStore *sessionlock.Store, cfg *config.Confi
 		if id == "" {
 			continue
 		}
-		occupied, leaseErr := sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite"))
+		// Listing libraries must not contact an unrelated SMB server. The
+		// runtime opener still acquires and validates the portable lease.
+		occupied, leaseErr := false, error(nil)
+		if !service.IsSMBPath(library.Path) {
+			occupied, leaseErr = sqlite.PortableLibraryOccupied(filepath.Join(config.LibraryDataRoot(library.Path), "metadata.sqlite"))
+		}
 		if leaseErr != nil && !occupied {
 			log.Printf("inspect library %s lease: %v", id, leaseErr)
 			result[id] = api.LibraryAvailabilityState{Available: false, Status: "unavailable", Reason: "无法读取资源库访问锁，请检查目录权限或磁盘状态", ReasonKey: "api.errors.libraryLeaseReadFailed"}
@@ -2293,6 +2352,9 @@ func resolveBootstrapLibrary(cfg *config.Config) (config.Library, bool) {
 	if active := strings.TrimSpace(cfg.ActiveProfile); active != "" {
 		if profile, err := config.EnsureProfile(cfg, active); err == nil {
 			if library, ok := cfg.ResolveUserLibrarySelection(active, profile.ActiveLibraryID, profile.StoragePath); ok {
+				if service.IsSMBPath(library.Path) {
+					return config.Library{}, false
+				}
 				status := strings.TrimSpace(library.Status)
 				if status == "" {
 					status = config.DetectLibraryStatus(library.Path)
@@ -2304,6 +2366,9 @@ func resolveBootstrapLibrary(cfg *config.Config) (config.Library, bool) {
 		}
 	}
 	for _, library := range cfg.Libraries {
+		if service.IsSMBPath(library.Path) {
+			continue
+		}
 		status := strings.TrimSpace(library.Status)
 		if status == "" {
 			status = config.DetectLibraryStatus(library.Path)
@@ -2485,6 +2550,10 @@ func (s *libraryBuildState) start(message string) {
 	now := time.Now().Format(time.RFC3339)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.startLocked(message, now)
+}
+
+func (s *libraryBuildState) startLocked(message, now string) {
 	s.status.Status = "discovering"
 	s.status.Message = message
 	s.status.StartedAt = now
@@ -2496,13 +2565,14 @@ func (s *libraryBuildState) start(message string) {
 	s.status.Skipped = 0
 	s.status.Pruned = 0
 	s.status.Error = ""
+	s.status.Discovery = nil
 }
 
 func (s *libraryBuildState) progress(done, total int) {
 	now := time.Now().Format(time.RFC3339)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if total > 0 {
+	if total > 0 && s.status.Status != "cancelling" {
 		s.status.Status = "running"
 		s.status.Message = "正在扫描与构建资源库"
 	} else if done > 0 && s.status.Status == "discovering" {
@@ -2700,7 +2770,7 @@ func main() {
 
 	var repo *sqlite.DB
 	var photoService *service.PhotoService
-	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok {
+	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok && !service.IsSMBPath(bootstrapLibrary.Path) {
 		if err := config.ValidatePortableLibraryIdentity(bootstrapLibrary.Path, bootstrapLibrary.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to identify bootstrap library %s: %v\n", bootstrapLibrary.Name, err)
 		} else {
@@ -2772,6 +2842,12 @@ func main() {
 	if bootstrapLibrary, ok := resolveBootstrapLibrary(cfg); ok && photoService != nil && repo != nil {
 		runtimeProvider.Register(bootstrapLibrary.ID, photoService, repo)
 	}
+	stopShutdownWork := context.AfterFunc(rootCtx, func() {
+		runtimeProvider.CancelBackground()
+		api.StopLibraryMetricsRefresh()
+	})
+	defer stopShutdownWork()
+	defer api.StopLibraryMetricsRefresh()
 	defer func() {
 		if err := runtimeProvider.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to sync and close library databases: %v\n", err)
@@ -2791,6 +2867,7 @@ func main() {
 		Status:               buildState.Status,
 		SetExitAfterComplete: buildState.SetExitAfterComplete,
 		Cancel:               buildState.Cancel,
+		Retry:                func() (api.LibraryBuildStatus, error) { return launchLibraryBuild(rootCtx, photoService, buildState) },
 	}, api.LibraryBatchBuildHooks{
 		Status:               batchBuildManager.Status,
 		Start:                batchBuildManager.Start,
@@ -2821,13 +2898,20 @@ func main() {
 		fmt.Printf("🌐 HTTP server started: http://127.0.0.1%s\n", addr)
 	}
 	if len(cfg.Users) > 0 && photoService != nil {
-		needsBuild, checkErr := photoService.NeedsLibraryBuild(rootCtx)
-		if checkErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to check library build state: %v\n", checkErr)
-			needsBuild = true
+		// Local checks run inside the observable, cancellable scan task, after
+		// the server can answer status/cancel requests. Import keeps its usual
+		// quick snapshot check and returns immediately when nothing changed.
+		needsBuild := true
+		if photoService.IsSMBLibrary() {
+			var checkErr error
+			needsBuild, checkErr = photoService.NeedsAutomaticLibraryBuild(rootCtx)
+			if checkErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to check library build state: %v\n", checkErr)
+				needsBuild = true
+			}
 		}
 		if needsBuild {
-			photoService.RunBackground(func() { runLibraryBuild(rootCtx, photoService, buildState) })
+			_, _ = launchLibraryBuild(rootCtx, photoService, buildState)
 		}
 	}
 	if err := serveWithGracefulShutdown(rootCtx, listener, app); err != nil {
@@ -2949,12 +3033,44 @@ func startRootConsoleServer(cfg *config.Config) {
 	}
 }
 
+func launchLibraryBuild(ctx context.Context, photoService *service.PhotoService, buildState *libraryBuildState) (api.LibraryBuildStatus, error) {
+	if photoService == nil {
+		return buildState.Status(), fmt.Errorf("Media service unavailable")
+	}
+	buildState.mu.Lock()
+	if buildState.cancelBuild != nil {
+		buildState.mu.Unlock()
+		return buildState.Status(), nil
+	}
+	buildCtx, cancel := context.WithCancel(ctx)
+	buildState.cancelBuild = cancel
+	buildState.startLocked("Discovering media files in the library", time.Now().Format(time.RFC3339))
+	buildState.mu.Unlock()
+	started := photoService.RunBackground(func() {
+		defer buildState.clearCancel()
+		defer cancel()
+		runLibraryBuild(buildCtx, photoService, buildState)
+	})
+	if !started {
+		cancel()
+		buildState.clearCancel()
+		err := fmt.Errorf("Library is closing; reopen it before retrying")
+		buildState.finish(nil, err)
+		return buildState.Status(), err
+	}
+	return buildState.Status(), nil
+}
+
 func runLibraryBuild(ctx context.Context, photoService *service.PhotoService, buildState *libraryBuildState) {
-	buildCtx, cancelBuild := context.WithCancel(ctx)
-	buildState.SetCancel(cancelBuild)
-	defer buildState.clearCancel()
-	defer cancelBuild()
-	buildState.start("Discovering media files in the library")
+	buildCtx := service.WithLibraryScanProgress(ctx, func(detail service.LibraryScanProgress) {
+		buildState.mu.Lock()
+		buildState.status.Discovery = &detail
+		if buildState.status.Status == "discovering" && buildState.status.Total == 0 {
+			buildState.status.Done = detail.Media
+		}
+		buildState.status.UpdatedAt = time.Now().Format(time.RFC3339)
+		buildState.mu.Unlock()
+	})
 	interactive := stdoutIsTerminal()
 	lastLine := ""
 	lastLineLen := 0
@@ -2999,7 +3115,23 @@ func runLibraryBuild(ctx context.Context, photoService *service.PhotoService, bu
 }
 
 func serveWithGracefulShutdown(ctx context.Context, listener net.Listener, handler http.Handler) error {
-	server := &http.Server{Handler: handler}
+	requestCtx, cancelRequests := context.WithCancel(ctx)
+	defer cancelRequests()
+	server := &http.Server{
+		BaseContext: func(net.Listener) context.Context { return requestCtx },
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Cancel blocked socket writes as well as scans/converters. A paused
+			// video transfer must not consume the entire shutdown grace period.
+			stop := context.AfterFunc(r.Context(), func() {
+				if r.URL.Path == "/api/settings/shutdown" || r.URL.Path == "/api/settings/restart" {
+					return
+				}
+				_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
+			})
+			defer stop()
+			handler.ServeHTTP(w, r)
+		}),
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		err := server.Serve(listener)
@@ -3014,8 +3146,10 @@ func serveWithGracefulShutdown(ctx context.Context, listener net.Listener, handl
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
+		cancelRequests()
 		return shutdownHTTPServer(server, errCh)
 	case <-shutdownRequested:
+		cancelRequests()
 		return shutdownHTTPServer(server, errCh)
 	}
 }

@@ -123,8 +123,38 @@ function appendURLParam(url, key, value) {
   }
 }
 
+// Library switch diagnostics are disabled; discard traces saved by older builds.
+try { sessionStorage.removeItem('eg-library-switch-diagnostic'); } catch (_) {}
+function logLibrarySwitch() {}
+function beginLibrarySwitchDiagnostic() {}
+function finishLibrarySwitchDiagnostic() {}
 async function fetchWithPageSession(url, options = {}) {
   return fetch(url, withPageSessionRequest(options));
+}
+
+async function getWithLoadTimeout(url, options = {}, timeout = 60000) {
+  const controller = new AbortController();
+  const originalSignal = options.signal;
+  const abort = () => controller.abort();
+  if (originalSignal?.aborted) abort();
+  else originalSignal?.addEventListener('abort', abort, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
+  try {
+    return await api.get(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new Error(copyText('app.interface.runtime.libraryLoadFailed'));
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    originalSignal?.removeEventListener('abort', abort);
+  }
+}
+
+function renderLibraryLoadError(target, retry) {
+  if (!target) return;
+  target.innerHTML = `<div class="empty"><p>${escapeHTML(copyText('app.interface.runtime.libraryLoadFailed'))}</p><button class="btn" type="button">${escapeHTML(copyText('app.interface.runtime.libraryLoadRetry'))}</button></div>`;
+  target.querySelector('button')?.addEventListener('click', retry);
 }
 
 function authRedirectReason(reason, status) {
@@ -865,10 +895,22 @@ function removeTimelineLocateBlocking() {
   if (modal) removeBlockingDialog(modal);
   if (state.timelineLocateBlocking) state.timelineLocateBlocking = false;
 }
+function cancelAlbumLocate({ clearPending = true } = {}) {
+  if (state.albumLocateAbortController) {
+    state.albumLocateAbortController.abort();
+    state.albumLocateAbortController = null;
+  }
+  state.albumLocateRequestID = (Number(state.albumLocateRequestID) || 0) + 1;
+  state.albumLocatingActive = false;
+  if (clearPending) state.pendingAlbumPhotoID = null;
+  removeTimelineLocateBlocking();
+}
 function showTimelineLocateBlocking({
   title = copyText('app.interface.s_6a82f57608'),
   message = copyText('app.interface.s_8c65b73dc8'),
   buttonText = copyText('app.interface.s_e94b248b5f'),
+  cancelText = '',
+  onCancel = null,
 } = {}) {
   removeTimelineLocateBlocking();
   const modal = el('div', 'modal-overlay blocking-dialog-overlay open');
@@ -878,11 +920,17 @@ function showTimelineLocateBlocking({
       <div class="modal-title">${escapeHTML(title)}</div>
       <p class="modal-copy">${escapeHTML(message)}</p>
       <div class="modal-footer">
-        <button class="btn btn-primary" type="button" disabled>${escapeHTML(buttonText)}</button>
+        ${onCancel ? `<button class="btn" type="button" data-locate-cancel>${escapeHTML(cancelText || copyText('app.interface.commonCancel'))}</button>` : ''}
+        <button class="btn btn-primary" type="button" ${onCancel ? '' : 'disabled'}>${escapeHTML(buttonText)}</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
   state.timelineLocateBlocking = true;
+  if (onCancel) {
+    modal.querySelector('[data-locate-cancel]')?.addEventListener('click', () => {
+      onCancel();
+    }, { once: true });
+  }
 }
 function showBlockingDialog({
   title = copyText('app.interface.s_ab3656a956'),
@@ -1952,6 +2000,10 @@ function resetMediaFilteredViewState() {
   state.timelineHasMore = true;
   state.timelineTotal = 0;
   state.timelineLoaded = false;
+  state.randomAlbumAbortController?.abort();
+  state.randomAlbumAbortController = null;
+  state.randomAlbumLoading = false;
+  state.randomAlbumLoadError = false;
   state.randomAlbumPhotos = [];
   state.randomAlbumCursor = '';
   state.randomAlbumHasMore = true;
@@ -2320,6 +2372,7 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
   if (!isVideo) {
     fill.style.width = '0%';
     markers.innerHTML = '';
+    markers.dataset.renderKey = '';
     if (currentLabel) currentLabel.textContent = '0:00';
     if (durationLabel) durationLabel.textContent = '0:00';
     return;
@@ -2327,6 +2380,7 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
   if (!Number.isFinite(video.duration) || video.duration <= 0) {
     fill.style.width = '0%';
     markers.innerHTML = '';
+    markers.dataset.renderKey = '';
     if (currentLabel) currentLabel.textContent = formatDuration((video.currentTime || 0) * 1000);
     if (durationLabel) durationLabel.textContent = '0:00';
     return;
@@ -2349,10 +2403,21 @@ function updateVideoBookmarkProgress(video = $('#lb-video'), photo = state.light
     : [];
   const bookmarkMarkers = bookmarks.map(bookmark => {
     const left = Math.max(0, Math.min(100, bookmark.time / video.duration * 100));
-    const label = bookmark.name ? `${bookmark.name} · ${formatDuration(bookmark.time * 1000)}` : copyText('app.interface.d_5cf0e311de', { v0: (bookmark.slot), v1: (formatDuration(bookmark.time * 1000)) });
-    return `<button type="button" class="lightbox-video-progress-marker" data-video-bookmark-slot="${bookmark.slot}" style="left:${left}%" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${bookmark.slot === 10 ? '0' : bookmark.slot}</button>`;
+    const label = bookmark.name || copyText('app.interface.videoBookmarkMark', { slot: bookmark.slot });
+    const accessibleLabel = `${label} · ${formatDuration(bookmark.time * 1000)}`;
+    const hint = state.videoBookmarkHint;
+    const announced = hint && hint.photoID === videoBookmarkKey(photo) && hint.slot === bookmark.slot;
+    return `<button type="button" class="lightbox-video-progress-marker${announced ? ' is-announced' : ''}" data-video-bookmark-slot="${bookmark.slot}" data-bookmark-label="${escapeHTML(label)}" style="left:${left}%" aria-label="${escapeHTML(accessibleLabel)}">${bookmark.slot === 10 ? '0' : bookmark.slot}</button>`;
   });
+  const markerRenderKey = JSON.stringify([
+    videoBookmarkKey(photo),
+    video.duration,
+    sectionMinSeconds,
+    bookmarks.map(({ slot, time, name }) => [slot, time, name]),
+  ]);
+  if (markers.dataset.renderKey === markerRenderKey) return;
   markers.innerHTML = sections.concat(bookmarkMarkers).join('');
+  markers.dataset.renderKey = markerRenderKey;
 }
 function normalizeVideoVolumeValue(value, fallback = 1) {
   const volume = Number(value);
@@ -2507,8 +2572,7 @@ async function loadLightboxSubtitles(video, photo) {
   video.querySelectorAll('track[data-echogallery-subtitle]').forEach(track => track.remove());
   if (!state.subtitlesEnabled || !photo?.id || !isVideoMedia(photo)) return;
   try {
-    const result = await api.get(`/api/media/${photo.id}/subtitles`);
-    const tracks = Array.isArray(result.tracks) ? result.tracks : [];
+    const tracks = await loadVideoSubtitleTracks(photo);
     const selected = tracks.find(track => track.default) || tracks[0];
     if (!selected || state.lightboxPhotos[state.lightboxIndex] !== photo || video.dataset.subtitleRequest !== requestToken) return;
     const entry = await api.post(`/api/media/${photo.id}/subtitles`, { index: selected.index });
@@ -2756,6 +2820,36 @@ function jumpVideoToProgressMarker(marker) {
   }
   return false;
 }
+function showVideoBookmarkMarkerHint(slot, duration = 1000) {
+  const photo = state.lightboxPhotos[state.lightboxIndex];
+  const bookmark = getVideoBookmarkSlot(photo, slot);
+  if (!bookmark) return false;
+  const markers = $('#lb-video-progress-markers');
+  const previousHint = state.videoBookmarkHint;
+  if (previousHint) {
+    markers?.querySelector(`[data-video-bookmark-slot="${previousHint.slot}"]`)?.classList.remove('is-announced');
+  }
+  clearTimeout(state.videoBookmarkHintTimer);
+  const hint = { photoID: videoBookmarkKey(photo), slot: Number(slot) };
+  state.videoBookmarkHint = hint;
+  let marker = markers?.querySelector(`[data-video-bookmark-slot="${hint.slot}"]`);
+  if (!marker && markers) {
+    markers.dataset.renderKey = '';
+    updateVideoBookmarkProgress($('#lb-video'), photo);
+    marker = markers.querySelector(`[data-video-bookmark-slot="${hint.slot}"]`);
+  }
+  if (marker) {
+    getComputedStyle(marker, '::before').inset;
+    marker.classList.add('is-announced');
+  }
+  state.videoBookmarkHintTimer = setTimeout(() => {
+    if (state.videoBookmarkHint !== hint) return;
+    state.videoBookmarkHint = null;
+    state.videoBookmarkHintTimer = null;
+    markers?.querySelector(`[data-video-bookmark-slot="${hint.slot}"]`)?.classList.remove('is-announced');
+  }, Math.max(0, Number(duration) || 0));
+  return true;
+}
 function nearestVideoProgressMarker(track, clientX, pointerType = '') {
   if (!track) return null;
   const rect = track.getBoundingClientRect();
@@ -2782,6 +2876,7 @@ function beginVideoProgressScrub(e, track) {
   if (!track || e.button > 0) return false;
   const marker = e.target.closest('[data-video-bookmark-slot], [data-video-section]') || nearestVideoProgressMarker(track, e.clientX, e.pointerType);
   if (marker && jumpVideoToProgressMarker(marker)) {
+    if (marker.dataset.videoBookmarkSlot) showVideoBookmarkMarkerHint(marker.dataset.videoBookmarkSlot);
     state.videoProgressClickSuppressUntil = Date.now() + 450;
     e.preventDefault();
     e.stopPropagation();
@@ -2953,10 +3048,10 @@ function handleVideoBookmarkShortcut(e) {
   e.stopImmediatePropagation();
   if (bookmark) {
     video.currentTime = bookmark.time;
-    showToast(copyText('app.interface.d_87eed94c06', { v0: (slot), v1: (bookmark.name ? `：${bookmark.name}` : '') }));
     updateVideoBookmarkProgress(video, photo);
+    showVideoBookmarkMarkerHint(slot);
   } else if (canEditBookmarks() && setVideoBookmarkSlot(photo, slot, video.currentTime || 0)) {
-    showToast(copyText('app.interface.d_9dd0a13c2e', { v0: (slot) }));
+    showVideoBookmarkMarkerHint(slot);
   } else if (canEditBookmarks()) {
     showToast(copyText('app.interface.s_d92ab6cef4'));
   }
@@ -2975,12 +3070,11 @@ function setGridScale(size) {
     updateGridScaleButtonTitle();
     return;
   }
-  const anchorPhotoID = isMobileLayout() ? currentViewportCenterPhotoID() : 0;
   state.gridSize = Math.min(260, Math.max(72, Number(size) || 180));
   document.documentElement.style.setProperty('--grid-size', state.gridSize + 'px');
   updateGridScaleProgress();
   updateGridScaleButtonTitle();
-  if (anchorPhotoID) queueGridScaleViewportRecenter(anchorPhotoID);
+  photoWallRuntime?.relayout();
 }
 function updateGridScaleProgress() {
   const min = 72;
@@ -3138,12 +3232,14 @@ function makeAlbumPlaceholder(index) {
 
 function clearTimelinePlaceholders() {
   state.timelineLocateMissingBeforeCount = 0;
-  $$('#timeline-grid .timeline-placeholder-thumb').forEach(node => node.remove());
+  const grid = $('#timeline-grid');
+  if (grid) setPhotoWallGrid(grid, state.photos, state.photos, { kind: 'timeline' });
 }
 
 function clearAlbumPlaceholders() {
   state.albumLocateMissingBeforeCount = 0;
-  $$('#album-grid .timeline-placeholder-thumb').forEach(node => node.remove());
+  const grid = $('#album-grid');
+  if (grid) setPhotoWallGrid(grid, state.albumPhotos, state.albumPhotos, { kind: 'album' });
 }
 
 function queueGridScaleViewportRecenter(photoID) {
@@ -3233,6 +3329,7 @@ function applyFixedTouchGridLayout() {
   root.classList.toggle('fixed-touch-grid', columns > 0);
   if (columns > 0) root.style.setProperty('--photo-grid-columns', String(columns));
   else root.style.removeProperty('--photo-grid-columns');
+  photoWallRuntime?.relayout();
 }
 function touchDistance(touches) {
   if (!touches || touches.length < 2) return 0;
@@ -4145,6 +4242,37 @@ function finishLightboxTrackpad(gesture) {
     else if (state.lightboxZoom < 100) { clearLightboxUnderzoomState(); setLightboxFit(); }
     return;
   }
+  const swipe = state.lightboxSwipe;
+  if (!gesture.video && swipe?.mode === 'horizontal') {
+    const dx = gesture.x - swipe.startX;
+    const direction = dx < 0 ? 1 : -1;
+    const threshold = Math.min(88, Math.max(28, swipe.width * 0.1));
+    const canSwitch = Math.abs(dx) >= threshold && (direction < 0
+      ? state.lightboxIndex > 0
+      : state.lightboxIndex < state.lightboxPhotos.length - 1 || lightboxCanLoadMoreForward());
+    const photo = state.lightboxPhotos[state.lightboxIndex];
+    const token = state.lightboxPlaybackToken;
+    const library = activeLibraryIdentity(state.serverSettings);
+    gesture.settling = true;
+    $('#lb-swipe-strip')?.style.setProperty('--lightbox-swipe-duration', '180ms');
+    setLightboxSwipePreviewTransform(canSwitch ? -direction * swipe.width : 0, true, swipe.horizontalDirection || direction);
+    gesture.timer = setTimeout(async () => {
+      if (lightboxTrackpad !== gesture) return;
+      lightboxTrackpad = null;
+      state.lightboxSwipe = null;
+      if (canSwitch && lightboxIsInteractive() && token === state.lightboxPlaybackToken
+          && photo === state.lightboxPhotos[state.lightboxIndex]
+          && library === activeLibraryIdentity(state.serverSettings)) await lbNav(direction);
+      if (!state.lightboxSwipe) resetLightboxSwipeVisual();
+    }, 180);
+    return;
+  }
+  if (gesture.video && state.videoSurfaceSwipe?.mode === 'seek') {
+    lightboxTrackpad = null;
+    endVideoSurfaceSwipe({ pointerId: -1, clientX: gesture.x, clientY: gesture.y,
+      type: 'pointerup', preventDefault() {}, stopPropagation() {} });
+    return;
+  }
   // Settle only after wheel input becomes idle. Crossing a threshold during the
   // drag must not commit: later input can still extend or reverse the preview.
   // Consume late inertia while handing off to the existing settle animation.
@@ -4168,6 +4296,23 @@ function handleLightboxTrackpadWheel(event) {
   if (state.lightboxSwipe?.pointerId >= 0 || state.videoSurfaceSwipe?.pointerId >= 0) return false;
   if (!event.deltaX && !event.deltaY) return false;
   let gesture = lightboxTrackpad;
+  if (gesture?.settling && !pinching && !gesture.video) {
+    clearTimeout(gesture.timer);
+    const current = $('#lb-swipe-current');
+    const transform = current ? getComputedStyle(current).transform : 'none';
+    let x = 0;
+    if (transform && transform !== 'none') {
+      try { x = new DOMMatrixReadOnly(transform).m41; } catch (_) {}
+    }
+    gesture.x = x;
+    gesture.y = 0;
+    gesture.settling = false;
+    if (state.lightboxSwipe) {
+      state.lightboxSwipe.startX = 0;
+      state.lightboxSwipe.startY = 0;
+    }
+    setLightboxSwipePreviewTransform(x, false, state.lightboxSwipe?.horizontalDirection || 0);
+  }
   if (gesture && (gesture.mode === 'pinch') !== pinching) {
     resetLightboxTrackpad();
     state.lightboxSwipe = null; state.videoSurfaceSwipe = null;
@@ -4424,6 +4569,10 @@ function libraryAvailabilitySignature(libraries = []) {
     String(library.locked_by_username || library.lockedByUsername || '').trim(),
     String(library.logo_asset || library.logoAsset || '').trim(),
     String(library.logo_image_url || library.logoImageUrl || '').trim(),
+    String(library.photo_count ?? library.photoCount ?? ''),
+    String(library.video_count ?? library.videoCount ?? ''),
+    String(library.total_size_text ?? library.totalSizeText ?? ''),
+    String(library.last_scanned_at ?? library.lastScannedAt ?? ''),
   ].join('|')).join('||');
 }
 function libraryAvailabilityMetaText(library = {}) {
@@ -5172,53 +5321,13 @@ async function resetPlayerKeymapToDefault() {
 }
 async function loadServerSettings() {
   try {
-    state.serverSettings = await api.get('/api/settings');
+    // A cold portable SQLite copy can legitimately take longer on a large HDD library.
+    state.serverSettings = await getWithLoadTimeout('/api/settings', {}, 120000);
+    logLibrarySwitch('settings-loaded', { active_library_id: state.serverSettings.active_library_id });
     applyServerSettings(state.serverSettings);
-  } catch (_) {
+  } catch (error) {
     if (pageSessionRedirectPending) return state.serverSettings;
-    state.serverSettings = {
-      current_username: '',
-      role: 'admin',
-      can_write: true,
-      can_admin: true,
-      can_root: false,
-      port: 8080,
-      active_library_id: '',
-      storage_path: '',
-      libraries: [],
-      thumbnail_dir: '',
-      thumbnail_size: 512,
-      trash_dir: '',
-      use_system_player: false,
-      jwt_secret_masked: copyText('app.interface.s_43e203c1de'),
-      users: [],
-      theme: 'light',
-      grid_size: 180,
-      grid_gap: 2,
-      thumb_radius: 2,
-      sidebar_auto_hide: false,
-      slideshow_mode: 'random',
-      slideshow_loop: true,
-      slideshow_interval: 5000,
-      lightbox_zoom: 100,
-      experimental_autoplay_video: true,
-      video_autoplay_next: true,
-      video_section_min_minutes: 10,
-      experimental_prefetch_neighbors: true,
-      experimental_restore_last_view: false,
-      continue_last_video_position: true,
-      subtitles_enabled: true,
-      subtitle_font_size: 100,
-      subtitle_color: '#ffffff',
-      subtitle_background_opacity: 72,
-      warm_enabled: true,
-      lightbox_ui_idle_seconds: 0,
-      low_resource_mode: false,
-      player_keymap: '',
-      pwa_icon_url: '',
-      local_update_config_text: renderLocalUpdateConfigPreview(),
-    };
-    applyServerSettings(state.serverSettings);
+    throw error;
   }
   state.savedServerSettings = cloneSettingsSnapshot(state.serverSettings);
   state.settingsDirty = false;
@@ -5237,13 +5346,15 @@ async function refreshSettingsAvailability() {
   if (state.settingsAvailabilityPollPending || state.view !== 'settings' || pageSessionRedirectPending) return;
   state.settingsAvailabilityPollPending = true;
   try {
-    const data = await api.get('/api/settings', { suppressForbiddenToast: true });
+    const data = await api.get('/api/settings/libraries', { suppressForbiddenToast: true });
     const nextLibraries = normalizeLibraryList(data && data.libraries, data && data.storage_path || '');
     const nextSignature = libraryAvailabilitySignature(nextLibraries);
-    if (!state.settingsDirty && nextSignature !== state.settingsAvailabilitySignature) {
+    const initialDetails = !state.settingsAvailabilityLoaded;
+    state.settingsAvailabilityLoaded = true;
+    if (!state.settingsDirty && (initialDetails || nextSignature !== state.settingsAvailabilitySignature)) {
       const scrollTop = document.scrollingElement ? document.scrollingElement.scrollTop : window.scrollY;
-      state.serverSettings = data || state.serverSettings;
-      applyServerSettings(state.serverSettings);
+      state.serverSettings.libraries = nextLibraries;
+      state.settingsAvailabilitySignature = nextSignature;
       state.savedServerSettings = cloneSettingsSnapshot(state.serverSettings);
       if (state.view !== 'settings') {
         return;
@@ -5258,6 +5369,7 @@ async function refreshSettingsAvailability() {
       if (document.scrollingElement) document.scrollingElement.scrollTop = scrollTop;
       else window.scrollTo(0, scrollTop);
     } else if (!state.settingsDirty) {
+      state.serverSettings.libraries = nextLibraries;
       state.settingsAvailabilitySignature = nextSignature;
     }
   } catch (e) {
@@ -5269,7 +5381,10 @@ async function refreshSettingsAvailability() {
   }
 }
 async function saveServerSettings(payload) {
-  const resp = await api.put('/api/settings', payload);
+  let resp;
+  try { resp = await api.put('/api/settings', payload); }
+  catch (error) { logLibrarySwitch('save-failed', { error: String(error?.error || error?.message || error) }); throw error; }
+  logLibrarySwitch('settings-saved', { active_library_id: resp?.data?.active_library_id, requires_restart: resp?.requires_restart });
   state.serverSettings = resp.data || state.serverSettings;
   applyServerSettings(state.serverSettings);
   state.savedServerSettings = cloneSettingsSnapshot(state.serverSettings);
@@ -5358,6 +5473,7 @@ async function startLibraryBatchBuild(options = {}) {
     aggressive: !!options.aggressive,
     build_thumbnails_after_scan: !!options.buildThumbnailsAfterScan,
     complete_exif: !!options.completeEXIF,
+    clean_files: !!options.cleanFiles,
   });
 }
 async function cancelLibraryBatchBuild() {
@@ -5594,8 +5710,9 @@ async function ensureSettingsDataLoaded(force = false) {
   }
   if (state.settingsReady) return;
   if (!settingsBootstrapPromise) {
-    settingsBootstrapPromise = loadServerSettings().finally(() => {
+    settingsBootstrapPromise = loadServerSettings().then(() => {
       state.settingsReady = true;
+    }).finally(() => {
       settingsBootstrapPromise = null;
     });
   }
@@ -5922,6 +6039,7 @@ const state = {
   photos: [],
   randomAlbumPhotos: [],
   randomAlbumLoading: false,
+  randomAlbumLoadError: false,
   randomAlbumCursor: '',
   randomAlbumHasMore: true,
   randomAlbumSeed: Date.now(),
@@ -5966,8 +6084,11 @@ const state = {
   albumLoadingBefore: false,
   albumLocateMissingBeforeCount: 0,
   albumLocatingActive: false,
+  albumLocateAbortController: null,
+  albumLocateRequestID: 0,
   albumDetailLoadedKey: '',
   pendingAlbumPhotoID: null,
+  albumDirectMediaOnlyID: null,
   lastAlbumDetailID: null,
   activeRangePointer: null,
   selected: new Set(),
@@ -5984,6 +6105,8 @@ const state = {
   lightboxDismissProxyTargetRect: null,
   lightboxReturnView: '',
   lightboxReturnAlbumID: null,
+  lightboxReturnInFlight: false,
+  lightboxReturnTargetID: null,
   lightboxPageLoading: false,
   lightboxSkipScrollRestore: false,
   // b-2: 当前用户的分享链接，key=`${type}:${targetId}`
@@ -6102,6 +6225,7 @@ const state = {
   libraryBatchAddShortcutBound: false,
   settingsReady: false,
   settingsMounted: false,
+  settingsAvailabilityLoaded: false,
   settingsRenderMode: '',
   settingsAvailabilityPollTimer: null,
   settingsAvailabilityPollPending: false,
@@ -6124,6 +6248,8 @@ const state = {
   lightboxFavoriteKeyHoldActive: false,
   lightboxFavoriteKeyHoldTriggered: false,
   lightboxVideoProgressTimer: null,
+  videoBookmarkHintTimer: null,
+  videoBookmarkHint: null,
   pendingVideoSeek: null,
   pendingVideoSeekCommitTimer: null,
   videoProgressScrubPointerId: null,
@@ -6169,6 +6295,7 @@ const state = {
   libraryBatchWorkflowEnabled: localStorage.getItem(libraryBatchWorkflowEnabledStorageKey) === '1',
   libraryBatchWorkflowAggressive: localStorage.getItem(libraryBatchWorkflowAggressiveStorageKey) === '1',
   libraryBatchWorkflowCompleteEXIF: localStorage.getItem(libraryBatchWorkflowEXIFStorageKey) === '1',
+  libraryBatchWorkflowCleanFiles: false,
   libraryBatchWorkflowPhase: localStorage.getItem(libraryBatchWorkflowPhaseStorageKey) || '',
   libraryBatchWorkflowStartPending: false,
   libraryBatchThumbnailBuildStatus: { status: 'idle', message: '' },
@@ -6463,7 +6590,38 @@ function mediaLoadingRuntime() {
   runtime.loader = window.EchoGalleryMediaLoader.create({ limit: mobile ? 3 : 6,
     maxBytes: (mobile ? 24 : 64) * 1024 * 1024, maxEntries: mobile ? 48 : 96,
     fetch: (url, options) => fetchWithPageSession(url, options) });
+  runtime.metadataQueue = new Set();
+  runtime.metadataActive = 0;
+  const metadataEligible = record => runtime === mediaLoadRuntime && !runtime.hidden
+    && runtime.library === activeLibraryIdentity(state.serverSettings)
+    && record.image.isConnected && record.visible && !$('#lightbox')?.classList.contains('open');
+  runtime.drainMetadata = () => {
+    const limit = mobile ? 1 : 2;
+    while (runtime.metadataActive < limit && runtime.metadataQueue.size) {
+      const record = runtime.metadataQueue.values().next().value;
+      runtime.metadataQueue.delete(record);
+      if (!metadataEligible(record) || record.metadataStarted || record.metadataDone) continue;
+      record.metadataStarted = true;
+      runtime.metadataActive++;
+      // At most two requests per visible card; both APIs reuse pending/cache
+      // results. In-flight shared requests finish; obsolete queued work is dropped.
+      Promise.allSettled([loadVideoPlaybackPreference(record.photo), probeSubtitleMatch(record.photo)])
+        .then(results => { record.metadataDone = results.every(result => result.status === 'fulfilled'); })
+        .finally(() => {
+          record.metadataStarted = false;
+          runtime.metadataActive--;
+          runtime.drainMetadata();
+        });
+    }
+  };
+  runtime.updateMetadata = record => {
+    if (!metadataEligible(record)) { runtime.metadataQueue.delete(record); return; }
+    if (!isVideoMedia(record.photo) || isRootDebugMedia(record.photo) || record.metadataDone || record.metadataStarted) return;
+    runtime.metadataQueue.add(record);
+    runtime.drainMetadata();
+  };
   runtime.releaseCard = record => {
+    runtime.metadataQueue.delete(record);
     record.image.closest('.photo-thumb')?.classList.add('thumb-loading');
     record.handle?.release(); record.handle = null;
     clearTimeout(record.retryTimer);
@@ -6475,6 +6633,7 @@ function mediaLoadingRuntime() {
     if (!record.image.isConnected || runtime.hidden || $('#lightbox')?.classList.contains('open') || !record.near) {
       runtime.releaseCard(record); return;
     }
+    runtime.updateMetadata(record);
     const priority = record.visible ? 1 : 2;
     if (record.handle) { record.handle.promote(priority); return; }
     const spec = mediaResourceSpec(record.photo, 'thumb');
@@ -6554,6 +6713,7 @@ function resetMediaLoadingRuntime() {
   if (!runtime) return;
   mediaLoadRuntime = null;
   runtime.loader.setPaused(true);
+  runtime.metadataQueue.clear();
   clearTimeout(runtime.timer); cancelAnimationFrame(runtime.frame);
   window.removeEventListener('scroll', runtime.fallbackScroll);
   window.removeEventListener('resize', runtime.fallbackScroll);
@@ -7429,8 +7589,8 @@ function resumeAutoLoadMore(kind = '') {
   } else if (kind === 'random-album') {
     state.randomAlbumAutoLoadPaused = false;
     if (state.view === 'random-album') {
-      observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
-      maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+      observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
+      maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
     }
   }
 }
@@ -7584,21 +7744,56 @@ ${renderLibraryLogoGuideModal()}`;
   syncRangeProgress();
   $('#topbar-title').textContent = copyText('app.interface.s_ce56f617e4');
   $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loading'))}</div>`;
-  void ensureSettingsDataLoaded().then(() => {
-    if (state.view === 'settings') renderSettings();
-    else renderView();
+  const loadInitialView = () => {
+    $('#content').innerHTML = `<div class="load-more"><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loading'))}</div>`;
+    void ensureSettingsDataLoaded().then(() => {
+    const initialView = state.view === 'settings' ? renderSettings() : renderView();
     startRoleAwareBackgroundPolling();
     void ensureSettingsViewMounted().catch(e => console.warn("预构建设置页失败", e));
-
-    void api.post('/api/library-scan/refresh', {}).then(() => {
-      resetMediaFilteredViewState();
-      if (state.view !== 'settings' && !state.lightboxOpen) {
-        renderView();
-      }
-    }).catch(e => {
-      console.warn("资源库检查失败", e);
+    void refreshLibraryAfterInitialView(initialView);
+    }).catch(() => {
+      if (!pageSessionRedirectPending) renderLibraryLoadError($('#content'), loadInitialView);
     });
-  });
+  };
+  loadInitialView();
+}
+
+// Show SQLite-backed content before asking a large HDD library to enumerate
+// its directories. Keep the current wall, cursors and lightbox intact afterward.
+async function refreshLibraryAfterInitialView(initialView) {
+  const library = activeLibraryIdentity(state.serverSettings);
+  try {
+    await initialView;
+    await new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        setTimeout(resolve, 600);
+      }));
+    });
+    if (library !== activeLibraryIdentity(state.serverSettings)) return;
+    logLibrarySwitch('background-refresh-start', { view: state.view });
+    const result = await api.post('/api/library-scan/refresh', {});
+    if (library !== activeLibraryIdentity(state.serverSettings)) return;
+    const changed = result?.changed === true || Number(result?.imported) > 0 || Number(result?.pruned) > 0;
+    if (changed) {
+      // Invalidate reusable views for their next entry. Do not clear arrays
+      // belonging to a visible wall or an open lightbox during background work.
+      state.timelineLoaded = false;
+      state.favoriteLoaded = false;
+      state.randomAlbumViewLoaded = false;
+      state.albumsLoaded = false;
+      state.albumDetailLoadedKey = '';
+      state.trashLoaded = false;
+      state.memoriesLoaded = false;
+      const emptyView = (state.view === 'timeline' && !state.photos.length)
+        || (state.view === 'album-detail' && !state.albumPhotos.length)
+        || (state.view === 'albums' && !state.albums.length);
+      if (emptyView && !state.lightboxOpen) await renderView();
+    }
+    finishLibrarySwitchDiagnostic('initial-refresh-complete', { view: state.view, changed, ...result });
+  } catch (e) {
+    finishLibrarySwitchDiagnostic('initial-refresh-failed', { error: String(e?.error || e?.message || e) });
+    console.warn("资源库检查失败", e);
+  }
 }
 
 function bindNav() {
@@ -7693,7 +7888,7 @@ async function ensureSettingsViewMounted(force = false) {
   if (mode === 'root') {
     await renderRootConsoleContent({ host: settingsViewHost(), force: true });
   } else {
-    renderSettingsContent({ host: settingsViewHost(), activate: state.view === 'settings' });
+    renderSettingsContent({ host: settingsViewHost() });
   }
   state.settingsMounted = true;
   state.settingsRenderMode = mode;
@@ -7751,6 +7946,7 @@ function switchView(view) {
     state.settingsScrollRestorePending = true;
   }
   if (view !== 'settings') stopSettingsAvailabilityPolling();
+  if (view !== 'album-detail') cancelAlbumLocate();
   setSettingsViewVisible(view === 'settings');
   state.view = view;
   syncPhotoWallNameMode();
@@ -7799,6 +7995,10 @@ async function refreshLibraryBuildStatus() {
       return;
     }
     console.error(e);
+    if (isLibraryBuildBlocking()) {
+      clearTimeout(state.libraryBuildPollTimer);
+      state.libraryBuildPollTimer = setTimeout(refreshLibraryBuildStatus, 2000);
+    }
   }
 }
 function startLibraryBuildPolling() {
@@ -7823,15 +8023,23 @@ function startRoleAwareBackgroundPolling() {
     return;
   }
   if (canRunServerTasks()) startLibraryBuildPolling();
-  if (canAccessBatchWorkflow()) {
-    void pollLibraryBatchBuildStatus();
-    void pollLibraryBatchThumbnailBuildStatus();
-  }
 }
-function estimateLibraryBuildDiscoveryPercent(found) {
-  const count = Math.max(0, Number(found) || 0);
-  if (count <= 0) return 8;
-  return Math.min(42, 8 + Math.log2(count + 1) * 4);
+
+function renderLibraryScanDiscovery(detail) {
+  if (!detail || !detail.operation) return '';
+  const wait = Math.max(0, Math.floor((Date.now() - Date.parse(detail.operation_started_at)) / 1000) || 0);
+  const phase = copyText(`app.libraryBuild.scanPhase.${detail.phase || 'checking'}`);
+  const operation = copyText(`app.libraryBuild.scanOperation.${detail.operation}`);
+  const counts = copyText('app.libraryBuild.directoryProgress', {
+    directories: Number(detail.directories) || 0,
+    pending: Number(detail.pending_directories) || 0,
+    media: Number(detail.media) || 0,
+  });
+  return `<div class="settings-static" role="status">
+    <p class="modal-copy">${escapeHTML(phase)} · ${escapeHTML(counts)}</p>
+    <p class="modal-copy">${escapeHTML(operation)} · ${escapeHTML(copyText('app.libraryBuild.operationWait', { seconds: wait }))}</p>
+    <p class="modal-copy" style="overflow-wrap:anywhere">${escapeHTML(detail.path || '')}</p>
+  </div>`;
 }
 function libraryBuildHeading(status = {}) {
   switch (status.status) {
@@ -7854,7 +8062,7 @@ function renderLibraryBuild() {
   const discovering = status.status === 'discovering';
   const percent = total > 0
     ? Math.min(100, Math.max(0, Number(status.percent) || done / total * 100))
-    : (discovering ? estimateLibraryBuildDiscoveryPercent(done) : (running ? 8 : 100));
+    : (running ? 0 : 100);
   const progressText = total > 0
     ? `${done} / ${total}`
     : (done > 0
@@ -7878,16 +8086,18 @@ function renderLibraryBuild() {
     </div>
     <div class="library-build-stats">
       <div><strong>${escapeHTML(progressText)}</strong><span>${escapeHTML(copyText('app.libraryBuild.progressLabel'))}</span></div>
-      <div><strong>${Math.round(percent)}%</strong><span>${escapeHTML(copyText('app.libraryBuild.percentLabel'))}</span></div>
+      <div><strong>${total > 0 ? `${Math.round(percent)}%` : '—'}</strong><span>${escapeHTML(copyText('app.libraryBuild.percentLabel'))}</span></div>
       <div><strong>${formatSecondsShort(status.elapsed_seconds)}</strong><span>${escapeHTML(copyText('app.libraryBuild.elapsedLabel'))}</span></div>
       <div><strong>${status.eta_seconds > 0 ? formatSecondsShort(status.eta_seconds) : escapeHTML(copyText('app.libraryBuild.etaPending'))}</strong><span>${escapeHTML(copyText('app.libraryBuild.etaLabel'))}</span></div>
       ${Number(status.pruned) > 0 ? `<div><strong>${Number(status.pruned)}</strong><span>${escapeHTML(copyText('app.libraryBuild.prunedLabel'))}</span></div>` : ''}
     </div>
+    ${renderLibraryScanDiscovery(status.discovery)}
     ${status.error ? `<div class="library-build-error">${escapeHTML(status.error)}</div>` : ''}
     <div class="library-build-exit">
       ${renderSettingsToggle('library-build-exit-after', copyText('app.libraryBuild.exitAfterComplete'), !!status.exit_after_complete)}
     </div>
     <div class="library-build-actions">
+      ${status.status === 'error' ? `<button class="btn" id="library-build-retry" type="button">${escapeHTML(copyText('app.libraryBuild.retry'))}</button>` : ''}
       <button class="btn btn-danger library-build-cancel" id="library-build-cancel" type="button" ${cancellable ? '' : 'disabled'}>${escapeHTML(status.status === 'cancelling' ? copyText('app.libraryBuild.cancelling') : copyText('app.libraryBuild.cancel'))}</button>
     </div>
   </section>
@@ -7904,15 +8114,15 @@ function renderView() {
   }
   setSettingsViewVisible(state.view === 'settings');
   switch (state.view) {
-    case 'root-debug':   renderRootDebugTimeline(); break;
-    case 'timeline':     isRootUser() ? renderRootDebugTimeline() : renderTimeline(); break;
-    case 'favorites':    renderFavorites();   break;
-    case 'random-album': renderRandomAlbum(); break;
-    case 'albums':       renderAlbums();      break;
-    case 'album-detail': renderAlbumDetail(); break;
-    case 'memories':     renderMemories();    break;
-    case 'trash':        renderTrash();       break;
-    case 'settings':     renderSettings();    break;
+    case 'root-debug':   return renderRootDebugTimeline();
+    case 'timeline':     return isRootUser() ? renderRootDebugTimeline() : renderTimeline();
+    case 'favorites':    return renderFavorites();
+    case 'random-album': return renderRandomAlbum();
+    case 'albums':       return renderAlbums();
+    case 'album-detail': return renderAlbumDetail();
+    case 'memories':     return renderMemories();
+    case 'trash':        return renderTrash();
+    case 'settings':     return renderSettings();
   }
 }
 
@@ -7947,24 +8157,7 @@ async function appendRandomAlbumGrid(photos, { progressive = false } = {}) {
     if (loadMore) wrap.insertBefore(grid, loadMore);
     else wrap.appendChild(grid);
   }
-  if (!progressive || photos.length <= randomAlbumRenderChunkSize()) {
-    const fragment = document.createDocumentFragment();
-    photos.forEach(photo => fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos)));
-    grid.appendChild(fragment);
-    return;
-  }
-  const chunkSize = randomAlbumRenderChunkSize();
-  for (let index = 0; index < photos.length; index += chunkSize) {
-    if (!document.body.contains(grid)) return;
-    const fragment = document.createDocumentFragment();
-    photos.slice(index, index + chunkSize).forEach(photo => {
-      fragment.appendChild(makePhotoThumb(photo, state.randomAlbumPhotos));
-    });
-    grid.appendChild(fragment);
-    if (index + chunkSize < photos.length) {
-      await new Promise(resolve => requestAnimationFrame(resolve));
-    }
-  }
+  setPhotoWallGrid(grid, state.randomAlbumPhotos);
 }
 
 async function fetchAllRandomAlbumPhotos() {
@@ -8014,9 +8207,7 @@ async function fetchRandomAlbumPage(cursor, limit, signal) {
   const params = new URLSearchParams({ limit: String(limit), seed: String(state.randomAlbumSeed) });
   appendMediaKindParam(params);
   if (cursor) params.set('cursor', cursor);
-  const response = await fetchWithPageSession(`/api/media/random?${params.toString()}`, { signal });
-  if (!response.ok) throw await buildAPIError(response);
-  return response.json();
+  return getWithLoadTimeout(`/api/media/random?${params.toString()}`, { signal });
 }
 
 function renderRandomAlbumLoadAllModal() {
@@ -8162,7 +8353,7 @@ async function loadAllRandomAlbumPhotos() {
         state.randomAlbumBulkAbortController = new AbortController();
         const page = await fetchRandomAlbumPage(cursor, 300, state.randomAlbumBulkAbortController.signal);
         const nextPhotos = page.photos || [];
-        if (Number.isFinite(Number(page.total))) total = Number(page.total);
+        if (!cursor && Number.isFinite(Number(page.total))) total = Number(page.total);
         allPhotos.push(...nextPhotos);
         pageCount += 1;
         updateRandomAlbumLoadAllProgress(allPhotos.length, total, copyText('app.interface.d_804507bf64', { v0: (allPhotos.length), v1: (total ? ` / ${total}` : '') }));
@@ -8220,36 +8411,58 @@ async function loadAllRandomAlbumPhotos() {
       cancelBtn.textContent = copyText('app.interface.commonClose');
     }
     if (state.view === 'random-album') {
-      observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+      observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
     }
   }
 }
 
+function canLoadMoreRandomAlbum() {
+  return state.view === 'random-album' && state.randomAlbumHasMore
+    && !state.randomAlbumLoading && !state.randomAlbumBulkLoading
+    && !state.randomAlbumAutoLoadPaused && !state.randomAlbumLoadError;
+}
+
 async function loadMoreRandomAlbum() {
-  if (state.randomAlbumLoading || state.randomAlbumBulkLoading || state.randomAlbumAutoLoadPaused || !state.randomAlbumHasMore) return;
+  if (!canLoadMoreRandomAlbum()) return;
+  const controller = new AbortController();
+  const items = state.randomAlbumPhotos;
+  const cursor = state.randomAlbumCursor;
   state.randomAlbumLoading = true;
+  state.randomAlbumAbortController = controller;
+  updateRandomAlbumLoadMoreUI();
   try {
-    state.randomAlbumAbortController = new AbortController();
-    const page = await fetchRandomAlbumPage(state.randomAlbumCursor, randomAlbumPageLimit(), state.randomAlbumAbortController.signal);
+    const page = await fetchRandomAlbumPage(cursor, randomAlbumPageLimit(), controller.signal);
+    // A library/filter reset owns a new list and controller. Old responses must
+    // never overwrite its cursor or mark its new request as finished.
+    if (controller.signal.aborted || state.randomAlbumPhotos !== items
+        || state.randomAlbumAbortController !== controller) return;
+    if (page.has_more && (!page.next_cursor || page.next_cursor === cursor)) {
+      throw new Error(copyText('app.interface.runtime.libraryLoadFailed'));
+    }
     const photos = page.photos || [];
-    state.randomAlbumTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.randomAlbumTotal;
+    if (!cursor && Number.isFinite(Number(page.total))) state.randomAlbumTotal = Number(page.total);
     state.randomAlbumPhotos.push(...photos);
     state.randomAlbumCursor = page.next_cursor || '';
-    state.randomAlbumHasMore = page.has_more || false;
+    state.randomAlbumHasMore = !!page.has_more;
     state.randomAlbumLoaded = !state.randomAlbumHasMore;
-    await appendRandomAlbumGrid(photos, { progressive: true });
-    if (state.pendingRandomAlbumPhotoID) await focusPendingRandomAlbumPhoto({ quiet: true });
-    requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(photos));
+    state.randomAlbumViewLoaded = true;
+    if (state.view === 'random-album') {
+      await appendRandomAlbumGrid(photos, { progressive: true });
+      if (state.pendingRandomAlbumPhotoID) await focusPendingRandomAlbumPhoto({ quiet: true });
+      requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(photos));
+    }
   } catch (e) {
-    if (!e || e.name !== 'AbortError') {
+    if (state.randomAlbumAbortController === controller && e?.name !== 'AbortError') {
       console.error(e);
-      throw e;
+      state.randomAlbumLoadError = true;
     }
   } finally {
-    state.randomAlbumLoading = false;
-    state.randomAlbumAbortController = null;
-    updateRandomAlbumLoadMoreUI();
-    maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+    if (state.randomAlbumAbortController === controller) {
+      state.randomAlbumLoading = false;
+      state.randomAlbumAbortController = null;
+      updateRandomAlbumLoadMoreUI();
+      maybeLoadMoreImmediately('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
+    }
   }
 }
 
@@ -8294,22 +8507,28 @@ async function renderRandomAlbum() {
     $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
     await renderRandomAlbumGrid();
     requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(state.randomAlbumPhotos));
-    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+    observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
     if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
     return;
   }
 
+  state.randomAlbumAbortController?.abort();
+  state.randomAlbumAbortController = null;
+  state.randomAlbumLoading = false;
+  state.randomAlbumLoadError = false;
+  state.randomAlbumPhotos = [];
+  state.randomAlbumCursor = '';
+  state.randomAlbumHasMore = true;
+  state.randomAlbumLoaded = false;
+  state.randomAlbumTotal = 0;
   $('#content').innerHTML = `<div id="random-album-wrap"></div>`;
   await renderRandomAlbumGrid();
+  const items = state.randomAlbumPhotos;
   try {
-    state.randomAlbumPhotos = [];
-    state.randomAlbumCursor = '';
-    state.randomAlbumHasMore = true;
-    state.randomAlbumLoaded = false;
-    state.randomAlbumTotal = 0;
     await loadMoreRandomAlbum();
+    if (state.randomAlbumPhotos !== items || state.view !== 'random-album') return;
     state.randomAlbumViewLoaded = true;
-    observeLoadMore('load-more', loadMoreRandomAlbum, () => state.randomAlbumHasMore && !state.randomAlbumLoading && !state.randomAlbumBulkLoading && !state.randomAlbumAutoLoadPaused);
+    observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
     if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
   } catch (e) {
     $('#random-album-wrap').innerHTML = `<p style="color:var(--danger)">${copyText('app.interface.d_random_album_load_failed', { error: (e && e.error) || e })}</p>`;
@@ -8337,6 +8556,14 @@ async function renderRandomAlbumGrid() {
 function updateRandomAlbumLoadMoreUI() {
   const loadMore = $('#load-more');
   if (!loadMore || state.view !== 'random-album') return;
+  if (state.randomAlbumLoadError) {
+    loadMore.innerHTML = `<p>${escapeHTML(copyText('app.interface.runtime.libraryLoadFailed'))}</p><button class="btn btn-sm" type="button">${escapeHTML(copyText('app.interface.runtime.libraryLoadRetry'))}</button>`;
+    loadMore.querySelector('button')?.addEventListener('click', () => {
+      state.randomAlbumLoadError = false;
+      void loadMoreRandomAlbum();
+    });
+    return;
+  }
   if (state.randomAlbumLoading) {
     loadMore.innerHTML = `<div class="spinner"></div>${copyText('app.interface.s_2189ef91ed', { v0: state.randomAlbumPhotos.length, v1: state.randomAlbumTotal ? ` / ${state.randomAlbumTotal}` : '' })} <button class="btn btn-sm" id="random-page-cancel" type="button">${copyText('app.interface.commonCancel')}</button>`;
     $('#random-page-cancel')?.addEventListener('click', () => {
@@ -8443,28 +8670,8 @@ function renderRootConsoleUserRows() {
 
 function renderRootDebugMediaGrid() {
   const grid = el('div', 'photo-grid');
-  rootDebugMediaItems.forEach(photo => {
-    const card = el('button', 'photo-thumb');
-    const photoName = window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c');
-    card.type = 'button';
-    card.dataset.id = photo.id;
-    card.dataset.kind = photo.media_kind || 'image';
-    card.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
-    card.innerHTML = `<img loading="lazy" draggable="false" src="${mediaThumbURL(photo)}" alt="${escapeHTML(photoName)}"${isVideoMedia(photo) ? ` onerror=\"this.onerror=null;this.src='${videoPosterPlaceholder}'\"` : ''}>${isVideoMedia(photo) ? `<span class="media-badge">${escapeHTML(videoFormatLabel(photo))}</span>` : ''}<span class="photo-thumb-name" title="${escapeHTML(photoName)}" aria-hidden="true">${escapeHTML(photoName)}</span>`;
-    const imageEl = card.querySelector('img');
-    imageEl?.addEventListener('load', () => {
-      requestAnimationFrame(() => requestAnimationFrame(() => card.classList.remove('thumb-loading', 'thumb-load-failed')));
-    });
-    if (imageEl && !isVideoMedia(photo)) {
-      imageEl.addEventListener('error', () => retryThumbnailLoad(imageEl, photo));
-    }
-    card.addEventListener('click', () => {
-      openLightbox(rootDebugMediaItems, rootDebugMediaItems.findIndex(item => item.id === photo.id), {
-        returnView: 'settings',
-        debugControls: true,
-      });
-    });
-    grid.appendChild(card);
+  setPhotoWallGrid(grid, rootDebugMediaItems, rootDebugMediaItems, {
+    cardOptions: { disableSelection: true, disableFavorite: true },
   });
   return grid;
 }
@@ -8509,7 +8716,7 @@ function renderRootDebugLibraryBuildPreview() {
     pruned: 18,
     exit_after_complete: false,
   };
-  const percent = estimateLibraryBuildDiscoveryPercent(status.done);
+  const percent = 0;
   return `<section class="library-build-panel">
     <div class="library-build-heading">
       <div>
@@ -8960,7 +9167,7 @@ async function renderRootConsoleContent({ host = settingsViewHost(), force = fal
 async function renderSettings() {
   scheduleSettingsAvailabilityPolling();
   if (state.settingsReady && state.view === 'settings') {
-    await refreshSettingsAvailability();
+    void refreshSettingsAvailability();
   }
   if (state.view !== 'settings') return;
   setSettingsViewVisible(true);
@@ -8993,7 +9200,6 @@ async function renderSettings() {
   ]);
   $('#topbar-meta').innerHTML = '';
   $('#topbar-actions').innerHTML = '';
-  const canRunServerTasksUI = canRunServerTasks();
   if (!state.settingsReady) {
     host.innerHTML = `<div class="load-more"><div class="spinner"></div>${escapeHTML(settingsText('common.loading'))}</div>`;
     await ensureSettingsDataLoaded();
@@ -9002,20 +9208,14 @@ async function renderSettings() {
   if (state.view !== 'settings') return;
 
   try {
-    const didMountSettingsView = await ensureSettingsViewMounted();
+    await ensureSettingsViewMounted();
     bindSettingsTopSaveButton();
-    if (!didMountSettingsView && canRunServerTasksUI) {
-      void pollVideoThumbnailRefreshStatus();
-      void pollEXIFBackfillStatus();
-      void pollThumbnailBuildStatus();
-    }
     if (state.settingsScrollRestorePending) {
       restoreViewScroll('settings');
       state.settingsScrollRestorePending = false;
     }
     refreshMissingLibraryLogosOnce();
     refreshShareManagementUI();
-    observeDeferredSettingsShareLoad();
     if (state.settingsFocus === 'libraries') {
       const target = $('#settings-library-list');
       if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -9290,6 +9490,7 @@ async function switchLibraryRowImmediately(row) {
   } catch (e) {
     state.serverSettings.active_library_id = previousID;
     state.serverSettings.storage_path = previousPath;
+    finishLibrarySwitchDiagnostic('rollback', { error: String(e?.error || e?.message || e) });
     syncActiveLibrarySelect();
     applyLibraryBranding();
     setSettingsDirty(true);
@@ -9347,6 +9548,7 @@ function normalizedLibraryPathForComparison(path) {
 
 function openLibraryBatchEditorModal(bindRow = null) {
   const modal = el('div', 'modal-overlay library-editor-modal open');
+  modal.tabIndex = -1;
   modal.innerHTML = `
     <div class="modal library-editor-card">
       <div class="modal-title">${escapeHTML(settingsText('libraries.editor.batchTitle'))}</div>
@@ -9779,6 +9981,14 @@ function openLibraryEditorModal(row = null, bindRow = null) {
   modal.addEventListener('click', e => {
     if (e.target === modal) close();
   });
+  modal.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' || event.isComposing || event.target?.tagName === 'TEXTAREA') return;
+    event.preventDefault();
+    const action = editing && switchButton && !switchButton.hidden
+      ? switchButton
+      : $('#library-editor-save', modal);
+    if (action && !action.disabled) action.click();
+  });
   $('#library-editor-save', modal).addEventListener('click', async () => {
     await persistLibraryDraft($('#library-editor-save', modal), {
       activate: false,
@@ -9822,6 +10032,7 @@ function openLibraryEditorModal(row = null, bindRow = null) {
     }
   });
   updatePreview({ syncAccentText: true });
+  modal.focus({ preventScroll: true });
 }
 
 function syncActiveLibrarySelect() {
@@ -9919,6 +10130,8 @@ async function persistSettingsWithLibraryAssets() {
 
 async function completeSettingsSave(button, { savingLabel = copyText('app.interface.commonSaving'), restartingLabel = copyText('app.interface.s_ce2d2904e8'), successMessage = '' } = {}) {
   const previousLibraryIdentity = activeLibraryIdentity(state.savedServerSettings || state.serverSettings);
+  const requestedLibraryIdentity = activeLibraryIdentity(state.serverSettings);
+  if (previousLibraryIdentity !== requestedLibraryIdentity) beginLibrarySwitchDiagnostic(previousLibraryIdentity, requestedLibraryIdentity);
   const runSave = () => persistSettingsWithLibraryAssets();
   const resp = button ? await withButtonBusy(button, renderButtonBusySpinner(), runSave, { ariaLabel: savingLabel }) : await runSave();
   const activeLibraryChanged = previousLibraryIdentity !== activeLibraryIdentity(state.serverSettings);
@@ -9931,6 +10144,9 @@ async function completeSettingsSave(button, { savingLabel = copyText('app.interf
     return resp;
   }
   if (activeLibraryChanged) {
+    logLibrarySwitch('reload', { active_library_id: state.serverSettings.active_library_id });
+    state.view = 'timeline';
+    setHashView('timeline');
     location.reload();
     return resp;
   }
@@ -10064,13 +10280,15 @@ function refreshShareManagementUI() {
       }
     };
   });
-  $('#settings-copy-all-shares-btn')?.addEventListener('click', async () => {
+  const copyAll = $('#settings-copy-all-shares-btn');
+  if (copyAll) copyAll.onclick = async () => {
     if (!state.shareLinks.length) return;
     const text = state.shareLinks.map(item => `${location.origin}/s/${item.token}`).join('\n');
     await navigator.clipboard.writeText(text);
     showToast(settingsText('shares.copyAllDone'));
-  });
-  $('#settings-delete-all-shares-btn')?.addEventListener('click', async () => {
+  };
+  const deleteAll = $('#settings-delete-all-shares-btn');
+  if (deleteAll) deleteAll.onclick = async () => {
     if (!state.shareLinks.length) return;
     if (!(await appConfirm(settingsText('shares.deleteAllConfirm'), {
       danger: true,
@@ -10082,29 +10300,30 @@ function refreshShareManagementUI() {
       removeShareLinkFromState(id);
     }
     showToast(settingsText('shares.deleteAllDone'));
-  });
+  };
 }
 
-function observeDeferredSettingsShareLoad() {
-  const panel = $('#settings-share-panel');
-  if (!panel || state.shareLinksLoaded) return;
-  const triggerLoad = () => {
-    if (state.shareLinksLoaded || state.shareLinksLoading) return;
+// Restore task progress only after the workflow card is explicitly expanded.
+// Active tasks keep their existing polling until they finish or are cancelled.
+let settingsWorkflowStatusLoad = null;
+function loadSettingsPanelData(panel) {
+  if (panel.classList.contains('settings-panel-share')) {
+    const loading = loadShareMap();
     refreshShareManagementUI();
-    loadShareMap().then(() => {
-      if (state.view === 'settings') refreshShareManagementUI();
-    }).catch(() => {});
-  };
-  if (typeof IntersectionObserver !== 'function') {
-    triggerLoad();
-    return;
+    void loading.then(() => refreshShareManagementUI()).catch(() => {});
   }
-  const observer = new IntersectionObserver(entries => {
-    if (!entries[0] || !entries[0].isIntersecting) return;
-    observer.disconnect();
-    triggerLoad();
-  }, { rootMargin: '120px 0px' });
-  observer.observe(panel);
+  if (panel.classList.contains('settings-panel-batch-workflow') && !settingsWorkflowStatusLoad) {
+    const requests = [];
+    if (canRunServerTasks()) {
+      requests.push(pollEXIFBackfillStatus(), pollVideoThumbnailRefreshStatus(), pollThumbnailBuildStatus());
+    }
+    if (canAccessBatchWorkflow()) {
+      requests.push(pollLibraryBatchBuildStatus(), pollLibraryBatchThumbnailBuildStatus());
+    }
+    settingsWorkflowStatusLoad = Promise.allSettled(requests).finally(() => {
+      settingsWorkflowStatusLoad = null;
+    });
+  }
 }
 
 function refreshPhotoShareIndicators(type, targetId) {
@@ -10207,6 +10426,7 @@ function bindSettingsPanelToggles(host) {
       const expanded = header.getAttribute('aria-expanded') !== 'true';
       settingsPanelExpandedState.set(stateKey, expanded);
       setExpanded(expanded);
+      if (expanded) loadSettingsPanelData(panel);
     });
   });
 }
@@ -10310,7 +10530,7 @@ function libraryBatchActivityLabel(status = {}) {
     if (status.status === 'cancelling') return settingsText('batchWorkflow.taskCancelling', { name });
     const key = {
       checking: 'taskChecking', discovering: 'taskDiscovering', scan: 'taskScanning',
-      exif: 'taskExif', thumbnails: 'taskThumbnails', audit: 'taskAudit', repair: 'taskRepair',
+      exif: 'taskExif', cleanup: 'taskCleanup', thumbnails: 'taskThumbnails', audit: 'taskAudit', repair: 'taskRepair',
       scanning: 'taskScanning', building: 'taskThumbnails',
     }[status.current_phase || status.status];
     if (key) return settingsText(`batchWorkflow.${key}`, { name });
@@ -10447,6 +10667,7 @@ function renderLibraryBatchWorkflowSummary(status, totalPercent) {
     [copyText('app.interface.s_562d1d2725'), `${Math.round(totalPercent)}%`],
     [copyText('app.interface.s_e7ad34645a'), count(scanRows, 'imported')],
     [copyText('app.interface.s_e952762557'), count(scanRows, 'skipped')],
+    [settingsText('batchWorkflow.cleanedMedia'), count(scanRows, 'pruned')],
     [copyText('app.interface.s_60248e225f'), count(thumbRows, 'skipped')],
     [copyText('app.interface.s_cfc54766b7'), count(thumbRows, 'generated')],
     [copyText('app.interface.s_763284f0fb'), count(scanRows, 'failed') + count(thumbRows, 'failed')],
@@ -10478,6 +10699,7 @@ function renderLibraryBatchWorkflowPanel() {
       ${renderSettingsToggle('settings-library-batch-workflow-enabled', settingsText('batchWorkflow.autoThumbnails'), state.libraryBatchWorkflowEnabled, settingsText('batchWorkflow.autoThumbnailsCopy'), controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-aggressive', settingsText('batchWorkflow.aggressive'), state.libraryBatchWorkflowAggressive, settingsText('batchWorkflow.aggressiveCopy'), controlsDisabled)}
       ${renderSettingsToggle('settings-library-batch-workflow-exif', settingsText('batchWorkflow.completeEXIF'), state.libraryBatchWorkflowCompleteEXIF, settingsText('batchWorkflow.completeEXIFCopy'), controlsDisabled)}
+      ${renderSettingsToggle('settings-library-batch-workflow-clean-files', settingsText('batchWorkflow.cleanFiles'), isLibraryBatchBuildActive() ? !!state.libraryBatchBuildStatus?.clean_files : state.libraryBatchWorkflowCleanFiles, settingsText('batchWorkflow.cleanFilesCopy'), controlsDisabled)}
     </div>
     <div class="settings-actions settings-actions-fill">
       <button class="btn" id="settings-start-library-batch-workflow-btn" type="button" ${controlsDisabled || !hasSelection ? 'disabled' : ''}>${escapeHTML(starting ? settingsText('batchWorkflow.startBusy') : (state.libraryBatchWorkflowEnabled ? settingsText('batchWorkflow.startFull') : settingsText('batchWorkflow.startScan')))}</button>
@@ -10534,6 +10756,7 @@ async function openLibraryBatchFullWorkflow() {
       startedByWorkflow: true,
       buildThumbnailsAfterScan: state.libraryBatchWorkflowEnabled,
       completeEXIF: state.libraryBatchWorkflowCompleteEXIF,
+      cleanFiles: state.libraryBatchWorkflowCleanFiles,
     });
   } catch (e) {
     clearLibraryBatchWorkflowPhase();
@@ -10727,6 +10950,7 @@ function renderLibraryBatchBuildPanel() {
       <span>${escapeHTML(renderLibraryBatchTaskProgress(status, settingsText('batchWorkflow.scanStart')))}</span>
       <span>${escapeHTML(status.aggressive_mode ? settingsText('batchWorkflow.modeAggressive') : (status.low_resource_mode ? settingsText('batchWorkflow.modeLowResource') : settingsText('batchWorkflow.modeStandard')))}</span>
     </div>
+    ${active && ['checking', 'discovering', 'scan'].includes(status.current_phase) ? renderLibraryScanDiscovery(status.discovery) : ''}
     <div class="settings-batch-build-progress"><span style="width:${progressPercent}%"></span></div>
     <div class="settings-batch-build-selection">
       <strong>${escapeHTML(settingsText('batchWorkflow.scanScope'))}</strong>
@@ -10847,6 +11071,10 @@ function syncLibraryBatchWorkflowPanel() {
     persistLibraryBatchWorkflowPrefs();
     syncLibraryBatchWorkflowPanel();
   });
+  $('#settings-library-batch-workflow-clean-files')?.addEventListener('change', e => {
+    state.libraryBatchWorkflowCleanFiles = !!e.target.checked;
+    syncLibraryBatchWorkflowPanel();
+  });
   $('#settings-start-library-batch-workflow-btn')?.addEventListener('click', openLibraryBatchFullWorkflow);
   $('#settings-cancel-library-batch-workflow-btn')?.addEventListener('click', cancelLibraryBatchWorkflow);
 }
@@ -10964,7 +11192,7 @@ function syncLibraryBatchThumbnailBuildPanel() {
   });
 }
 
-function renderSettingsContent({ host = settingsViewHost(), activate = state.view === 'settings' } = {}) {
+function renderSettingsContent({ host = settingsViewHost() } = {}) {
   const activeAccent = resolveLibraryAccentColor(currentLibraryBrand() || {});
   const activeAccentText = readableTextColorForBackground(activeAccent);
   const thumbnailBuildSize = 512;
@@ -11209,10 +11437,10 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
       <div class="settings-control">
         <div class="settings-share-list" id="settings-share-list">${state.shareLinksLoaded ? (hasShareLinks ? renderSettingsShareRows() : renderSettingsShareEmptyState()) : renderSettingsShareDeferredState()}</div>
       </div>
-      ${state.shareLinksLoaded && hasShareLinks ? `<div class="settings-actions settings-actions-fill settings-share-bulk-actions" id="settings-share-bulk-actions">
+      <div class="settings-actions settings-actions-fill settings-share-bulk-actions" id="settings-share-bulk-actions" ${state.shareLinksLoaded && hasShareLinks ? '' : 'hidden'}>
         <button class="btn" id="settings-copy-all-shares-btn" type="button">${escapeHTML(settingsText('shares.copyAll'))}</button>
         <button class="btn" id="settings-delete-all-shares-btn" type="button">${escapeHTML(settingsText('shares.deleteAll'))}</button>
-      </div>` : ''}
+      </div>
     </div>
   </section>
   ` : ''}
@@ -11442,10 +11670,6 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
   $('#settings-continue-last-video-position').addEventListener('change', e => { state.continueLastVideoPosition = !!e.target.checked; setSettingsDirty(); });
   $('#settings-prefetch-neighbors').addEventListener('change', e => { setExperimentalSetting('prefetchNeighbors', e.target.checked); setSettingsDirty(); });
   $('#settings-subtitles-enabled')?.addEventListener('change', e => { state.subtitlesEnabled = !!e.target.checked; setSettingsDirty(); if ($('#lb-video')) loadLightboxSubtitles($('#lb-video'), state.lightboxPhotos[state.lightboxIndex]); });
-  if (activate && canRunServerTasksUI) {
-    void pollVideoThumbnailRefreshStatus();
-    void pollEXIFBackfillStatus();
-  }
   $('#settings-refresh-video-thumbs-btn')?.addEventListener('click', () => {
     openVideoThumbnailRefreshWorkflow();
   });
@@ -11565,7 +11789,6 @@ function renderSettingsContent({ host = settingsViewHost(), activate = state.vie
       input.value = '';
     }
   });
-  if (activate && canRunServerTasksUI) void pollThumbnailBuildStatus();
   $('#shutdown-btn')?.addEventListener('click', e => { e.preventDefault(); shutdownFromUI(); });
   $('#logout-btn')?.addEventListener('click', e => { e.preventDefault(); logout(); });
   refreshShareManagementUI();
@@ -11702,12 +11925,12 @@ async function renderTimeline() {
 
   if (canReuseLoadedTimelineForPendingFocus) {
     state.timelineLocatingActive = false;
-    await loadShareMap();
     renderTimelineGrid();
     requestVisibleThumbnailWarmup('timeline', state.photos);
     observeLoadMore('load-more-top', loadMoreTimelineBefore, () => state.timelineHasBefore && !timelineUsesManualBeforeLoading() && !state.timelineLoadingBefore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused, { rootMargin: '50% 0px 0px 0px' });
     observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
     if (!(await focusPendingTimelinePhoto())) restoreViewScroll('timeline');
+    finishLightboxReturnTransition();
     return;
   }
 
@@ -11729,6 +11952,7 @@ async function renderTimeline() {
       observeLoadMore('load-more-top', loadMoreTimelineBefore, () => state.timelineHasBefore && !timelineUsesManualBeforeLoading() && !state.timelineLoadingBefore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused, { rootMargin: '50% 0px 0px 0px' });
       observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
       if (!focusedPending) restoreViewScroll('timeline');
+      finishLightboxReturnTransition();
       return;
     } catch (e) {
       console.warn('timeline locate failed, fallback to regular loading', e);
@@ -11749,13 +11973,18 @@ async function renderTimeline() {
   state.timelineCursor = '';
   state.timelineHasMore = true;
   state.timelineTotal = 0;
-  await loadShareMap();   // b-2: 加载分享状态
+  state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
+  window.scrollTo(0, 0);
   await loadMoreTimeline();
   state.timelineLoaded = true;
   const focusedPending = await focusPendingTimelinePhoto();
   observeLoadMore('load-more-top', loadMoreTimelineBefore, () => state.timelineHasBefore && !timelineUsesManualBeforeLoading() && !state.timelineLoadingBefore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused, { rootMargin: '50% 0px 0px 0px' });
   observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
-  if (hasPendingFocus && focusedPending) return;
+  if (hasPendingFocus && focusedPending) {
+    finishLightboxReturnTransition();
+    return;
+  }
+  finishLightboxReturnTransition();
   state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
   window.scrollTo(0, 0);
 }
@@ -11869,7 +12098,7 @@ async function loadAllTimelinePhotos() {
       state.timelineBulkAbortController = new AbortController();
       const page = await fetchTimelinePage(cursor, 300, state.timelineBulkAbortController.signal);
       const photos = page.photos || [];
-      if (Number.isFinite(Number(page.total))) total = Number(page.total);
+      if (!cursor && Number.isFinite(Number(page.total))) total = Number(page.total);
       state.timelineTotal = total;
       state.photos.push(...photos);
       state.timelineCursor = page.next_cursor || '';
@@ -11948,7 +12177,6 @@ async function renderFavorites() {
     });
   });
 
-  await loadShareMap();
   if (state.favoriteLoaded) {
     appendFavoriteGrid(state.favoritePhotos);
     requestVisibleThumbnailWarmup('favorites', state.favoritePhotos);
@@ -11972,6 +12200,9 @@ async function renderFavorites() {
 async function loadMoreTimeline() {
   if (state.timelineLoading || state.timelineBulkLoading || state.timelineAutoLoadPaused || !state.timelineHasMore) return;
   state.timelineLoading = true;
+  if (state.view === 'timeline' && $('#load-more')) {
+    $('#load-more').innerHTML = `<div class="spinner"></div>${escapeHTML(copyText('app.interface.commonLoading'))}`;
+  }
   try {
     state.timelineLoadAbortController = new AbortController();
     const params = new URLSearchParams({
@@ -11981,8 +12212,8 @@ async function loadMoreTimeline() {
     appendMediaKindParam(params);
     if (state.timelineCursor) params.set('cursor', state.timelineCursor);
     const url = `/api/media?${params.toString()}`;
-    const page = await api.get(url, { signal: state.timelineLoadAbortController.signal });
-    state.timelineTotal = Number.isFinite(Number(page.total)) ? Number(page.total) : state.timelineTotal;
+    const page = await getWithLoadTimeout(url, { signal: state.timelineLoadAbortController.signal });
+    if (!state.timelineCursor && Number.isFinite(Number(page.total))) state.timelineTotal = Number(page.total);
     state.photos.push(...(page.photos || []));
     state.timelineCursor = page.next_cursor || '';
     state.timelineHasMore = page.has_more || false;
@@ -11994,8 +12225,18 @@ async function loadMoreTimeline() {
   } catch (e) {
     if (!e || e.name !== 'AbortError') console.error(e);
     if (!e || e.name !== 'AbortError') {
-      state.timelineHasMore = false;
-      showToast(copyText('app.interface.s_6ba92a9d5d'), 5000);
+      // A failed request says nothing about whether the cursor is exhausted.
+      // Pause automatic retries, preserve the cursor, and let the user retry.
+      state.timelineAutoLoadPaused = true;
+      if (!state.photos.length && state.view === 'timeline') {
+        renderLibraryLoadError($('#timeline-wrap'), () => { state.timelineAutoLoadPaused = false; void renderTimeline(); });
+      } else if (state.view === 'timeline') {
+        renderLibraryLoadError($('#load-more'), () => {
+          state.timelineAutoLoadPaused = false;
+          void loadMoreTimeline();
+        });
+        showToast(copyText('app.interface.s_6ba92a9d5d'), 5000);
+      }
     }
   }
   finally {
@@ -12016,9 +12257,6 @@ async function loadMoreTimelineBefore() {
     return;
   }
   state.timelineLoadingBefore = true;
-  const anchorThumb = firstVisiblePhotoThumb();
-  const anchorID = anchorThumb ? Number(anchorThumb.dataset.id || 0) : 0;
-  const anchorTop = anchorThumb ? anchorThumb.getBoundingClientRect().top : 0;
   try {
     const page = await loadTimelineBeforeWindow(firstPhoto.id);
     const prependPhotos = Array.isArray(page && page.photos) ? page.photos : [];
@@ -12043,16 +12281,6 @@ async function loadMoreTimelineBefore() {
     void document.documentElement.offsetHeight;
     if (!state.timelineLocatingActive) {
       requestVisibleThumbnailWarmup('timeline', uniquePrepend);
-    }
-    const refreshedAnchor = anchorID
-      ? document.querySelector(`.photo-thumb[data-id="${anchorID}"]`)
-      : null;
-    const nextTop = refreshedAnchor ? refreshedAnchor.getBoundingClientRect().top : 0;
-    const delta = nextTop - anchorTop;
-    if (delta) {
-      state.ignoreScrollSaveUntil = Date.now() + 120;
-      state.programmaticScrollTargetTop = (window.scrollY || window.pageYOffset || 0) + delta;
-      window.scrollBy(0, delta);
     }
   } catch (e) {
     if (!e || e.name !== 'AbortError') console.error(e);
@@ -12081,33 +12309,15 @@ function appendTimelineGrid(newPhotos) {
     grid.id = 'timeline-grid';
     container.appendChild(grid);
   }
-  const fragment = document.createDocumentFragment();
-  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.photos)));
-  grid.appendChild(fragment);
+  setPhotoWallGrid(grid, state.photos, state.photos, {
+    placeholders: timelinePlaceholderCount(), kind: 'timeline',
+  });
 }
 
 function prependTimelineGrid(newPhotos) {
-  const container = $('#timeline-wrap');
-  if (!container || !newPhotos.length) return;
-  let grid = $('#timeline-grid');
-  if (!grid) {
-    grid = el('div', 'photo-grid');
-    grid.id = 'timeline-grid';
-    container.appendChild(grid);
-  }
-  const placeholders = Array.from(grid.querySelectorAll('.timeline-placeholder-thumb'));
-  const replacementCount = Math.min(placeholders.length, newPhotos.length);
-  const replacementStart = Math.max(0, placeholders.length - replacementCount);
-  for (let i = 0; i < replacementCount; i += 1) {
-    const replacement = makePhotoThumb(newPhotos[i], state.photos);
-    grid.replaceChild(replacement, placeholders[replacementStart + i]);
-  }
-  if (replacementCount < newPhotos.length) {
-    const fragment = document.createDocumentFragment();
-    newPhotos.slice(replacementCount).forEach(p => fragment.appendChild(makePhotoThumb(p, state.photos)));
-    grid.insertBefore(fragment, grid.firstChild);
-  }
-  state.timelineLocateMissingBeforeCount = Math.max(0, timelinePlaceholderCount() - replacementCount);
+  if (!newPhotos.length) return;
+  state.timelineLocateMissingBeforeCount = Math.max(0, timelinePlaceholderCount() - newPhotos.length);
+  appendTimelineGrid([]);
 }
 
 function renderTimelineGrid() {
@@ -12115,21 +12325,7 @@ function renderTimelineGrid() {
   if (!container) return;
   container.innerHTML = '';
   container.insertAdjacentHTML('beforeend', `<div class="load-more load-more-top" id="load-more-top"><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div>`);
-  const placeholderCount = timelinePlaceholderCount();
-  if (placeholderCount > 0) {
-    let grid = $('#timeline-grid');
-    if (!grid) {
-      grid = el('div', 'photo-grid');
-      grid.id = 'timeline-grid';
-      container.appendChild(grid);
-    }
-    const placeholderFragment = document.createDocumentFragment();
-    for (let i = 0; i < placeholderCount; i += 1) {
-      placeholderFragment.appendChild(makeTimelinePlaceholder(i));
-    }
-    grid.appendChild(placeholderFragment);
-  }
-  if (state.photos.length) appendTimelineGrid(state.photos);
+  appendTimelineGrid(state.photos);
   if (state.photos.length === 0 && !state.timelineHasMore && !state.timelineLoading) {
     container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.interface.runtime.emptyMedia'))}</p></div>`;
   }
@@ -12152,9 +12348,7 @@ function appendFavoriteGrid(newPhotos) {
     grid.id = 'favorite-grid';
     container.appendChild(grid);
   }
-  const fragment = document.createDocumentFragment();
-  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.favoritePhotos)));
-  grid.appendChild(fragment);
+  setPhotoWallGrid(grid, state.favoritePhotos);
 }
 
 function sortFavoritePhotosInPlace() {
@@ -12172,7 +12366,6 @@ function rerenderFavoriteGrid() {
   const container = $('#favorite-wrap');
   if (!container) return;
   sortFavoritePhotosInPlace();
-  container.innerHTML = '';
   appendFavoriteGrid(state.favoritePhotos);
   renderFavoritesEmptyStateIfNeeded();
 }
@@ -12300,7 +12493,6 @@ async function renderMemories() {
   }
   state.memoriesLoading = true;
   state.memoryEntries = loadMemoryEntries();
-  await loadShareMap();
   const photos = [];
   const liveEntries = [];
   for (const entry of state.memoryEntries) {
@@ -12334,8 +12526,8 @@ function renderMemoryGroups() {
   }
   container.innerHTML = '';
   const grid = el('div', 'photo-grid');
-  photos.forEach(photo => grid.appendChild(makePhotoThumb(photo, photos)));
   container.appendChild(grid);
+  setPhotoWallGrid(grid, photos);
 }
 
 function isVideoMedia(photo) {
@@ -12759,12 +12951,35 @@ function prefetchPhotosForLightboxIntent(listRef, index) {
   }
 }
 
+let photoWallRuntime = null;
+function setPhotoWallGrid(grid, photos, listRef = photos, options = {}) {
+  if (!photoWallRuntime) {
+    photoWallRuntime = window.EchoGalleryPhotoWall.create({
+      card: (photo, list, opts) => makePhotoThumb(photo, list, opts),
+      placeholder: (kind, index) => makeLocatePlaceholder(kind, index),
+      release: node => {
+        const image = node.querySelector('img');
+        const runtime = mediaLoadRuntime;
+        const record = runtime?.cards.get(image);
+        if (!record) return;
+        runtime.releaseCard(record);
+        runtime.nearObserver?.unobserve(image);
+        runtime.visibleObserver?.unobserve(image);
+        runtime.cards.delete(image);
+      },
+    });
+  }
+  photoWallRuntime.set(grid, photos, { list: listRef,
+    scope: activeLibraryIdentity(state.serverSettings), ...options });
+}
+
 function makePhotoThumb(photo, listRef, opts = {}) {
   const div = el('div', 'photo-thumb');
   div.dataset.id = photo.id;
   div.dataset.kind = photo.media_kind || 'image';
   div.dataset.uuid = photo.uuid || '';
   div.dataset.durationMs = Number(photo.duration_ms) || 0;
+  if (photo.subtitle_available === true || photo.has_subtitles === true) div.dataset.subtitleAvailable = '1';
   if (isVideoMedia(photo) && !isRootDebugMedia(photo)) void ensureDanmakuMatches().catch(() => {});
   div.style.setProperty('--thumb-placeholder', stableMediaPlaceholderColor(photo));
   div.classList.add('thumb-loading');
@@ -12782,7 +12997,6 @@ function makePhotoThumb(photo, listRef, opts = {}) {
   const photoName = window.EchoGalleryLightbox.displayFilename(photo.original_name) || copyText('app.interface.s_90a5096a0c');
 
   div.innerHTML = `<span class="check">${icons.check}</span>${favoriteToggle}<img loading="lazy" draggable="false" alt="${escapeHTML(photoName)}"><span class="thumb-bottom-gradient" aria-hidden="true"></span>${videoBookmarkBadge}${mediaDurationBadge}<span class="photo-thumb-name" title="${escapeHTML(photoName)}" aria-hidden="true">${escapeHTML(photoName)}</span>`;
-  if (isVideoMedia(photo) && !isDebugMedia) enqueueSubtitleProbe(photo);
   registerManagedThumbnail(div.querySelector('img'), photo);
 
   // b-1: 点击 .check 区域直接进入/切换选择模式
@@ -12812,9 +13026,8 @@ function makePhotoThumb(photo, listRef, opts = {}) {
       }, { passive: true });
     });
   }
-  if (isVideoMedia(photo)) requestVideoPlaybackIndicatorSync(photo);
-  const photoIndex = Array.isArray(listRef) ? listRef.indexOf(photo) : -1;
   const warmIntent = () => {
+    const photoIndex = thumbListRef.indexOf(photo);
     if (photoIndex >= 0) prefetchPhotosForLightboxIntent(thumbListRef, photoIndex);
   };
   div.addEventListener('pointerenter', warmIntent, { passive: true });
@@ -12968,18 +13181,15 @@ function refreshVisiblePendingThumbnails(force = false) {
 }
 
 function focusPhotoByGridStep(direction) {
-  const thumbs = visiblePhotoThumbs();
-  if (!thumbs.length) return false;
-  let index = thumbs.findIndex(thumb => Number(thumb.dataset.id) === Number(state.focusedPhotoID));
+  const photos = currentViewPhotos().filter(mediaKindMatchesFilter);
+  if (!photos.length) return false;
+  let index = photos.findIndex(photo => Number(photo.id) === Number(state.focusedPhotoID));
   if (index < 0) index = 0;
-  let columns = 1;
-  const firstTop = thumbs[0].getBoundingClientRect().top;
-  for (const thumb of thumbs) {
-    if (Math.abs(thumb.getBoundingClientRect().top - firstTop) < 4) columns += thumb === thumbs[0] ? 0 : 1;
-  }
+  const grid = visiblePhotoThumbs()[0]?.closest('.photo-grid');
+  const columns = photoWallRuntime?.columns(grid) || 1;
   const step = direction === 'left' ? -1 : direction === 'right' ? 1 : direction === 'up' ? -columns : columns;
-  const nextIndex = Math.max(0, Math.min(thumbs.length - 1, index + step));
-  setFocusedPhoto(Number(thumbs[nextIndex].dataset.id));
+  const nextIndex = Math.max(0, Math.min(photos.length - 1, index + step));
+  setFocusedPhoto(Number(photos[nextIndex].id));
   return true;
 }
 
@@ -12992,15 +13202,15 @@ function openFocusedPhoto() {
   return true;
 }
 
-function findPhotoThumb(id) {
+function findPhotoThumb(id, { mount = true } = {}) {
   const matches = Array.from(document.querySelectorAll(`.photo-thumb[data-id="${id}"]`));
-  if (!matches.length) return null;
+  if (!matches.length) return mount ? photoWallRuntime?.ensure(id) || null : null;
   return matches.find(node => node.offsetParent !== null) || matches[0];
 }
 
 function currentLoadedPreviewURLForPhoto(photo) {
   if (!photo || !photo.id) return '';
-  const thumb = findPhotoThumb(photo.id);
+  const thumb = findPhotoThumb(photo.id, { mount: false });
   const image = thumb?.querySelector('img');
   if (image && image.src && image.complete && image.dataset.thumbFailed !== '1') {
     return image.currentSrc || image.src || '';
@@ -13010,7 +13220,7 @@ function currentLoadedPreviewURLForPhoto(photo) {
 
 function lightboxDismissPhotoThumbRect(photo = state.lightboxPhotos[state.lightboxIndex]) {
   if (!photo || !photo.id) return null;
-  const thumb = findPhotoThumb(photo.id);
+  const thumb = findPhotoThumb(photo.id, { mount: false });
   if (!thumb) return null;
   const rect = thumb.getBoundingClientRect();
   if (!rect || rect.width <= 0 || rect.height <= 0) return null;
@@ -13120,6 +13330,7 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
     { role: 'timeline', icon: icons.contextTimeline, label: copyText('app.interface.s_2cf712b27f'), action: () => openInTimeline(photo.id) },
     { role: 'favorite', icon: favoriteIcon || icons.contextFavorite, label: favoriteLabel, action: favoriteAction },
     canWriteMedia() ? { role: 'album-add', icon: icons.plus || icons.contextAlbum, label: copyText('app.interface.albumAddToAlbum'), action: () => addSinglePhotoToAlbum(photo.id) } : null,
+    isVideoMedia(photo) && canWriteMedia() ? { role: 'refresh-video-thumbnail', icon: icons.refresh, label: copyText('app.interface.refreshVideoThumbnail'), action: () => refreshVideoThumbnail(photo) } : null,
     { role: 'reveal', icon: icons.contextReveal, label: copyText('app.interface.mediaOpenInFileManager'), action: () => revealInFinder(photo.id) },
     { role: 'download', icon: icons.contextDownload, label: singleMediaSaveLabel(), action: () => confirmDownloadAction(copyText('app.interface.d_66274d1532', { v0: (singleMediaSaveLabel()) }), () => saveOrDownloadMedia(photo)) },
     options.lightbox && isVideoMedia(photo) ? { role: 'switch-audio-track', icon: icons.contextSwitchSoundtrack, label: copyText('app.lightbox.switchAudioTrack'), action: () => switchLightboxAudioTrack(photo) } : null,
@@ -13156,10 +13367,41 @@ function photoContextMenuItems(photo, thumbEl, listRef, containingAlbums = [], o
   return filterPhotoContextMenuItemsForDevice(items, options);
 }
 
-let subtitleMatchCache = { key: '', statuses: new Map(), pending: new Map(), queue: [], active: 0 };
+async function refreshVideoThumbnail(photo) {
+  if (!photo?.id || !isVideoMedia(photo) || !canWriteMedia()) return;
+  const libraryKey = activeLibraryIdentity(state.serverSettings);
+  try {
+    const result = await api.post(`/api/media/${photo.id}/thumbnail/refresh`, {});
+    if (libraryKey !== activeLibraryIdentity(state.serverSettings)) return;
+    const uuid = String(result?.uuid || photo.uuid || '');
+    const url = String(result?.thumbnail_url || '');
+    if (!uuid || !url) throw new Error(copyText('app.interface.refreshVideoThumbnailFailed'));
+    for (const list of [state.photos, state.favoritePhotos, state.randomAlbumPhotos,
+      state.albumPhotos, state.trashPhotos, state.lightboxPhotos, state.memoryPhotos,
+      state.searchResults]) {
+      for (const item of list || []) {
+        if (item?.uuid !== uuid) continue;
+        item.thumbnail_url = url;
+        item.poster_url = url;
+      }
+    }
+    const runtime = mediaLoadRuntime;
+    if (runtime && runtime.library === libraryKey) {
+      for (const record of runtime.cards.values()) {
+        if (record.photo?.uuid === uuid) refreshManagedThumbnail(record.image);
+      }
+    }
+    showToast(copyText('app.interface.refreshVideoThumbnailDone'));
+  } catch (error) {
+    console.error('Video thumbnail refresh failed:', error);
+    showToast(copyText('app.interface.refreshVideoThumbnailFailed'), 4200);
+  }
+}
+
+let subtitleMatchCache = { key: '', statuses: new Map(), tracks: new Map(), pending: new Map() };
 function resetSubtitleMatchCacheIfNeeded() {
   const key = activeLibraryIdentity(state.serverSettings);
-  if (subtitleMatchCache.key !== key) subtitleMatchCache = { key, statuses: new Map(), pending: new Map(), queue: [], active: 0 };
+  if (subtitleMatchCache.key !== key) subtitleMatchCache = { key, statuses: new Map(), tracks: new Map(), pending: new Map() };
   return subtitleMatchCache;
 }
 
@@ -13169,11 +13411,12 @@ function hasSubtitleMatch(photo) {
   return resetSubtitleMatchCacheIfNeeded().statuses.get(Number(photo.id)) === true;
 }
 
-function syncSubtitleThumbBadges() {
+function syncSubtitleThumbBadges(mediaID = 0) {
   $$('.photo-thumb[data-kind="video"]').forEach(thumb => {
     const id = Number(thumb.dataset.id || 0);
-    if (!id) return;
-    const subtitleMatched = resetSubtitleMatchCacheIfNeeded().statuses.get(id) === true;
+    if (!id || (mediaID && id !== mediaID)) return;
+    const statuses = resetSubtitleMatchCacheIfNeeded().statuses;
+    const subtitleMatched = statuses.has(id) ? statuses.get(id) === true : thumb.dataset.subtitleAvailable === '1';
     if (resetSubtitleMatchCacheIfNeeded().statuses.has(id)) thumb.dataset.subtitleAvailable = subtitleMatched ? '1' : '0';
     const markup = renderVideoDurationBadge({
       id,
@@ -13191,44 +13434,29 @@ function syncSubtitleThumbBadges() {
   });
 }
 
-async function drainSubtitleProbeQueue() {
-  const cache = resetSubtitleMatchCacheIfNeeded();
-  while (cache.active < 3 && cache.queue.length) {
-    const photo = cache.queue.shift();
-    if (!photo || cache.pending.has(Number(photo.id))) continue;
-    const id = Number(photo.id);
-    cache.active++;
-    cache.pending.set(id, true);
-    api.get(`/api/media/${id}/subtitles`).then(result => {
-      if (subtitleMatchCache !== cache) return;
-      cache.statuses.set(id, Array.isArray(result?.tracks) && result.tracks.length > 0);
-      const thumb = $$('.photo-thumb[data-kind="video"]').find(node => Number(node.dataset.id || 0) === id);
-      if (thumb) thumb.dataset.subtitleAvailable = cache.statuses.get(id) ? '1' : '0';
-      syncSubtitleThumbBadges();
-    }).catch(() => {
-      // Keep an unknown result retryable. A transient API failure must not
-      // permanently suppress the badge for the current media card.
-      if (subtitleMatchCache === cache) cache.statuses.delete(id);
-    }).finally(() => {
-      if (subtitleMatchCache !== cache) return;
-      cache.pending.delete(id);
-      cache.active = Math.max(0, cache.active - 1);
-      void drainSubtitleProbeQueue();
-    });
-  }
-}
-
-function enqueueSubtitleProbe(photo) {
-  if (!photo || !isVideoMedia(photo) || !Number(photo.id)) return;
-  if (photo.subtitle_available === true || photo.has_subtitles === true) {
-    syncSubtitleThumbBadges();
-    return;
-  }
+async function loadVideoSubtitleTracks(photo) {
+  if (!photo || !isVideoMedia(photo) || !Number(photo.id)) return [];
   const cache = resetSubtitleMatchCacheIfNeeded();
   const id = Number(photo.id);
-  if (cache.statuses.has(id) || cache.pending.has(id) || cache.queue.some(item => Number(item?.id) === id)) return;
-  cache.queue.push(photo);
-  void drainSubtitleProbeQueue();
+  if (cache.tracks.has(id)) return cache.tracks.get(id);
+  if (cache.pending.has(id)) return cache.pending.get(id);
+  const pending = api.get(`/api/media/${id}/subtitles`).then(result => {
+    const tracks = Array.isArray(result?.tracks) ? result.tracks : [];
+    if (subtitleMatchCache === cache) {
+      cache.tracks.set(id, tracks);
+      cache.statuses.set(id, tracks.length > 0);
+      syncSubtitleThumbBadges(id);
+    }
+    return tracks;
+  }).finally(() => cache.pending.delete(id));
+  cache.pending.set(id, pending);
+  return pending;
+}
+
+async function probeSubtitleMatch(photo) {
+  if (!photo || !isVideoMedia(photo) || !Number(photo.id)) return;
+  if (photo.subtitle_available === true || photo.has_subtitles === true) return;
+  await loadVideoSubtitleTracks(photo);
 }
 
 let danmakuMatchCache = { key: '', uuids: new Set(), mediaIDs: new Set(), metadataByUUID: new Map(), metadataByMediaID: new Map(), ownerHydrationPending: new Set(), loaded: false, pending: null };
@@ -13947,7 +14175,7 @@ async function showCurrentLightboxContextMenu() {
   if (isRootDebugMedia(photo)) return;
   const button = $('#lb-more');
   const rect = button ? button.getBoundingClientRect() : { left: window.innerWidth - 64, right: window.innerWidth - 18, top: 32, bottom: 84, width: 46, height: 52 };
-  await showPhotoContextMenu(rect.right, rect.bottom, photo, findPhotoThumb(photo.id), state.lightboxPhotos, {
+  await showPhotoContextMenu(rect.right, rect.bottom, photo, findPhotoThumb(photo.id, { mount: false }), state.lightboxPhotos, {
     anchorRect: rect,
     align: 'end',
     vertical: 'below',
@@ -13969,17 +14197,16 @@ function renderVideoBookmarkMenuContent(photo, video) {
       ${Array.from({ length: 10 }, (_, i) => {
         const slot = i + 1;
         const bookmark = getVideoBookmarkSlot(photo, slot);
-        const timeText = bookmark ? formatDuration(bookmark.time * 1000) : copyText('app.interface.s_a3eef8ee5f');
-        const label = bookmark
-          ? `${bookmark.name || copyText('app.interface.d_a90c323409', { v0: (slot) })} · ${timeText}`
-          : copyText('app.interface.d_613794a2c6', { v0: (slot) });
+        const label = copyText('app.interface.videoBookmarkMark', { slot });
+        const timeText = bookmark ? formatDuration(bookmark.time * 1000) : '';
         return `
           <div class="lightbox-bookmark-row${bookmark ? '' : ' is-empty'}" data-slot="${slot}">
-            <button type="button" class="lightbox-bookmark-jump" data-video-bookmark-slot="${slot}" title="${escapeHTML(label)}">
-              <span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span>
-              <span class="lightbox-bookmark-text">${escapeHTML(label)}</span>
-            </button>
-            <button type="button" class="btn-icon lightbox-bookmark-delete" data-video-bookmark-delete="${slot}"${copyText('app.interface.s_37f82782ff')} ${slot}"${copyText('app.interface.s_ffdd1b078a')} ${slot}" ${bookmark ? '' : 'disabled'}>${icons.contextDelete}</button>
+            ${bookmark ? `
+              <button type="button" class="lightbox-bookmark-jump lightbox-bookmark-jump-standalone" data-video-bookmark-slot="${slot}" aria-label="${escapeHTML(label)}"><span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span></button>
+              <input class="lightbox-bookmark-name" data-video-bookmark-name="${slot}" value="${escapeHTML(bookmark.name || '')}" placeholder="${escapeHTML(label)}" aria-label="${escapeHTML(copyText('app.interface.videoBookmarkName', { slot }))}">
+              <button type="button" class="lightbox-bookmark-time" data-video-bookmark-slot="${slot}" aria-label="${escapeHTML(label)}">${escapeHTML(timeText)}</button>
+              <button type="button" class="btn-icon lightbox-bookmark-delete" data-video-bookmark-delete="${slot}"${copyText('app.interface.s_37f82782ff')} ${slot}"${copyText('app.interface.s_ffdd1b078a')} ${slot}">${icons.contextDelete}</button>
+            ` : `<button type="button" class="lightbox-bookmark-jump lightbox-bookmark-empty" data-video-bookmark-slot="${slot}"><span class="lightbox-bookmark-slot">${slot === 10 ? '0' : slot}</span><span class="lightbox-bookmark-text">${escapeHTML(label)}</span></button>`}
           </div>`;
       }).join('')}
     </div>`;
@@ -13989,6 +14216,7 @@ function refreshVideoBookmarkMenu() {
   const photo = state.lightboxPhotos[state.lightboxIndex];
   const video = $('#lb-video');
   if (!menu || !photo || !video || !menu.classList.contains('lightbox-bookmark-menu')) return;
+  if (menu.contains(document.activeElement) && document.activeElement.matches('[data-video-bookmark-name]')) return;
   menu.innerHTML = renderVideoBookmarkMenuContent(photo, video);
 }
 function showVideoBookmarkMenu() {
@@ -14049,19 +14277,17 @@ async function addSelectedMediaToAlbum(album) {
 
 async function addMediaIDsToAlbum(album, ids = []) {
   const uniqueIDs = [...new Set((ids || []).map(id => Number(id)).filter(id => id > 0))];
-  let ok = 0;
-  let fail = 0;
-  for (const id of uniqueIDs) {
-    try {
-      await api.post(`/api/media/albums/${album.id}`, { media_id: id });
-      ok++;
-    } catch (e) {
-      fail++;
-      console.warn("添加媒体到相册失败", { albumID: album.id, mediaID: id, error: e });
-    }
+  if (!uniqueIDs.length) return { ok: 0, fail: 0 };
+  try {
+    const result = await api.post(`/api/media/albums/${album.id}/batch`, { media_ids: uniqueIDs });
+    const ok = Math.max(0, Number(result?.added) || 0);
+    const fail = Math.max(0, Number(result?.failed) || 0);
+    if (ok) invalidateAlbumListState();
+    return { ok, fail };
+  } catch (e) {
+    console.warn("批量添加媒体到相册失败", { albumID: album.id, count: uniqueIDs.length, error: e });
+    return { ok: 0, fail: uniqueIDs.length };
   }
-  if (ok) invalidateAlbumListState();
-  return { ok, fail };
 }
 
 function invalidateAlbumListState() {
@@ -14260,7 +14486,7 @@ function removePhotoFromList(list, photoId) {
 function renderFavoritesEmptyStateIfNeeded() {
   const container = $('#favorite-wrap');
   if (!container) return;
-  if (container.querySelector('.photo-thumb')) return;
+  if (state.favoritePhotos.length) return;
   container.innerHTML = `<div class="empty">${icons.favorite}<p>${escapeHTML(copyText('app.empty.favorites'))}</p></div>`;
 }
 
@@ -14272,7 +14498,8 @@ function removeFavoritePhotoFromUI(photoId) {
     updateFavoriteTotalHint();
   }
   state.selected.delete(photoId);
-  const thumb = findPhotoThumb(photoId);
+  photoWallRuntime?.remove([photoId], $('#favorite-grid'));
+  const thumb = findPhotoThumb(photoId, { mount: false });
   if (!thumb) {
     renderFavoritesEmptyStateIfNeeded();
     updateSelectionBar();
@@ -14520,15 +14747,12 @@ function selectAllInGroup(groupEl) {
   if (state.view === 'trash' && state.trashFolderSelection.size) {
     clearTrashFolderSelectionOnly();
   }
-  const thumbs = $$('.photo-thumb', groupEl);
-  thumbs.forEach(thumb => {
-    const id = Number(thumb.dataset.id);
-    if (!state.selected.has(id)) {
-      state.selected.add(id);
-      thumb.classList.add('selected');
-    }
-  });
-  if (thumbs.length) state.selectionAnchorID = Number(thumbs[0].dataset.id) || state.selectionAnchorID;
+  const grids = groupEl.matches('.photo-grid') ? [groupEl] : $$('.photo-grid', groupEl);
+  const ids = new Set(grids.flatMap(grid => (photoWallRuntime?.items(grid) || []).map(photo => Number(photo.id))));
+  $$('.photo-thumb[data-id]', groupEl).forEach(thumb => ids.add(Number(thumb.dataset.id)));
+  ids.forEach(id => { if (id) state.selected.add(id); });
+  $$('.photo-thumb[data-id]', groupEl).forEach(thumb => thumb.classList.toggle('selected', state.selected.has(Number(thumb.dataset.id))));
+  if (ids.size) state.selectionAnchorID = [...ids][0] || state.selectionAnchorID;
   updateSelectionModeUI();
   updateSelectionBar();
   updateTrashSelBar();
@@ -14593,14 +14817,14 @@ function ensureCurrentViewEmptyState() {
     }
     case 'memories': {
       const container = $('#memory-groups');
-      if (container && !container.querySelector('.photo-thumb')) {
+      if (container && !state.memoryPhotos.filter(mediaKindMatchesFilter).length) {
         container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.interface.runtime.emptyMemories'))}</p></div>`;
       }
       break;
     }
     case 'random-album': {
       const wrap = $('#random-album-wrap');
-      if (wrap && !wrap.querySelector('.photo-thumb') && !state.randomAlbumHasMore && !state.randomAlbumLoading) {
+      if (wrap && !state.randomAlbumPhotos.length && !state.randomAlbumHasMore && !state.randomAlbumLoading) {
         wrap.innerHTML = `<div class="empty">${icons.shuffle}<p>${escapeHTML(copyText('app.interface.runtime.randomEmpty'))}</p></div>`;
       }
       updateRandomAlbumLoadMoreUI();
@@ -14640,6 +14864,7 @@ function removeDeletedPhotosFromUI(ids) {
   }
   if (state.timelineTotal) state.timelineTotal = Math.max(0, state.timelineTotal - idSet.size);
   if (state.randomAlbumTotal) state.randomAlbumTotal = Math.max(0, state.randomAlbumTotal - idSet.size);
+  photoWallRuntime?.remove(idSet);
   idSet.forEach(id => {
     state.selected.delete(id);
     delete state.shareMap[`photo:${id}`];
@@ -14662,6 +14887,7 @@ function removeTrashPhotosFromUI(ids) {
   const idSet = new Set(ids.map(id => Number(id)).filter(Boolean));
   if (!idSet.size) return;
   removePhotoIDsFromList(state.trashPhotos, idSet);
+  photoWallRuntime?.remove(idSet, $('#trash-grid'));
   idSet.forEach(id => {
     state.selected.delete(id);
     if (state.selectionAnchorID === id) state.selectionAnchorID = null;
@@ -14675,7 +14901,7 @@ function removeTrashPhotosFromUI(ids) {
   }
 }
 
-function openInTimeline(photoId, photo = null, { showLocateDialog = true } = {}) {
+function openInTimeline(photoId, photo = null, { showLocateDialog = true, keepLightboxOpen = false } = {}) {
   if (photo && !mediaKindMatchesFilter(photo)) {
     state.mediaKindFilter = 'all';
     localStorage.setItem(mediaKindFilterStorageKey, 'all');
@@ -14684,8 +14910,22 @@ function openInTimeline(photoId, photo = null, { showLocateDialog = true } = {})
   state.pendingTimelinePhotoID = photoId;
   state.timelineJumpCancelRequested = false;
   if (showLocateDialog) showTimelineLocateBlocking();
-  closeLightbox();
+  if (!keepLightboxOpen) closeLightbox();
   switchView('timeline');
+}
+
+function finishLightboxReturnTransition() {
+  if (!state.lightboxReturnInFlight) return;
+  const lightbox = $('#lightbox');
+  if (!lightbox || !lightbox.classList.contains('open')) {
+    state.lightboxReturnInFlight = false;
+    return;
+  }
+  const targetID = Number(state.lightboxReturnTargetID || 0);
+  if (targetID && !findPhotoThumb(targetID)) return;
+  state.lightboxSkipScrollRestore = true;
+  state.lightboxReturnInFlight = false;
+  closeLightbox();
 }
 
 async function loadTimelineLocateWindow(photoId) {
@@ -14710,13 +14950,13 @@ function computeAlbumPageSize() {
   return computeTimelinePageSize();
 }
 
-async function loadAlbumLocateWindow(albumId, photoId) {
+async function loadAlbumLocateWindow(albumId, photoId, signal) {
   const params = new URLSearchParams();
   params.set('id', String(photoId));
   params.set('limit', String(computeAlbumPageSize()));
   params.set('sort', normalizeAlbumDetailSort(state.albumDetailSort));
   appendMediaKindParam(params);
-  return api.get(`/api/media/albums/${albumId}/locate?${params.toString()}`);
+  return api.get(`/api/media/albums/${albumId}/locate?${params.toString()}`, { signal });
 }
 
 async function loadAlbumBeforeWindow(albumId, photoId) {
@@ -14731,11 +14971,20 @@ async function loadAlbumBeforeWindow(albumId, photoId) {
 function openInAlbum(album, photoId) {
   if (!album || !album.id) return;
   saveViewScroll();
+  cancelAlbumLocate();
   state.pendingAlbumPhotoID = photoId;
+  state.albumLocateAbortController = new AbortController();
+  const requestID = state.albumLocateRequestID;
   showTimelineLocateBlocking({
     title: copyText('app.interface.s_28e2338a24'),
     message: copyText('app.interface.s_8c65b73dc8'),
     buttonText: copyText('app.interface.s_e94b248b5f'),
+    cancelText: copyText('app.interface.commonCancel'),
+    onCancel: () => {
+      if (state.albumLocateRequestID !== requestID) return;
+      cancelAlbumLocate();
+      void renderAlbumDetail();
+    },
   });
   closeLightbox();
   openAlbumDetail(album);
@@ -14924,7 +15173,9 @@ function albumChildrenForParent(parentPath = '', kindFilter = 'all') {
 
 function albumChildAlbumsForDetail(album) {
   if (!isFolderAlbum(album)) return [];
-  return albumChildrenForParent(folderAlbumPath(album));
+  const currentID = Number(album && album.id);
+  return albumChildrenForParent(folderAlbumPath(album))
+    .filter(child => Number(child && child.id) !== currentID);
 }
 
 function albumSiblingList(album = state.currentAlbum) {
@@ -14935,7 +15186,14 @@ function albumSiblingList(album = state.currentAlbum) {
 function albumDirectChildCount(album) {
   if (!album || !isFolderAlbum(album)) return 0;
   const index = buildAlbumChildrenIndex();
-  return (index.get(folderAlbumPath(album)) || []).length;
+  const currentID = Number(album.id);
+  return (index.get(folderAlbumPath(album)) || [])
+    .filter(child => Number(child && child.id) !== currentID)
+    .length;
+}
+
+function albumDirectMediaCount(album) {
+  return Math.max(0, Number(album && album.photo_count) || 0);
 }
 
 function albumItemCount(album) {
@@ -14987,14 +15245,14 @@ function makeAlbumCard(album, options = {}) {
   const picker = options.picker === true;
   const smartAlbum = String(album && album.source_kind || '').trim() === 'smart';
   const albumKind = smartAlbum ? 'smart' : isFolderAlbum(album) ? 'folder' : 'user';
-  const rootAlbum = isRootFolderAlbum(album);
+  const rootAlbum = isRootFolderAlbum(album) || options.rootEntry === true;
   const albumKindLabel = albumKind === 'folder' ? copyText('app.interface.s_46ecac2910') : albumKind === 'smart' ? copyText('app.interface.albumSmart') : copyText('app.interface.s_05b503551a');
   const albumKindIcon = albumKind === 'folder' ? icons.albumCardFolder : albumKind === 'smart' ? icons.albumIntelligence : icons.albumCardUser;
   const title = albumDisplayTitle(album);
   const description = albumKind === 'smart'
     ? String(album.description || '').trim() || smartAlbumDescribeRules(album.smart_rules || []) || copyText('app.interface.s_d3282923b5')
     : albumRelativeAddress(album) || (albumKind === 'folder' ? copyText('app.interface.s_7c1e875802') : copyText('app.interface.albumUserCreated'));
-  const itemCount = albumItemCount(album);
+  const itemCount = Number.isFinite(Number(options.itemCount)) ? Math.max(0, Number(options.itemCount)) : albumItemCount(album);
   const card = el('div', `album-card album-card-${albumKind}${rootAlbum ? ' album-card-root' : ''}${!picker && state.albumViewMode === 'list' ? ' list' : ''}${picker ? ' album-card-picker' : ''}`);
   // c-1: 用 cover_uuid 显示封面缩略图
   const emptyCoverIcon = albumKind === 'folder' ? icons.albumCardFolder : albumKind === 'smart' ? icons.albumIntelligence : icons.albumCardUser;
@@ -15020,7 +15278,10 @@ function makeAlbumCard(album, options = {}) {
     card.setAttribute('aria-label', copyText('app.interface.d_8f61647a1d', { v0: (title) }));
     return card;
   }
-  card.addEventListener('click', () => openAlbumDetail(album));
+  card.addEventListener('click', () => {
+    if (typeof options.onClick === 'function') options.onClick();
+    else openAlbumDetail(album);
+  });
   card.addEventListener('contextmenu', e => {
     e.preventDefault();
     showAlbumContextMenu(e.clientX, e.clientY, album, { mobile: isTouchLikeDevice() });
@@ -15034,7 +15295,6 @@ function makeAlbumCard(album, options = {}) {
 
 // ── 相册详情 ──────────────────────────────────────────
 async function openAlbumDetail(album) {
-  await ensureAlbumsLoaded().catch(() => {});
   saveViewScroll();
   const nextID = Number(album && album.id);
   const prevID = Number(state.currentAlbumID || 0);
@@ -15042,6 +15302,11 @@ async function openAlbumDetail(album) {
   if (cached) album = { ...album, ...cached };
   state.currentAlbum = album;
   state.currentAlbumID = album.id;
+  // A locate action targets a file directly inside this folder. Open its
+  // media view immediately; the folder card remains available via Back.
+  state.albumDirectMediaOnlyID = state.pendingAlbumPhotoID && isFolderAlbum(album)
+    ? Number(album.id)
+    : null;
   state.lastAlbumDetailID = album.id;
   if (nextID !== prevID) {
     state.albumPhotos = [];
@@ -15074,11 +15339,9 @@ function openAdjacentAlbum(offset) {
 async function renderAlbumDetail() {
   let album = state.currentAlbum;
   if (state.currentAlbumID && (!state.albumsLoaded || !(state.albums || []).some(item => Number(item && item.id) === Number(state.currentAlbumID)))) {
-    try {
-      await ensureAlbumsLoaded();
-    } catch (e) {
-      console.warn("补载相册列表失败，Q/E 相册切换可能暂不可用", e);
-    }
+    void ensureAlbumsLoaded().catch(e => {
+      console.warn("补载相册列表失败，相册切换可能暂不可用", e);
+    });
   }
   if (!album && state.currentAlbumID) {
     try {
@@ -15098,10 +15361,15 @@ async function renderAlbumDetail() {
   }
   const albumTitle = albumDisplayTitle(album);
   const albumAddress = albumRelativeAddress(album);
-  const childAlbums = albumChildAlbumsForDetail(album);
+  const showDirectMediaOnly = Number(state.albumDirectMediaOnlyID) === Number(album.id);
+  const childAlbums = showDirectMediaOnly ? [] : albumChildAlbumsForDetail(album);
+  const hasDirectMediaEntry = !showDirectMediaOnly
+    && isFolderAlbum(album)
+    && albumDirectMediaCount(album) > 0;
+  const showFolderListing = !showDirectMediaOnly && childAlbums.length > 0;
   const writable = canWriteMedia();
   $('#topbar-title').textContent = albumTitle;
-  $('#topbar-meta').innerHTML = childAlbums.length
+  $('#topbar-meta').innerHTML = showFolderListing
     ? renderAlbumViewModeControl()
     : renderSelectionBarMarkup({
       extraAction: writable
@@ -15109,7 +15377,7 @@ async function renderAlbumDetail() {
         : '',
     });
   $('#topbar-actions').innerHTML = '';
-  if (!childAlbums.length) {
+  if (!showFolderListing) {
     bindSelectionBarHandlers({
       extraButtonID: writable ? 'delete-sel-btn' : '',
       extraAction: writable ? deleteSelected : null,
@@ -15122,10 +15390,11 @@ async function renderAlbumDetail() {
   <button class="album-detail-back-btn" id="album-detail-back-btn" type="button" title="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}" aria-label="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}">${icons.topbarBackAlbums}</button>
   <span class="album-detail-title" title="${escapeHTML(albumAddress || albumTitle)}">${escapeHTML(albumTitle)}</span>
 </div>
-${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">${renderAlbumDetailBottomActionControls()}</div>`}
-<div id="album-child-wrap"></div><div class="load-more load-more-top" id="load-more-top" ${childAlbums.length ? 'style="display:none"' : ''}><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div><div id="album-groups"></div><div class="load-more" id="load-more" ${childAlbums.length ? 'style="display:none"' : ''}><div class="spinner"></div>${copyText('app.interface.commonLoading')}</div>`;
+${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">${renderAlbumDetailBottomActionControls()}</div>`}
+<div id="album-child-wrap"></div><div class="load-more load-more-top" id="load-more-top" ${showFolderListing ? 'style="display:none"' : ''}><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div><div id="album-groups"></div><div class="load-more" id="load-more" ${showFolderListing ? 'style="display:none"' : ''}><div class="spinner"></div>${copyText('app.interface.commonLoading')}</div>`;
   renderAlbumChildGrid(childAlbums);
-  if (childAlbums.length) {
+  const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
+  if (showFolderListing && !hasPendingAlbumFocus) {
     $('#album-view-grid-btn')?.addEventListener('click', () => {
       state.albumViewMode = 'grid';
       renderAlbumDetail();
@@ -15156,6 +15425,12 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
     });
   }
   $('#album-detail-back-btn')?.addEventListener('click', () => {
+    if (showDirectMediaOnly) {
+      state.albumDirectMediaOnlyID = null;
+      state.albumDetailLoadedKey = '';
+      renderAlbumDetail();
+      return;
+    }
     returnToAlbumParent(album);
   });
   $('#album-detail-pill')?.addEventListener('contextmenu', e => {
@@ -15166,9 +15441,8 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
     const touch = e.changedTouches[0];
     showAlbumContextMenu(touch.clientX, touch.clientY, album, { includeView: false, mobile: true });
   });
-  const hasPendingAlbumFocus = !!state.pendingAlbumPhotoID;
   const detailStateKey = `${album.id}:${state.albumDetailSort}:${state.mediaKindFilter}:${childAlbums.map(item => item.id).join(',')}`;
-  if (childAlbums.length) {
+  if (showFolderListing && !hasPendingAlbumFocus) {
     state.albumPhotos = [];
     state.albumCursor = '';
     state.albumHasMore = false;
@@ -15178,7 +15452,9 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
     state.albumLocateMissingBeforeCount = 0;
     state.albumLocatingActive = false;
     state.albumDetailLoadedKey = detailStateKey;
-    renderAlbumGroups([]);
+    // A folder listing is not an empty media result: its child folders are
+    // rendered above, and direct media (when present) has its own root card.
+    $('#album-groups').innerHTML = '';
     updateLoadMoreUI('load-more', false);
     updateLoadMoreUI('load-more-top', false);
     restoreViewScroll('album-detail', album.id);
@@ -15217,9 +15493,14 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
   state.albumLoadingBefore = false;
   state.albumLocateMissingBeforeCount = 0;
   if (hasPendingAlbumFocus) {
+    const locateRequestID = Number(state.albumLocateRequestID) || 0;
+    if (!state.albumLocateAbortController) state.albumLocateAbortController = new AbortController();
+    const locateController = state.albumLocateAbortController;
     try {
       state.albumLocatingActive = true;
-      const located = await loadAlbumLocateWindow(album.id, state.pendingAlbumPhotoID);
+      const located = await loadAlbumLocateWindow(album.id, state.pendingAlbumPhotoID, locateController.signal);
+      if (locateRequestID !== state.albumLocateRequestID || locateController.signal.aborted) return;
+      if (state.albumLocateAbortController === locateController) state.albumLocateAbortController = null;
       state.albumPhotos = Array.isArray(located && located.photos) ? located.photos : [];
       state.albumLocateMissingBeforeCount = Math.max(0, Number(located && located.missing_before_count) || 0);
       state.albumHasBefore = !!(located && located.has_before);
@@ -15234,9 +15515,11 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
       if (!focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
       return;
     } catch (e) {
+      if (locateRequestID !== state.albumLocateRequestID) return;
       console.warn('album locate failed, fallback to regular loading', e);
       state.albumLocatingActive = false;
       state.albumLocateMissingBeforeCount = 0;
+      if (state.albumLocateAbortController === locateController) state.albumLocateAbortController = null;
       removeTimelineLocateBlocking();
     }
   }
@@ -15253,11 +15536,37 @@ ${childAlbums.length ? '' : `<div class="album-detail-bottom-controls" id="album
 function renderAlbumChildGrid(albums = []) {
   const wrap = $('#album-child-wrap');
   if (!wrap) return;
-  if (!albums.length) {
+  const parentAlbum = state.currentAlbum;
+  const hasDirectMediaEntry = albums.length > 0
+    && parentAlbum
+    && Number(state.albumDirectMediaOnlyID) !== Number(parentAlbum.id)
+    && isFolderAlbum(parentAlbum)
+    && albumDirectMediaCount(parentAlbum) > 0;
+  if (!albums.length && !hasDirectMediaEntry) {
     wrap.innerHTML = '';
     return;
   }
   const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
+  if (hasDirectMediaEntry) {
+    grid.appendChild(makeAlbumCard({
+      ...parentAlbum,
+      name: copyText('app.interface.s_18755acbbb'),
+      source_rel_path: '',
+      source_kind: 'folder',
+    }, {
+      rootEntry: true,
+      itemCount: albumDirectMediaCount(parentAlbum),
+      onClick: () => {
+        state.albumDirectMediaOnlyID = Number(parentAlbum.id);
+        state.albumPhotos = [];
+        state.albumCursor = '';
+        state.albumHasMore = true;
+        state.albumHasBefore = false;
+        state.albumDetailLoadedKey = '';
+        renderAlbumDetail();
+      },
+    }));
+  }
   albums.forEach(album => grid.appendChild(makeAlbumCard(album)));
   wrap.innerHTML = '';
   wrap.appendChild(grid);
@@ -15330,27 +15639,9 @@ async function loadMoreAlbumPhotos() {
 }
 
 function prependAlbumGrid(newPhotos) {
-  const container = $('#album-groups');
-  if (!container || !newPhotos.length) return;
-  let grid = $('#album-grid');
-  if (!grid) {
-    grid = el('div', 'photo-grid');
-    grid.id = 'album-grid';
-    container.appendChild(grid);
-  }
-  const placeholders = Array.from(grid.querySelectorAll('.timeline-placeholder-thumb'));
-  const replacementCount = Math.min(placeholders.length, newPhotos.length);
-  const replacementStart = Math.max(0, placeholders.length - replacementCount);
-  for (let i = 0; i < replacementCount; i += 1) {
-    const replacement = makePhotoThumb(newPhotos[i], state.albumPhotos);
-    grid.replaceChild(replacement, placeholders[replacementStart + i]);
-  }
-  if (replacementCount < newPhotos.length) {
-    const fragment = document.createDocumentFragment();
-    newPhotos.slice(replacementCount).forEach(p => fragment.appendChild(makePhotoThumb(p, state.albumPhotos)));
-    grid.insertBefore(fragment, grid.firstChild);
-  }
-  state.albumLocateMissingBeforeCount = Math.max(0, albumPlaceholderCount() - replacementCount);
+  if (!newPhotos.length) return;
+  state.albumLocateMissingBeforeCount = Math.max(0, albumPlaceholderCount() - newPhotos.length);
+  renderAlbumGroups([]);
 }
 
 async function loadMoreAlbumBefore() {
@@ -15363,9 +15654,6 @@ async function loadMoreAlbumBefore() {
     return;
   }
   state.albumLoadingBefore = true;
-  const anchorThumb = firstVisiblePhotoThumb();
-  const anchorID = anchorThumb ? Number(anchorThumb.dataset.id || 0) : 0;
-  const anchorTop = anchorThumb ? anchorThumb.getBoundingClientRect().top : 0;
   try {
     const page = await loadAlbumBeforeWindow(state.currentAlbum.id, firstPhoto.id);
     const prependPhotos = Array.isArray(page && page.photos) ? page.photos : [];
@@ -15390,16 +15678,6 @@ async function loadMoreAlbumBefore() {
     void document.documentElement.offsetHeight;
     if (!state.albumLocatingActive) {
       requestVisibleThumbnailWarmup(`album:${state.currentAlbum && state.currentAlbum.id}`, uniquePrepend);
-    }
-    const refreshedAnchor = anchorID
-      ? document.querySelector(`.photo-thumb[data-id="${anchorID}"]`)
-      : null;
-    const nextTop = refreshedAnchor ? refreshedAnchor.getBoundingClientRect().top : 0;
-    const delta = nextTop - anchorTop;
-    if (delta) {
-      state.ignoreScrollSaveUntil = Date.now() + 120;
-      state.programmaticScrollTargetTop = (window.scrollY || window.pageYOffset || 0) + delta;
-      window.scrollBy(0, delta);
     }
   } catch (e) {
     if (!e || e.name !== 'AbortError') console.error(e);
@@ -15472,18 +15750,11 @@ function renderAlbumGroups(newPhotos) {
     container.innerHTML = '';
     grid = el('div', 'photo-grid');
     grid.id = 'album-grid';
-    if (albumPlaceholderCount() > 0) {
-      const placeholderFragment = document.createDocumentFragment();
-      for (let i = 0; i < albumPlaceholderCount(); i += 1) {
-        placeholderFragment.appendChild(makeAlbumPlaceholder(i));
-      }
-      grid.appendChild(placeholderFragment);
-    }
     container.appendChild(grid);
   }
-  const fragment = document.createDocumentFragment();
-  newPhotos.forEach(p => fragment.appendChild(makePhotoThumb(p, state.albumPhotos)));
-  grid.appendChild(fragment);
+  setPhotoWallGrid(grid, state.albumPhotos, state.albumPhotos, {
+    placeholders: albumPlaceholderCount(), kind: 'album',
+  });
   updateLoadMoreUI('load-more-top', state.albumHasBefore);
   updateLoadMoreUI('load-more', state.albumHasMore);
 }
@@ -15659,12 +15930,7 @@ function renderTrashGroups(newPhotos = [], { reset = false } = {}) {
     }
     const grid = $('#trash-grid');
     if (grid) {
-      const shouldBuildAll = reset;
-      const items = shouldBuildAll ? photosForView : newPhotos;
-      if (shouldBuildAll) grid.innerHTML = '';
-      const fragment = document.createDocumentFragment();
-      items.forEach(photo => fragment.appendChild(makePhotoThumb(photo, state.trashPhotos, { trashMode: true })));
-      grid.appendChild(fragment);
+      setPhotoWallGrid(grid, photosForView, state.trashPhotos, { cardOptions: { trashMode: true } });
     }
   } else {
     $('#trash-media-section')?.remove();
@@ -15957,15 +16223,34 @@ async function hardDeleteSelected() {
 }
 
 // ── 无限滚动 ──────────────────────────────────────────
+function loadMoreSentinelIsNear(sentinel, margin = 200) {
+  if (!sentinel?.isConnected || !sentinel.getClientRects().length) return false;
+  const rect = sentinel.getBoundingClientRect();
+  return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
+}
 function observeLoadMore(id, loadFn, canLoad, options = {}) {
   disconnectSingleLoadMoreObserver(id);
   const sentinel = document.getElementById(id);
   if (!sentinel) return;
   const observer = new IntersectionObserver(entries => {
-    if (entries[0].isIntersecting && canLoad()) loadFn();
+    if (entries.some(entry => entry.target === sentinel && entry.isIntersecting)
+        && document.getElementById(id) === sentinel && !state.blockingInteraction && canLoad()) loadFn();
   }, { rootMargin: options.rootMargin || '200px' });
   observer.observe(sentinel);
-  state.loadMoreObservers[id] = observer;
+  // IntersectionObserver only reports threshold crossings. A short page or a
+  // temporarily blocked callback can leave the sentinel intersecting forever;
+  // scrolling/resizing must be able to rearm it without another crossing.
+  const check = () => maybeLoadMoreImmediately(id, loadFn, canLoad);
+  window.addEventListener('scroll', check, { passive: true });
+  window.addEventListener('resize', check, { passive: true });
+  state.loadMoreObservers[id] = {
+    disconnect() {
+      observer.disconnect();
+      window.removeEventListener('scroll', check);
+      window.removeEventListener('resize', check);
+    },
+  };
+  check();
 }
 function updateLoadMoreUI(id, hasMore) {
   const e = document.getElementById(id);
@@ -15973,18 +16258,16 @@ function updateLoadMoreUI(id, hasMore) {
   e.style.display = hasMore ? '' : 'none';
 }
 
-// 当首屏内容不足、底部哨兵一直在可视区时，IntersectionObserver 可能只触发一次，
-// 这里在每次加载结束后主动检查一次，确保能继续把后续页面补出来。
+// Recheck after layout: a replaced/hidden sentinel or one above the viewport
+// must not drain pages while a new view is restoring its scroll position.
 function maybeLoadMoreImmediately(id, loadFn, canLoad) {
   if (state.blockingInteraction) return;
   const sentinel = document.getElementById(id);
-  if (!sentinel || !canLoad()) return;
-  const rect = sentinel.getBoundingClientRect();
-  if (rect.top <= window.innerHeight + 200) {
-    requestAnimationFrame(() => {
-      if (canLoad()) loadFn();
-    });
-  }
+  if (!canLoad() || !loadMoreSentinelIsNear(sentinel)) return;
+  requestAnimationFrame(() => {
+    if (document.getElementById(id) === sentinel && !state.blockingInteraction
+        && canLoad() && loadMoreSentinelIsNear(sentinel)) loadFn();
+  });
 }
 
 function maybeLoadMoreImmediatelyFromTop(id, loadFn, canLoad) {
@@ -16099,9 +16382,7 @@ function shouldPauseLightboxBackgroundWork() {
 }
 
 function lockPageScrollForLightbox() {
-  if (document.body.classList.contains('lightbox-page-lock')) return;
   state.lightboxPageScrollTop = window.scrollY || window.pageYOffset || 0;
-  // 暂时禁用滚动锁定；保留滚动位置记录以便后续恢复。
 }
 function unlockPageScrollForLightbox() {
   if (state.lightboxSkipScrollRestore) {
@@ -16183,6 +16464,13 @@ function bindGlobal() {
   });
   window.addEventListener('scroll', noteManualViewScroll, { passive: true });
   window.addEventListener('keydown', e => {
+    if (e.target.matches?.('[data-video-bookmark-name]')) {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        e.target.blur();
+      }
+      if (e.key !== 'Escape') return;
+    }
     if (typeof handleEchoFrameKeydown === 'function' && handleEchoFrameKeydown(e)) return;
     if (handleSearchShortcut(e)) return;
     if (handleViewNumberShortcut(e)) return;
@@ -16508,6 +16796,19 @@ function bindGlobal() {
     }
   });
   document.addEventListener('click', async e => {
+    const retry = e.target.closest('#library-build-retry');
+    if (retry) {
+      retry.disabled = true;
+      try {
+        state.libraryBuildStatus = await api.post('/api/library-build/retry', {});
+        renderView();
+        startLibraryBuildPolling();
+      } catch (err) {
+        retry.disabled = false;
+        alert(copyText('app.libraryBuild.retryFailed') + ((err && err.error) || err));
+      }
+      return;
+    }
     const btn = e.target.closest('#library-build-cancel');
     if (!btn) return;
     btn.disabled = true;
@@ -16529,9 +16830,15 @@ function bindGlobal() {
     e.preventDefault();
     const photo = state.lightboxPhotos[state.lightboxIndex];
     if (!photo) return;
-    showPhotoContextMenu(e.clientX, e.clientY, photo, findPhotoThumb(photo.id), state.lightboxPhotos, { lightbox: true, mobile: isTouchLikeDevice() });
+    showPhotoContextMenu(e.clientX, e.clientY, photo, findPhotoThumb(photo.id, { mount: false }), state.lightboxPhotos, { lightbox: true, mobile: isTouchLikeDevice() });
   });
   document.addEventListener('change', e => {
+    if (e.target.matches('[data-video-bookmark-name]')) {
+      const slot = Number(e.target.dataset.videoBookmarkName);
+      const photo = state.lightboxPhotos[state.lightboxIndex];
+      const bookmark = getVideoBookmarkSlot(photo, slot);
+      if (bookmark && canEditBookmarks()) setVideoBookmarkSlot(photo, slot, bookmark.time, e.target.value);
+    }
     if (e.target.matches('#lb-slideshow-interval')) updateSlideshowSetting('interval', parseInt(e.target.value, 10) * 1000);
     if (e.target.matches('#lb-zoom')) setLightboxZoom(parseInt(e.target.value, 10));
   });
@@ -16689,6 +16996,8 @@ async function openLightbox(photos, index, options = {}) {
   state.lightboxOriginThumbRect = lightboxDismissPhotoThumbRect(target);
   state.lightboxReturnView = options.returnView || state.view;
   state.lightboxReturnAlbumID = state.currentAlbumID;
+  state.lightboxReturnInFlight = false;
+  state.lightboxReturnTargetID = null;
   state.lightboxDebugControls = !!options.debugControls;
   if (state.lightboxReturnView === 'random-album' && target && target.id) {
     state.randomAlbumLastViewedPhotoID = Number(target.id);
@@ -16780,6 +17089,8 @@ function closeLightbox() {
   state.lightboxOriginThumbRect = null;
   state.lightboxReturnView = '';
   state.lightboxReturnAlbumID = null;
+  state.lightboxReturnInFlight = false;
+  state.lightboxReturnTargetID = null;
   state.lightboxDebugControls = false;
   state.lightboxPageLoading = false;
   clearLightboxUnderzoomState();
@@ -16794,7 +17105,9 @@ function exitLightboxToContext() {
   // Rebuild the bounded timeline window around the current item, even when it
   // is already present in the old grid. Reuse the explicit timeline action.
   if (currentPhotoID && returnView === 'timeline') {
-    openInTimeline(currentPhotoID, currentPhoto, { showLocateDialog: false });
+    state.lightboxReturnInFlight = true;
+    state.lightboxReturnTargetID = Number(currentPhotoID);
+    openInTimeline(currentPhotoID, currentPhoto, { showLocateDialog: false, keepLightboxOpen: true });
     return;
   }
   const shouldUseOriginalScroll = currentPhotoID && Number(currentPhotoID) === Number(state.lightboxSeedPhotoID || 0);

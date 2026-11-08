@@ -61,7 +61,7 @@ func (s *PhotoService) soundtrackCachePath(photo *storage.Photo, index int) (str
 	}
 	relative = strings.ReplaceAll(filepath.ToSlash(relative), `\`, "/")
 	key := fmt.Sprintf("aac-v1:%s:%s:%d:%d:%d", photo.UUID, relative, info.Size(), info.ModTime().UnixNano(), index)
-	return filepath.Join(config.LibraryDataRoot(s.sourcePath), "soundtracks", fmt.Sprintf("%x.mp4", sha256.Sum256([]byte(key)))), nil
+	return identifiedMediaCachePath(filepath.Join(config.LibraryDataRoot(s.sourcePath), "soundtracks"), photo.UUID, fmt.Sprintf("%x.mp4", sha256.Sum256([]byte(key)))), nil
 }
 
 func (s *PhotoService) SoundtrackPlaybackPath(photo *storage.Photo, index int) (string, error) {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -337,6 +338,10 @@ func (e *RequestError) Error() string {
 }
 
 func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username string, hooks LibraryAvailabilityHooks) settingsResponse {
+	return buildSettingsResponseWithLibraryDetails(cfg, profile, username, hooks, false)
+}
+
+func buildSettingsResponseWithLibraryDetails(cfg *config.Config, profile *config.Profile, username string, hooks LibraryAvailabilityHooks, includeDetails bool) settingsResponse {
 	if profile == nil {
 		profile = config.DefaultProfileFromConfig(cfg)
 	}
@@ -371,6 +376,10 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		}
 	}
 	playerKeymap := effectivePlayerKeymapContent(profile.Preferences.PlayerKeymap)
+	libraries := buildBasicLibraryResponses(cfg, username)
+	if includeDetails {
+		libraries = buildLibraryResponses(cfg, username, hooks)
+	}
 	return settingsResponse{
 		AppName:                       cfg.DisplayName(),
 		CurrentUsername:               map[bool]string{true: "root", false: username}[isRootConsoleSession(username)],
@@ -381,7 +390,7 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		Port:                          cfg.Port,
 		ActiveLibraryID:               activeLibraryID,
 		StoragePath:                   storagePath,
-		Libraries:                     buildLibraryResponses(cfg, username, hooks),
+		Libraries:                     libraries,
 		ThumbnailDir:                  profile.ThumbnailDir,
 		ThumbnailSize:                 512,
 		TrashDir:                      profile.TrashDir,
@@ -420,6 +429,34 @@ func buildSettingsResponse(cfg *config.Config, profile *config.Profile, username
 		PWAIconURL:                    pwaIconURL(cfg.Workshop.FaviconAsset),
 		LocalUpdateConfigText:         localUpdateText,
 	}
+}
+
+func buildBasicLibraryResponses(cfg *config.Config, username string) []libraryResponse {
+	if cfg == nil {
+		return nil
+	}
+	libraries := cfg.VisibleLibrariesForUser(username)
+	resp := make([]libraryResponse, 0, len(libraries))
+	for index, library := range libraries {
+		globalIndex := findGlobalLibraryIndex(cfg, library)
+		if globalIndex >= 0 {
+			index = globalIndex
+		}
+		status := strings.TrimSpace(library.Status)
+		if service.IsSMBPath(library.Path) || status == "" {
+			status = config.LibraryStatusReady
+		}
+		item := libraryResponse{
+			Index: index, ID: library.ID, Name: library.Name, Path: library.Path,
+			LogoAsset: strings.TrimSpace(library.LogoAsset), AccentColor: library.AccentColor,
+			Status: status, Available: status != config.LibraryStatusMissing && status != config.LibraryStatusLocked,
+		}
+		if item.LogoAsset != "" {
+			item.LogoImageURL = fmt.Sprintf("/api/settings/libraries/%d/logo?v=%s", index, url.QueryEscape(item.LogoAsset))
+		}
+		resp = append(resp, item)
+	}
+	return resp
 }
 
 type localUpdateConfigRequest struct {
@@ -598,6 +635,10 @@ func RefreshLibraryMetrics(cfg *config.Config, library config.Library) {
 }
 
 func readLibraryStatsFromDB(dbPath string) (libraryResponse, error) {
+	return readLibraryStatsFromDBContext(context.Background(), dbPath)
+}
+
+func readLibraryStatsFromDBContext(ctx context.Context, dbPath string) (libraryResponse, error) {
 	stats := libraryResponse{}
 	info, err := os.Stat(dbPath)
 	if err != nil {
@@ -612,21 +653,24 @@ func readLibraryStatsFromDB(dbPath string) (libraryResponse, error) {
 		return stats, err
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		return stats, err
 	}
-	if createdAt, ok := readLibraryCreatedAt(db); ok {
+	if createdAt, ok := readLibraryCreatedAtContext(ctx, db); ok {
 		stats.CreatedAt = formatLibraryStatTime(createdAt)
 	}
-	if snapshot, err := readLibraryScanSnapshot(db); err == nil && snapshot != nil && !snapshot.CompletedAt.IsZero() {
+	if snapshot, err := readLibraryScanSnapshotContext(ctx, db); err == nil && snapshot != nil && !snapshot.CompletedAt.IsZero() {
 		stats.LastScannedAt = formatLibraryStatTime(snapshot.CompletedAt)
 	}
-	if totalSize, photoCount, videoCount, unsupportedCount, ok := readLibraryMediaStats(db); ok {
+	if totalSize, photoCount, videoCount, unsupportedCount, ok := readLibraryMediaStatsContext(ctx, db); ok {
 		stats.TotalSize = totalSize
 		stats.TotalSizeText = formatLibraryBytes(totalSize)
 		stats.PhotoCount = photoCount
 		stats.VideoCount = videoCount
 		stats.UnsupportedMediaCount = unsupportedCount
+	}
+	if err := ctx.Err(); err != nil {
+		return libraryResponse{}, err
 	}
 	return stats, nil
 }
@@ -658,9 +702,13 @@ func storeCachedLibraryStats(dbPath string, info os.FileInfo, stats libraryRespo
 }
 
 func readLibraryCreatedAt(db *sql.DB) (time.Time, bool) {
+	return readLibraryCreatedAtContext(context.Background(), db)
+}
+
+func readLibraryCreatedAtContext(ctx context.Context, db *sql.DB) (time.Time, bool) {
 	var raw string
-	err := db.QueryRow(`SELECT uploaded_at FROM photos
-		WHERE deleted_at IS NULL AND ` + libraryMediaStatsPathPredicate + `
+	err := db.QueryRowContext(ctx, `SELECT uploaded_at FROM photos
+		WHERE deleted_at IS NULL AND `+libraryMediaStatsPathPredicate+`
 		ORDER BY uploaded_at ASC LIMIT 1`).Scan(&raw)
 	if err != nil || strings.TrimSpace(raw) == "" {
 		return time.Time{}, false
@@ -677,8 +725,12 @@ const libraryMediaStatsPathPredicate = `(
 )`
 
 func readLibraryMediaStats(db *sql.DB) (int64, int64, int64, int64, bool) {
+	return readLibraryMediaStatsContext(context.Background(), db)
+}
+
+func readLibraryMediaStatsContext(ctx context.Context, db *sql.DB) (int64, int64, int64, int64, bool) {
 	var totalSize, photoCount, videoCount, unsupportedCount sql.NullInt64
-	err := db.QueryRow(`
+	err := db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(SUM(size), 0),
 			COALESCE(SUM(CASE WHEN media_kind = 'image' THEN 1 ELSE 0 END), 0),
@@ -693,8 +745,12 @@ func readLibraryMediaStats(db *sql.DB) (int64, int64, int64, int64, bool) {
 }
 
 func readLibraryScanSnapshot(db *sql.DB) (*storage.LibraryScanSnapshot, error) {
+	return readLibraryScanSnapshotContext(context.Background(), db)
+}
+
+func readLibraryScanSnapshotContext(ctx context.Context, db *sql.DB) (*storage.LibraryScanSnapshot, error) {
 	var value string
-	if err := db.QueryRow(`SELECT value FROM app_meta WHERE key = ?`, "library_scan_snapshot").Scan(&value); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM app_meta WHERE key = ?`, "library_scan_snapshot").Scan(&value); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(value) == "" {
@@ -777,7 +833,13 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 	for index, library := range libraries {
 		globalIndex := findGlobalLibraryIndex(cfg, library)
 		status := strings.TrimSpace(library.Status)
-		if status == "" {
+		if service.IsSMBPath(library.Path) {
+			// The configured status can be stale (for example, the server was
+			// offline at startup). Report it as selectable; opening it performs
+			// the bounded connectivity check.
+			status = config.LibraryStatusReady
+		} else if status == "" {
+			status = config.LibraryStatusReady
 			status = config.DetectLibraryStatus(library.Path)
 		}
 		responseIndex := index
@@ -789,7 +851,7 @@ func buildLibraryResponses(cfg *config.Config, username string, hooks LibraryAva
 			cacheKey := config.NormalizeStoragePath(library.Path)
 			if cached, ok := libraryLogoAssetCache.Load(cacheKey); ok {
 				logoAsset, _ = cached.(string)
-			} else {
+			} else if !service.IsSMBPath(library.Path) {
 				_, logoAsset = resolveLibraryLogoPath(cfg, library)
 				libraryLogoAssetCache.Store(cacheKey, logoAsset)
 			}
@@ -1102,7 +1164,18 @@ func handleGetSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gin.H
 		if !ok {
 			return
 		}
-		c.JSON(http.StatusOK, buildSettingsResponse(cfg, profile, username, hooks))
+		c.JSON(http.StatusOK, buildSettingsResponseWithLibraryDetails(cfg, profile, username, hooks, false))
+	}
+}
+
+func handleGetSettingsLibraries(cfg *config.Config, hooks LibraryAvailabilityHooks) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		username := currentUsername(c)
+		profile, _, ok := requestVisibleProfile(c, cfg)
+		if !ok {
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"libraries": buildLibraryResponses(cfg, username, hooks), "storage_path": profile.StoragePath})
 	}
 }
 
@@ -1118,6 +1191,12 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		prevProfile, ok := requestProfile(c, cfg)
 		if !ok {
 			return
+		}
+		trace := func(string, ...any) {}
+		if req.ActiveLibraryID != prevProfile.ActiveLibraryID || req.StoragePath != prevProfile.StoragePath {
+			trace = librarySwitchLogger("save-selection")
+			trace("begin", "user=", username, " from=", prevProfile.ActiveLibraryID, " to=", req.ActiveLibraryID, " path=", req.StoragePath)
+			defer func() { trace("finished", "status=", c.Writer.Status()) }()
 		}
 		role := currentUserRole(cfg, username)
 		prevThumbnailDir := strings.TrimSpace(prevProfile.ThumbnailDir)
@@ -1178,6 +1257,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			nextProfile.Preferences.LowResourceMode = prevProfile.Preferences.LowResourceMode
 			nextProfile.Preferences.PlayerKeymap = prevProfile.Preferences.PlayerKeymap
 			if err := config.SaveProfile(cfg, username, nextProfile); err != nil {
+				trace("failed", "error=", err)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -1205,8 +1285,10 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 		nextGlobal.Libraries = preserveLibraryOwners(cfg.Libraries, nextGlobal.Libraries)
 		nextGlobal.Libraries = preserveLibraryStatuses(cfg.Libraries, nextGlobal.Libraries)
 		nextGlobal.NormalizeLibraries()
+		trace("validate-selection")
 		if hooks.ValidateLibrarySelection != nil {
 			if err := hooks.ValidateLibrarySelection(&nextGlobal, username, nextProfile.ActiveLibraryID); err != nil {
+				trace("validation-failed", "error=", err)
 				var requestErr *RequestError
 				if errors.As(err, &requestErr) {
 					c.JSON(requestErr.Status, gin.H{
@@ -1215,6 +1297,7 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 					})
 					return
 				}
+				trace("failed", "error=", err)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
@@ -1227,19 +1310,26 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 			nextProfile.StoragePath = ""
 		}
 		if err := savePlayerKeymapContent(nextProfile.Preferences.PlayerKeymap); err != nil {
+			trace("failed", "error=", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		trace("save-profile", "resolved_library=", nextProfile.ActiveLibraryID)
 		if err := config.SaveProfile(&nextGlobal, username, nextProfile); err != nil {
+			trace("failed", "error=", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		nextGlobal.ApplyProfile(nextProfile)
+		trace("save-library-metadata")
 		if err := persistChangedPortableLibraryMetadata(cfg.Libraries, &nextGlobal); err != nil {
+			trace("failed", "error=", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		trace("save-config")
 		if err := nextGlobal.Save(); err != nil {
+			trace("failed", "error=", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1307,6 +1397,7 @@ func handleRestartApp(restart func() error) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "服务正在重启"})
+		_ = http.NewResponseController(c.Writer).Flush()
 	}
 }
 
@@ -1321,6 +1412,7 @@ func handleShutdownApp(shutdown func() error) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "正在退出 EchoGallery"})
+		_ = http.NewResponseController(c.Writer).Flush()
 	}
 }
 

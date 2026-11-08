@@ -213,3 +213,68 @@ func TestRuntimeProviderRecordsNewLibraryIdentity(t *testing.T) {
 		t.Fatalf("新资源库身份未写入数据库: id=%s err=%v", id, err)
 	}
 }
+
+type pausedRuntimeStopper struct {
+	videoRegistrar
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (s *pausedRuntimeStopper) StopBackground() {
+	close(s.entered)
+	<-s.resume
+}
+
+func TestRuntimeReleaseDoesNotBlockOtherLibraries(t *testing.T) {
+	oldLibrary := config.Library{ID: "old", Name: "Old", Path: t.TempDir()}
+	newLibrary := config.Library{ID: "new", Name: "New", Path: t.TempDir()}
+	cfg := &config.Config{AppDataDir: t.TempDir(), StoragePath: oldLibrary.Path, Libraries: []config.Library{oldLibrary, newLibrary}}
+	provider, err := NewLibraryRuntimeProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	locks, err := sessionlock.New(filepath.Join(t.TempDir(), "locks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locks.Close()
+	if _, err := locks.Acquire(oldLibrary, "admin", "admin", "old-page", "browse"); err != nil {
+		t.Fatal(err)
+	}
+	registrar, err := provider.ForLibrary(cfg, oldLibrary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.rememberSession("old-page", oldLibrary.ID)
+	stopper := &pausedRuntimeStopper{videoRegistrar: registrar, entered: make(chan struct{}), resume: make(chan struct{})}
+	provider.mu.Lock()
+	provider.services[oldLibrary.ID] = stopper
+	provider.mu.Unlock()
+	released := make(chan error, 1)
+	go func() { released <- provider.SyncBeforeRelease(locks, "old-page", "") }()
+	defer func() {
+		close(stopper.resume)
+		if err := <-released; err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-stopper.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("release did not reach old-library shutdown")
+	}
+	opened := make(chan error, 1)
+	go func() {
+		_, err := provider.ForLibrary(cfg, newLibrary)
+		opened <- err
+	}()
+	select {
+	case err := <-opened:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("old-library shutdown blocked unrelated library initialization")
+	}
+}

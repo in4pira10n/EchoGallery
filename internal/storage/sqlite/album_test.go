@@ -63,6 +63,29 @@ func TestListAlbums_Success(t *testing.T) {
 	}
 }
 
+func TestAddPhotosToAlbum_BatchesAndDeduplicates(t *testing.T) {
+	db := newTestDB(t)
+	album := &storage.Album{Name: "Batch", CreatedBy: 1, CreatedAt: time.Now()}
+	if err := db.CreateAlbum(album); err != nil {
+		t.Fatal(err)
+	}
+	first, second := makePhoto(1, time.Now()), makePhoto(1, time.Now().Add(time.Second))
+	first.UUID, second.UUID = "batch-first", "batch-second"
+	if err := db.SavePhoto(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SavePhoto(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddPhotosToAlbum(album.ID, []int64{first.ID, second.ID, first.ID}, 1); err != nil {
+		t.Fatalf("批量添加失败: %v", err)
+	}
+	page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{AlbumID: album.ID, UserID: 1, Limit: 10})
+	if err != nil || len(page.Photos) != 2 {
+		t.Fatalf("期望去重后有 2 个媒体: page=%+v err=%v", page, err)
+	}
+}
+
 func TestListAlbumsForPhoto_Success(t *testing.T) {
 	db := newTestDB(t)
 	album1 := &storage.Album{Name: "A", CreatedBy: 1, CreatedAt: time.Now()}
@@ -199,6 +222,231 @@ func TestListAlbumPhotos_FolderAlbumUsesCurrentSourceRelPath(t *testing.T) {
 	}
 	if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
 		t.Fatalf("期望只按当前文件夹 source_rel_path 返回直接媒体，得到 %#v", page.Photos)
+	}
+}
+
+func TestFolderAlbumDirectMediaSupportsUnicodeAndLiteralPathCharacters(t *testing.T) {
+	db := newTestDB(t)
+	folderNames := []string{"🐱", "фотографии", "صور", "cafe\u0301", "space folder", "100%_ready"}
+	for i, folder := range folderNames {
+		album := &storage.Album{
+			Name:          folder,
+			Description:   "自动从文件夹导入",
+			SourceKind:    "folder",
+			SourceRelPath: folder,
+			CreatedBy:     1,
+			CreatedAt:     time.Now().Add(time.Duration(i) * time.Second),
+		}
+		if err := db.CreateAlbum(album); err != nil {
+			t.Fatalf("create folder album %q: %v", folder, err)
+		}
+		photo := makePhoto(1, time.Now().Add(time.Duration(i)*time.Minute))
+		photo.UUID = fmt.Sprintf("unicode-folder-%d", i)
+		photo.SourceRelPath = folder + "/IMG_9126.JPG"
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatalf("save photo for folder %q: %v", folder, err)
+		}
+
+		page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{AlbumID: album.ID, UserID: 1, Limit: 10})
+		if err != nil {
+			t.Fatalf("list direct media for folder %q: %v", folder, err)
+		}
+		if len(page.Photos) != 1 || page.Photos[0].ID != photo.ID {
+			t.Fatalf("folder %q should list its direct media, got %#v", folder, page.Photos)
+		}
+
+		located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+			AlbumID: album.ID,
+			UserID:  1,
+			PhotoID: photo.ID,
+			Limit:   10,
+		})
+		if err != nil {
+			t.Fatalf("locate photo in folder %q: %v", folder, err)
+		}
+		if located == nil || located.TargetIndex < 0 || located.TargetIndex >= len(located.Photos) || located.Photos[located.TargetIndex].ID != photo.ID {
+			t.Fatalf("folder %q should locate its direct media, got %#v", folder, located)
+		}
+	}
+}
+
+func TestFolderAlbumListsAndLocatesEveryDirectMediaWithNestedFolder(t *testing.T) {
+	db := newTestDB(t)
+	parent := &storage.Album{
+		Name:          "library/Photos",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "library/Photos",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	child := &storage.Album{
+		Name:          "library/Photos/Child",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "library/Photos/Child",
+		CreatedBy:     1,
+		CreatedAt:     time.Now().Add(time.Second),
+	}
+	if err := db.CreateAlbum(parent); err != nil {
+		t.Fatalf("create parent folder album: %v", err)
+	}
+	if err := db.CreateAlbum(child); err != nil {
+		t.Fatalf("create child folder album: %v", err)
+	}
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	direct := make([]*storage.Photo, 0, 4)
+	for i, name := range []string{"IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG", "IMG_0004.JPG"} {
+		photo := makePhoto(1, base.Add(time.Duration(i)*time.Hour))
+		photo.UUID = fmt.Sprintf("folder-direct-%d", i)
+		photo.OriginalName = name
+		photo.SourceRelPath = "library/Photos/" + name
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatalf("save direct media %q: %v", name, err)
+		}
+		direct = append(direct, photo)
+	}
+	for i, name := range []string{"nested-1.jpg", "nested-2.jpg"} {
+		photo := makePhoto(1, base.Add(time.Duration(i+10)*time.Hour))
+		photo.UUID = fmt.Sprintf("folder-nested-%d", i)
+		photo.OriginalName = name
+		photo.SourceRelPath = "library/Photos/Child/" + name
+		if err := db.SavePhoto(photo); err != nil {
+			t.Fatalf("save nested media %q: %v", name, err)
+		}
+	}
+
+	var listed []*storage.Photo
+	cursor := ""
+	for {
+		page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+			AlbumID: parent.ID,
+			UserID:  1,
+			Limit:   2,
+			Cursor:  cursor,
+		})
+		if err != nil {
+			t.Fatalf("list direct media page: %v", err)
+		}
+		listed = append(listed, page.Photos...)
+		if !page.HasMore {
+			break
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			t.Fatalf("pagination did not advance, cursor=%q next=%q", cursor, page.NextCursor)
+		}
+		cursor = page.NextCursor
+	}
+	if len(listed) != len(direct) {
+		t.Fatalf("folder listing should contain all %d direct media and no nested media; got %d: %#v", len(direct), len(listed), listed)
+	}
+	listedIDs := make(map[int64]bool, len(listed))
+	for _, photo := range listed {
+		listedIDs[photo.ID] = true
+	}
+	for _, photo := range direct {
+		if !listedIDs[photo.ID] {
+			t.Errorf("direct media %q was not listed", photo.OriginalName)
+		}
+		located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+			AlbumID: parent.ID,
+			UserID:  1,
+			PhotoID: photo.ID,
+			Limit:   2,
+		})
+		if err != nil {
+			t.Errorf("locate direct media %q: %v", photo.OriginalName, err)
+			continue
+		}
+		if located == nil || located.TargetIndex < 0 || located.TargetIndex >= len(located.Photos) || located.Photos[located.TargetIndex].ID != photo.ID {
+			t.Errorf("direct media %q did not resolve to its target in the album window: %#v", photo.OriginalName, located)
+		}
+	}
+}
+
+func TestListAlbumsCountsDirectFolderMedia(t *testing.T) {
+	db := newTestDB(t)
+	album := &storage.Album{
+		Name:          "🐱",
+		Description:   "自动从文件夹导入",
+		SourceKind:    "folder",
+		SourceRelPath: "🐱",
+		CreatedBy:     1,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateAlbum(album); err != nil {
+		t.Fatal(err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "direct-folder-count"
+	photo.SourceRelPath = "🐱/IMG_9126.JPG"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+
+	albums, err := db.ListAlbums(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 1 || albums[0].PhotoCount != 1 {
+		t.Fatalf("folder album should report one direct media item, got %#v", albums)
+	}
+	detail, err := db.GetAlbumByID(album.ID, 1)
+	if err != nil || detail == nil || detail.PhotoCount != 1 {
+		t.Fatalf("folder album detail should report one direct media item, got %#v, err=%v", detail, err)
+	}
+}
+
+func TestListAlbumsForRootMediaIncludesRootFolderAlbum(t *testing.T) {
+	db := newTestDB(t)
+	root := &storage.Album{
+		Name:        "根目录",
+		Description: "自动从文件夹导入",
+		SourceKind:  "folder",
+		CreatedBy:   1,
+		CreatedAt:   time.Now(),
+	}
+	if err := db.CreateAlbum(root); err != nil {
+		t.Fatal(err)
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "root-folder-direct-media"
+	photo.SourceRelPath = "IMG_9126.JPG"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+
+	albums, err := db.ListAlbumsForPhoto(photo.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 1 || albums[0].ID != root.ID || albums[0].PhotoCount != 1 {
+		t.Fatalf("root media should resolve to the root folder album with its direct media count, got %#v", albums)
+	}
+}
+
+func TestListAlbumsForRootMediaHidesDuplicateRootAlbums(t *testing.T) {
+	db := newTestDB(t)
+	first := &storage.Album{Name: "根目录", Description: "自动从文件夹导入", SourceKind: "folder", CreatedBy: 1, CreatedAt: time.Now().Add(-time.Hour)}
+	second := &storage.Album{Name: "根目录", Description: "自动从文件夹导入", SourceKind: "folder", CreatedBy: 1, CreatedAt: time.Now()}
+	for _, album := range []*storage.Album{first, second} {
+		if err := db.CreateAlbum(album); err != nil {
+			t.Fatal(err)
+		}
+	}
+	photo := makePhoto(1, time.Now())
+	photo.UUID = "duplicate-root-media"
+	photo.SourceRelPath = "IMG_9126.JPG"
+	if err := db.SavePhoto(photo); err != nil {
+		t.Fatal(err)
+	}
+	albums, err := db.ListAlbumsForPhoto(photo.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 1 || albums[0].ID != first.ID {
+		t.Fatalf("媒体菜单应只显示相册列表中的根目录记录，得到 %#v", albums)
 	}
 }
 
@@ -442,6 +690,37 @@ func makeAlbumWithPhotos(t *testing.T, db *DB, names []string, sizes []int64) (*
 		photos = append(photos, p)
 	}
 	return album, photos
+}
+
+func TestLocateAlbumWindowCountsOnlyUnloadedPrefix(t *testing.T) {
+	db := newTestDB(t)
+	album, _ := makeAlbumWithPhotos(t, db,
+		[]string{"1.png", "2.png", "9.png", "10.png", "11.png", "90.png", "100.png", "101.png"},
+		[]int64{80, 10, 60, 30, 50, 20, 40, 70},
+	)
+	for _, sort := range []string{"name", "timeline_desc", "timeline_asc", "size"} {
+		page, err := db.ListAlbumPhotos(storage.ListAlbumPhotosParams{
+			AlbumID: album.ID, UserID: 1, Limit: 30, Sort: sort,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rank, photo := range page.Photos {
+			located, err := db.LocateAlbumWindow(storage.LocateAlbumParams{
+				AlbumID: album.ID, UserID: 1, PhotoID: photo.ID, Limit: 2, Sort: sort,
+			})
+			if err != nil || located == nil {
+				t.Fatalf("sort=%s rank=%d: locate failed: %v", sort, rank, err)
+			}
+			want := max(0, rank-2)
+			if located.MissingBeforeCount != want || located.HasBefore != (want > 0) {
+				t.Fatalf("sort=%s rank=%d: missing=%d before=%v, want missing=%d", sort, rank, located.MissingBeforeCount, located.HasBefore, want)
+			}
+			if located.MissingBeforeCount+located.TargetIndex != rank {
+				t.Fatalf("sort=%s rank=%d: target was shifted by duplicate placeholders", sort, rank)
+			}
+		}
+	}
 }
 
 func TestLocateAlbumWindow_NameSortProvidesStableNextCursor(t *testing.T) {

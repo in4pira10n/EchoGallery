@@ -1,33 +1,36 @@
 package api
 
 import (
+	"echogallery/internal/service"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
 type LibraryBuildStatus struct {
-	Status            string  `json:"status"`
-	Message           string  `json:"message"`
-	Done              int     `json:"done"`
-	Total             int     `json:"total"`
-	Imported          int     `json:"imported"`
-	Skipped           int     `json:"skipped"`
-	Pruned            int     `json:"pruned"`
-	StartedAt         string  `json:"started_at,omitempty"`
-	UpdatedAt         string  `json:"updated_at,omitempty"`
-	FinishedAt        string  `json:"finished_at,omitempty"`
-	ElapsedSeconds    int64   `json:"elapsed_seconds"`
-	ETASeconds        int64   `json:"eta_seconds"`
-	Percent           float64 `json:"percent"`
-	ExitAfterComplete bool    `json:"exit_after_complete"`
-	Error             string  `json:"error,omitempty"`
+	Discovery         *service.LibraryScanProgress `json:"discovery,omitempty"`
+	Status            string                       `json:"status"`
+	Message           string                       `json:"message"`
+	Done              int                          `json:"done"`
+	Total             int                          `json:"total"`
+	Imported          int                          `json:"imported"`
+	Skipped           int                          `json:"skipped"`
+	Pruned            int                          `json:"pruned"`
+	StartedAt         string                       `json:"started_at,omitempty"`
+	UpdatedAt         string                       `json:"updated_at,omitempty"`
+	FinishedAt        string                       `json:"finished_at,omitempty"`
+	ElapsedSeconds    int64                        `json:"elapsed_seconds"`
+	ETASeconds        int64                        `json:"eta_seconds"`
+	Percent           float64                      `json:"percent"`
+	ExitAfterComplete bool                         `json:"exit_after_complete"`
+	Error             string                       `json:"error,omitempty"`
 }
 
 type LibraryBuildHooks struct {
 	Status               func() LibraryBuildStatus
 	RefreshMetrics       func()
 	SetExitAfterComplete func(enabled bool) (LibraryBuildStatus, error)
+	Retry                func() (LibraryBuildStatus, error)
 	Cancel               func() (LibraryBuildStatus, error)
 }
 
@@ -81,5 +84,20 @@ func handleCancelLibraryBuild(hooks LibraryBuildHooks) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, status)
+	}
+}
+
+func handleRetryLibraryBuild(hooks LibraryBuildHooks) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if hooks.Retry == nil {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "Scan retry unavailable"})
+			return
+		}
+		status, err := hooks.Retry()
+		if err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusAccepted, status)
 	}
 }

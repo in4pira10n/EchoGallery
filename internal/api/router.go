@@ -197,6 +197,10 @@ type albumMediaRequest struct {
 	PhotoID int64 `json:"photo_id"`
 }
 
+type albumMediaBatchRequest struct {
+	MediaIDs []int64 `json:"media_ids"`
+}
+
 type favoriteRequest struct {
 	Favorite      bool `json:"favorite"`
 	SuperFavorite bool `json:"super_favorite"`
@@ -357,6 +361,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.POST("/api/auth/library-fallback", authRequired, handleFallbackLibrary(cfg, options))
 	r.POST("/api/auth/session/release", handlePageSessionRelease(cfg, options))
 	r.GET("/api/settings", authRequired, handleGetSettings(cfg, libraryHooks))
+	r.GET("/api/settings/libraries", authRequired, handleGetSettingsLibraries(cfg, libraryHooks))
 	r.PUT("/api/settings", authRequired, handleUpdateSettings(cfg, libraryHooks))
 	r.GET("/api/settings/transfer/export", authRequired, adminOrRootRequired, handleExportConfigTransfer(cfg))
 	r.POST("/api/settings/transfer/import", authRequired, adminOrRootRequired, handleImportConfigTransfer(cfg, restart))
@@ -370,6 +375,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	r.GET("/api/library-build/status", authRequired, adminRequired, handleGetLibraryBuildStatus(buildHooks))
 	r.POST("/api/library-scan/refresh", authRequired, libraryRuntimeRequired, handleRefreshCurrentLibrary(cfg, registrar))
 	r.PUT("/api/library-build/exit-after-complete", authRequired, adminRequired, handleSetLibraryBuildExitAfterComplete(buildHooks))
+	r.POST("/api/library-build/retry", authRequired, adminRequired, handleRetryLibraryBuild(buildHooks))
 	r.DELETE("/api/library-build", authRequired, adminRequired, handleCancelLibraryBuild(buildHooks))
 	r.GET("/api/settings/libraries/build-all", authRequired, adminOrRootRequired, handleGetLibraryBatchBuildStatus(cfg, batchBuildHooks))
 	r.POST("/api/settings/libraries/build-all", authRequired, adminOrRootRequired, handleStartLibraryBatchBuild(cfg, batchBuildHooks))
@@ -430,6 +436,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/albums/:id", handleListAlbumMedia(cfg, registrar))
 		media.POST("/albums/:id/reveal", adminRequired, handleRevealAlbumInFinder(cfg, registrar))
 		media.POST("/albums/:id", writableRequired, handleAddMediaToAlbum(cfg, registrar))
+		media.POST("/albums/:id/batch", writableRequired, handleAddMediaBatchToAlbum(cfg, registrar))
 		media.PUT("/albums/:id", writableRequired, handleUpdateAlbumMedia(cfg, registrar))
 		media.DELETE("/albums/:id", writableRequired, handleDeleteAlbumMedia(cfg, registrar))
 		media.DELETE("/albums/:id/:mediaId", writableRequired, handleRemoveMediaFromAlbum(cfg, registrar))
@@ -442,6 +449,7 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 		media.GET("/search", handleSearchMedia(cfg, registrar))
 		media.GET("/random", handleListRandomMedia(cfg, registrar))
 		media.POST("/thumbnails/warm", handleWarmVisibleThumbnails(cfg, registrar))
+		media.POST("/:id/thumbnail/refresh", adminRequired, handleRefreshVideoThumbnail(cfg, registrar))
 		media.POST("/:id/playback-error", handleReportPlaybackError(cfg, registrar))
 		media.GET("/favorites", handleListFavoriteMedia(cfg, registrar))
 		media.GET("/trash", handleListTrashMedia(cfg, registrar))
@@ -491,6 +499,57 @@ func NewRouterWithStaticWithLifecycleAndBuild(cfg *config.Config, staticFS fs.FS
 	})
 
 	return r
+}
+
+func handleRefreshVideoThumbnail(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid media id"})
+			return
+		}
+		activeRegistrar := requestRegistrar(c, registrar)
+		if activeRegistrar == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media service unavailable"})
+			return
+		}
+		refresher, ok := activeRegistrar.(interface {
+			RefreshVideoThumbnail(int64, int64) (int64, error)
+		})
+		if !ok {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "video thumbnail refresh is unavailable"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, requestConfig(c, cfg))
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		version, err := refresher.RefreshVideoThumbnail(id, userID)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+			return
+		}
+		photo, err := activeRegistrar.GetPhoto(id, userID)
+		if err != nil || photo == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "refreshed thumbnail could not be mapped"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"uuid":          photo.UUID,
+			"version":       version,
+			"thumbnail_url": fmt.Sprintf("/media/thumbnails/%s?v=%d", url.PathEscape(photo.UUID), version),
+		})
+		thumbnailPathCache.Range(func(key, value any) bool {
+			for _, candidate := range activeRegistrar.ThumbnailCandidates(photo) {
+				if path, ok := value.(string); ok && filepath.Clean(path) == filepath.Clean(candidate) {
+					thumbnailPathCache.Delete(key)
+					break
+				}
+			}
+			return true
+		})
+	}
 }
 
 func compactGinLogger() gin.HandlerFunc {
@@ -1576,6 +1635,66 @@ func handleAddMediaToAlbum(cfg *config.Config, registrar videoRegistrar) gin.Han
 	}
 }
 
+func handleAddMediaBatchToAlbum(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		registrar := requestRegistrar(c, registrar)
+		if registrar == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "媒体服务未配置"})
+			return
+		}
+		userID, err := currentLibraryUserID(c, cfg)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		albumID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil || albumID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "相册ID 无效"})
+			return
+		}
+		var req albumMediaBatchRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求体"})
+			return
+		}
+		ids := make([]int64, 0, len(req.MediaIDs))
+		seen := make(map[int64]struct{}, len(req.MediaIDs))
+		for _, id := range req.MediaIDs {
+			if id <= 0 {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		if len(ids) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "media_ids 不能为空"})
+			return
+		}
+		if batcher, ok := registrar.(interface {
+			AddPhotosToAlbum(albumID int64, mediaIDs []int64, userID int64) error
+		}); ok {
+			if err := batcher.AddPhotosToAlbum(albumID, ids, userID); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"added": len(ids), "failed": 0})
+			return
+		}
+		added, failed := 0, 0
+		for _, id := range ids {
+			if err := registrar.AddPhoto(albumID, id, userID); err != nil {
+				failed++
+				continue
+			}
+			added++
+		}
+		c.JSON(http.StatusOK, gin.H{"added": added, "failed": failed})
+	}
+}
+
 func handleRemoveMediaFromAlbum(cfg *config.Config, registrar videoRegistrar) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		registrar := requestRegistrar(c, registrar)
@@ -1986,6 +2105,11 @@ func resolveExistingThumbnailPath(preferredPath string) string {
 }
 
 func resolveExistingThumbnailCandidates(paths ...string) string {
+	path, _ := resolveExistingThumbnailCandidate(paths...)
+	return path
+}
+
+func resolveExistingThumbnailCandidate(paths ...string) (string, os.FileInfo) {
 	keyParts := make([]string, 0, len(paths))
 	for _, path := range paths {
 		path = strings.TrimSpace(path)
@@ -1995,22 +2119,24 @@ func resolveExistingThumbnailCandidates(paths ...string) string {
 		keyParts = append(keyParts, path)
 	}
 	if len(keyParts) == 0 {
-		return ""
+		return "", nil
 	}
 	key := strings.Join(keyParts, "\x00")
 	if cached, ok := thumbnailPathCache.Load(key); ok {
-		if path, ok := cached.(string); ok && resolveExistingThumbnailPath(path) != "" {
-			return path
+		if path, ok := cached.(string); ok {
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				return path, info
+			}
 		}
 		thumbnailPathCache.Delete(key)
 	}
 	for _, path := range keyParts {
-		if resolved := resolveExistingThumbnailPath(path); resolved != "" {
-			thumbnailPathCache.Store(key, resolved)
-			return resolved
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			thumbnailPathCache.Store(key, path)
+			return path, info
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func thumbnailCandidatePaths(registrar videoRegistrar, photo *storage.Photo) []string {
@@ -2034,7 +2160,11 @@ func enrichPhotoThumbnailFields(registrar videoRegistrar, photo *storage.Photo) 
 	}
 	thumbURL := mediaThumbURLForUUID(photo.UUID)
 	photo.ThumbnailURL = thumbURL
-	photo.ThumbnailReady = resolveExistingThumbnailCandidates(thumbnailCandidatePaths(registrar, photo)...) != ""
+	thumbPath, thumbInfo := resolveExistingThumbnailCandidate(thumbnailCandidatePaths(registrar, photo)...)
+	photo.ThumbnailReady = thumbPath != ""
+	if photo.ThumbnailReady && thumbInfo != nil {
+		photo.ThumbnailURL += "?v=" + strconv.FormatInt(thumbInfo.ModTime().UnixNano(), 10)
+	}
 	if photo.ThumbnailReady && (image.IsHEIFMimeType(photo.MimeType) || image.IsHEIFFilename(photo.OriginalName)) {
 		provider, ok := registrar.(interface {
 			OriginalPreviewPath(*storage.Photo) string
@@ -2044,7 +2174,7 @@ func enrichPhotoThumbnailFields(registrar videoRegistrar, photo *storage.Photo) 
 		}
 	}
 	if photo.MediaKind == storage.MediaKindVideo {
-		photo.PosterURL = thumbURL
+		photo.PosterURL = photo.ThumbnailURL
 		photo.PosterReady = photo.ThumbnailReady
 	}
 }
@@ -3321,12 +3451,21 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 		}
 		role := currentUserRole(cfg, username)
 		sessionID := currentPageSessionID(c)
+		trace := func(string, ...any) {}
+		if options.RuntimeProvider.sessionLibraryChanged(sessionID, library.ID) {
+			trace = librarySwitchLogger("enter-library")
+			trace("begin", "user=", username, " library=", library.ID, " path=", library.Path, " request=", c.Request.URL.Path)
+			defer func() { trace("finished", "status=", c.Writer.Status(), " errors=", c.Errors.String()) }()
+		}
 		if options.LockStore != nil {
+			trace("sync-previous-start")
 			if err := options.RuntimeProvider.SyncBeforeRelease(options.LockStore, sessionID, library.ID); err != nil {
 				_ = c.Error(err)
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "旧资源库同步失败，暂未释放占用，请重试"})
 				return
 			}
+			trace("sync-previous-complete")
+			trace("acquire-browse-lease")
 			if _, err := options.LockStore.Acquire(library, username, role, sessionID, "browse"); err != nil {
 				_ = c.Error(fmt.Errorf("library %s lock: %w", library.ID, err))
 				if _, ok := err.(*sessionlock.ConflictError); ok {
@@ -3337,7 +3476,12 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 				c.Abort()
 				return
 			}
-			_ = options.LockStore.ReleaseScopeForSessionExcept(sessionID, "browse", library.ID)
+			trace("browse-lease-acquired")
+			if err := options.LockStore.ReleaseScopeForSessionExcept(sessionID, "browse", library.ID); err != nil {
+				trace("release-old-lease-failed", "error=", err)
+			} else {
+				trace("old-lease-released")
+			}
 		}
 
 		reqCfg := *cfg
@@ -3346,9 +3490,11 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 		reqCfg.StoragePath = library.Path
 		c.Set(string(requestConfigContextKey), &reqCfg)
 		if options.RuntimeProvider != nil {
-			releaseRequest := options.RuntimeProvider.beginRequest()
+			trace("wait-runtime-request")
+			releaseRequest := options.RuntimeProvider.beginRequest(library.ID)
 			defer releaseRequest()
-			registrar, err := options.RuntimeProvider.ForLibrary(&reqCfg, library)
+			trace("runtime-resolve-start")
+			registrar, err := options.RuntimeProvider.forLibrary(&reqCfg, library)
 			if err != nil {
 				_ = c.Error(fmt.Errorf("load library %s at %s: %w", library.ID, library.Path, err))
 				if errors.Is(err, sqlite.ErrPortableLibraryOccupied) {
@@ -3359,11 +3505,19 @@ func libraryRuntimeMiddleware(cfg *config.Config, options RouterOptions) gin.Han
 				c.Abort()
 				return
 			}
+			trace("runtime-ready")
 			c.Set(string(requestRegistrarContextKey), registrar)
 			if options.RuntimeProvider.enterSessionLibrary(sessionID, library.ID) {
-				RefreshLibraryMetrics(cfg, library)
+				// Settings use library_metrics.json while fresh SQLite statistics
+				// are collected after the foreground response has been produced.
+				defer func() {
+					if c.Request.Context().Err() == nil {
+						scheduleLibraryMetricsRefresh(cfg, library, options.RuntimeProvider)
+					}
+				}()
 			}
 		}
+		trace("request-handler-start")
 		c.Next()
 	}
 }

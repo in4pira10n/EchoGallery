@@ -73,7 +73,7 @@ func (s *DB) Close() error {
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
 	if s.portableCopy != nil {
-		if err := s.portableCopy.sync(true); err != nil {
+		if err := s.portableCopy.sync(); err != nil {
 			return err
 		}
 	}
@@ -158,13 +158,15 @@ func (s *DB) migrate() error {
 	if _, err := s.db.Exec(`
 		UPDATE photos
 		SET source_rel_path = trim(replace(source_rel_path, '\', '/'), '/')
-		WHERE source_rel_path <> ''`); err != nil {
+		WHERE source_rel_path <> ''
+		  AND source_rel_path <> trim(replace(source_rel_path, '\', '/'), '/')`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`
 		UPDATE albums
 		SET source_rel_path = trim(replace(source_rel_path, '\', '/'), '/')
-		WHERE source_rel_path <> ''`); err != nil {
+		WHERE source_rel_path <> ''
+		  AND source_rel_path <> trim(replace(source_rel_path, '\', '/'), '/')`); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`
@@ -258,6 +260,9 @@ func (s *DB) migrate() error {
 		return err
 	}
 	if err := s.ensureColumn("video_playback_preferences", "audio_track_json", `ALTER TABLE video_playback_preferences ADD COLUMN audio_track_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensurePhotoSearchIndex(); err != nil {
 		return err
 	}
 	return nil

@@ -16,6 +16,7 @@ test('portable browser settings use an explicit whitelist', () => {
     pwaSettingsStorageKey: 'pwa', mediaKindFilterStorageKey: 'filter', timelineOrderStorageKey: 'timeline',
     albumDetailSortStorageKey: 'album', globalVideoVolumeStorageKey: 'volume',
     libraryBatchWorkflowEnabledStorageKey: 'batch-enabled', libraryBatchWorkflowAggressiveStorageKey: 'batch-fast',
+    libraryBatchWorkflowEXIFStorageKey: 'batch-exif',
     localStorage: {
       getItem: key => values.has(key) ? values.get(key) : null,
       setItem: (key, value) => values.set(key, value),

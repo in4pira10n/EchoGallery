@@ -19,6 +19,8 @@ function harness(videoMode = false) {
     state: { lightboxPhotos: [photo, { id: 2 }], lightboxIndex: 0, lightboxZoom: 100 },
     document: { querySelector: () => modal ? {} : null },
     window: { innerWidth: 600, innerHeight: 600 },
+    getComputedStyle: () => ({ transform: 'matrix(1, 0, 0, 1, -80, 0)' }),
+    DOMMatrixReadOnly: class { constructor() { this.m41 = -80; } },
     $: selector => selector === '.lightbox-body' ? body : media,
     lightboxIsInteractive: () => open,
     isVideoMedia: photo => photo?.media_kind === 'video',
@@ -91,12 +93,10 @@ test('precision horizontal scroll follows every delta beyond the threshold and s
   assert.equal(h.calls.filter(c => c[0] === 'preview').at(-1)[1], -220);
   assert.equal(h.calls.filter(c => c[0] === 'begin-photo').length, 1);
   h.flush();
-  assert.equal(h.calls.filter(c => c[0] === 'end-photo').length, 1);
+  assert.equal(h.calls.filter(c => c[0] === 'end-photo').length, 0);
   h.context.handleLightboxTrackpadWheel(h.event(2, 0));
   assert.equal(h.calls.filter(c => c[0] === 'begin-photo').length, 1);
-  h.flush();
-  h.context.handleLightboxTrackpadWheel(h.event(-80, 0));
-  assert.equal(h.calls.filter(c => c[0] === 'begin-photo').length, 2);
+  assert.equal(h.calls.filter(c => c[0] === 'preview').at(-1)[1], -82);
 });
 
 test('downward content dragging reuses dismiss feedback for both photos and videos', () => {
@@ -118,7 +118,19 @@ test('photo drag can reverse after crossing the threshold and snap back without 
   assert.equal(h.calls.filter(c => c[0] === 'preview').at(-1)[1], -15);
   h.flush();
   assert.equal(h.calls.filter(c => c[0] === 'navigate').length, 0);
-  assert.ok(h.calls.some(c => c[0] === 'reset-preview' && c[1]?.animate));
+  assert.equal(h.calls.filter(c => c[0] === 'preview').at(-1)[1], 0);
+});
+
+test('new trackpad input interrupts a pending navigation from its current visual position', async () => {
+  const h = harness();
+  h.context.handleLightboxTrackpadWheel(h.event(180, 0));
+  h.flush();
+  h.context.handleLightboxTrackpadWheel(h.event(-75, 0));
+  assert.equal(h.calls.filter(c => c[0] === 'preview').at(-1)[1], -5);
+  h.flush();
+  h.flush();
+  await new Promise(setImmediate);
+  assert.equal(h.calls.filter(c => c[0] === 'navigate').length, 0);
 });
 
 test('photo navigation is decided from the final displacement after input ends', async () => {

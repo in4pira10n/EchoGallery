@@ -3022,7 +3022,7 @@ body.selection-mode .date-select-all {
 .lightbox-video-progress-markers {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 5;
 }
 
 .lightbox-video-progress-marker {
@@ -3051,17 +3051,97 @@ body.selection-mode .date-select-all {
 .lightbox-video-progress-marker::before {
   content: "";
   position: absolute;
-  inset: 9px;
+  inset: 10px;
   border: 2px solid #fff;
   border-radius: inherit;
   background: var(--accent);
   box-shadow: 0 0 0 2px rgba(0, 0, 0, .28), 0 0 14px var(--accent-soft);
   z-index: -1;
-  transition: inset var(--lightbox-progress-transition), transform var(--lightbox-press-transition);
+  transition: inset .46s cubic-bezier(.22, 1, .36, 1), transform var(--lightbox-press-transition);
 }
 
-.lightbox-video-progress-marker:hover::before {
-  inset: 8px;
+.lightbox-video-progress-marker::after {
+  content: attr(data-bookmark-label);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  z-index: 4;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 24px));
+  overflow: hidden;
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 999px;
+  background: rgba(38, 38, 38, .72);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, .24);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  backdrop-filter: blur(16px) saturate(1.2);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 8px) scale(.68);
+  transform-origin: center calc(100% + 24px);
+  visibility: hidden;
+  transition: opacity .18s ease, transform .42s cubic-bezier(.23, 1, .32, 1), visibility 0s linear .42s;
+}
+
+@keyframes lightbox-bookmark-pop-from-dot {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px) scale(.68);
+  }
+  72% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@keyframes lightbox-bookmark-dot-pop {
+  0% { transform: scale(.82); }
+  72% { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+
+.lightbox-video-progress-marker:focus-visible::after,
+.lightbox-video-progress-marker.is-announced::after {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.lightbox-video-progress-marker.is-announced::before {
+  inset: 9px;
+  animation: lightbox-bookmark-dot-pop .46s cubic-bezier(.23, 1, .32, 1);
+}
+
+.lightbox-video-progress-marker.is-announced::after {
+  animation: lightbox-bookmark-pop-from-dot .42s cubic-bezier(.23, 1, .32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lightbox-video-progress-marker:hover::after {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+    visibility: visible;
+    transition-delay: 0s;
+    animation: lightbox-bookmark-pop-from-dot .42s cubic-bezier(.23, 1, .32, 1);
+  }
+
+  .lightbox-video-progress-marker:hover::before {
+    inset: 9px;
+    animation: lightbox-bookmark-dot-pop .46s cubic-bezier(.23, 1, .32, 1);
+  }
 }
 
 .lightbox-video-progress-marker:active::before {
@@ -3375,7 +3455,7 @@ body.selection-mode .date-select-all {
 
 .lightbox-bookmark-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
+  grid-template-columns: 36px minmax(0, 1fr) auto 34px;
   align-items: center;
   gap: 7px;
   height: 36px;
@@ -3411,7 +3491,51 @@ body.selection-mode .date-select-all {
 }
 
 .lightbox-bookmark-jump-standalone {
-  flex: 0 0 36px;
+  display: flex;
+  width: 36px;
+  margin-left: 3px;
+  padding: 0 5px;
+  border-radius: 50%;
+  box-shadow: none;
+}
+
+@media (hover: hover) {
+  .lightbox-bookmark-jump-standalone:hover {
+    background: transparent;
+  }
+
+  .lightbox-bookmark-jump-standalone:hover:not(:active) .lightbox-bookmark-slot {
+    transform: scale(1.12);
+  }
+}
+
+.lightbox-bookmark-empty {
+  grid-column: 1 / -1;
+  opacity: .4;
+}
+
+.lightbox-bookmark-name {
+  min-width: 0;
+  width: 100%;
+  padding: 4px 2px;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.lightbox-bookmark-name::placeholder { color: var(--text); opacity: 1; }
+.lightbox-bookmark-name:focus { border-bottom-color: var(--accent); }
+
+.lightbox-bookmark-time {
+  border: 0;
+  padding: 4px;
+  background: transparent;
+  color: var(--text2);
+  font: inherit;
+  cursor: pointer;
 }
 
 .lightbox-bookmark-slot {
@@ -3593,13 +3717,6 @@ body.selection-mode .date-select-all {
   font-weight: 700;
   /* letter-spacing: .02em; */
   text-shadow: 0 1px 8px rgba(0, 0, 0, .38);
-}
-
-body.lightbox-page-lock {
-  position: fixed;
-  left: 0;
-  width: 100%;
-  overflow: hidden;
 }
 
 .blocking-progress {
@@ -7705,6 +7822,10 @@ html.echo-frame-open { overflow: hidden; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin-top: 4px;
+}
+
+.settings-share-bulk-actions[hidden] {
+  display: none;
 }
 
 .settings-share-bulk-actions .btn:last-child {

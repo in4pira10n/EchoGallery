@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/jpeg"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,50 @@ func TestBatchLegacyThumbnailMigrationRestoresUUIDAndCopiesFile(t *testing.T) {
 	}
 	if got, err := repo.GetPhotoBySourceRelPath("a.jpg", 1); err != nil || got.UUID != oldID {
 		t.Fatalf("新版媒体 UUID 不正确: %+v, %v", got, err)
+	}
+}
+
+func TestGracefulShutdownCancelsActiveRequest(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serveWithGracefulShutdown(ctx, listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(entered)
+			<-r.Context().Done()
+		}))
+	}()
+	responseDone := make(chan struct{})
+	go func() {
+		defer close(responseDone)
+		response, err := http.Get("http://" + listener.Addr().String())
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach handler")
+	}
+	cancel()
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("graceful shutdown failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown waited for the HTTP timeout instead of cancelling the request")
+	}
+	select {
+	case <-responseDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled client request did not finish")
 	}
 }
 
@@ -174,7 +219,7 @@ func TestBatchThumbnailStartRejectsPausedMigration(t *testing.T) {
 func TestBatchScanStartRejectsPausedMigration(t *testing.T) {
 	cfg := &config.Config{StoragePath: t.TempDir(), AppDataDir: t.TempDir()}
 	manager := newLibraryBatchBuildManager(nil, nil, "")
-	_, err := manager.Start(cfg, &config.Profile{}, "alice", 1, false, true, false, true, false, false)
+	_, err := manager.Start(cfg, &config.Profile{}, "alice", 1, false, true, false, true, false, false, false)
 	if err == nil || manager.task != nil {
 		t.Fatalf("扫描任务也应拒绝迁移参数: %v", err)
 	}
@@ -251,9 +296,10 @@ func TestBatchScanRechecksCompletedInactiveLibrary(t *testing.T) {
 		completed <- struct{}{}
 		return nil
 	}
-	run := func(completeEXIF bool) api.LibraryBatchBuildStatus {
+	run := func(completeEXIF bool, cleanFiles ...bool) api.LibraryBatchBuildStatus {
 		t.Helper()
-		if _, err := manager.Start(cfg, profile, "admin", 1, false, true, completeEXIF, false, false, false); err != nil {
+		clean := len(cleanFiles) > 0 && cleanFiles[0]
+		if _, err := manager.Start(cfg, profile, "admin", 1, false, true, completeEXIF, false, false, false, clean); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -278,7 +324,7 @@ func TestBatchScanRechecksCompletedInactiveLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := run(false)
-	if row := status.Libraries[0]; row.Imported != 1 || row.Pruned != 1 || row.MessageKey != "" {
+	if row := status.Libraries[0]; row.Imported != 1 || row.Pruned != 0 || row.MessageKey != "" {
 		t.Fatalf("inactive library changes were skipped or hidden by a stale message: %+v", row)
 	}
 	if status.MessageKey != "" || status.Libraries[1].MessageKey != "batchWorkflow.scanSkipped" {
@@ -316,6 +362,31 @@ func TestBatchScanRechecksCompletedInactiveLibrary(t *testing.T) {
 	}
 	if row := status.Libraries[0]; row.MessageKey != "batchWorkflow.scanSkippedExifCompleted" || row.EXIFScanned != 2 {
 		t.Fatalf("an unchanged library with the EXIF option enabled must still report its metadata pass: %+v", row)
+	}
+	missing, err := repo.GetPhotoBySourceRelPath("old.jpg", userID)
+	if err != nil || missing == nil {
+		t.Fatalf("cleanup defaults off and must preserve the missing record: %+v %v", missing, err)
+	}
+	cache := svc.ThumbnailPath(missing)
+	if err := os.MkdirAll(filepath.Dir(cache), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache, []byte("old thumbnail"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Close(); err != nil {
+		t.Fatal(err)
+	}
+	status = run(false, true)
+	if row := status.Libraries[0]; row.Pruned != 1 || row.Imported != 0 {
+		t.Fatalf("explicit cleanup must audit an unchanged completed library: %+v", row)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left thumbnail: %v", err)
+	}
+	status = run(false, true)
+	if status.Libraries[0].Pruned != 0 {
+		t.Fatalf("retry repeated completed cleanup: %+v", status)
 	}
 }
 

@@ -1,5 +1,7 @@
 package service
 
+import "context"
+
 // RunBackground includes startup scans in the same shutdown barrier.
 func (s *PhotoService) RunBackground(work func()) bool { return s.background(work) }
 
@@ -15,13 +17,29 @@ func (s *PhotoService) background(work func()) bool {
 	return true
 }
 
-// StopBackground cancels queued work and waits for in-flight writes to finish.
-func (s *PhotoService) StopBackground() {
+func (s *PhotoService) backgroundContext() context.Context {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.workerContext == nil {
+		s.workerContext, s.workerCancel = context.WithCancel(context.Background())
+		if s.closing {
+			s.workerCancel()
+		}
+	}
+	return s.workerContext
+}
+
+// CancelBackground interrupts subprocesses and rejects new work without waiting
+// for request gates. StopBackground remains the barrier before closing SQLite.
+func (s *PhotoService) CancelBackground() {
 	s.lifecycleMu.Lock()
 	if !s.closing {
 		s.closing = true
 		if s.workerStop != nil {
 			close(s.workerStop)
+		}
+		if s.workerCancel != nil {
+			s.workerCancel()
 		}
 	}
 	s.lifecycleMu.Unlock()
@@ -39,6 +57,11 @@ func (s *PhotoService) StopBackground() {
 	}
 	s.exifBackfillMu.Unlock()
 	s.CancelPlaybackCacheBuild(0)
+}
+
+// StopBackground cancels queued work and waits for in-flight writes to finish.
+func (s *PhotoService) StopBackground() {
+	s.CancelBackground()
 	s.workerWG.Wait()
 	s.scanMu.Lock()
 	s.scanMu.Unlock()

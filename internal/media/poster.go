@@ -23,24 +23,62 @@ func PosterPath(storagePath, uuid string) string {
 }
 
 func GeneratePoster(videoPath, posterPath string, maxEdge int) error {
-	return GeneratePosterVariants(videoPath, []imgpkg.ThumbnailVariant{{
+	return GeneratePosterContext(context.Background(), videoPath, posterPath, maxEdge)
+}
+
+func GeneratePosterContext(ctx context.Context, videoPath, posterPath string, maxEdge int) error {
+	return GeneratePosterVariantsContext(ctx, videoPath, []imgpkg.ThumbnailVariant{{
 		DestPath: posterPath,
 		MaxEdge:  maxEdge,
 	}})
 }
 
+// GenerateRandomPosterContext requires a known duration and always samples a
+// random frame. Unlike ordinary on-demand posters, it never falls back to a
+// fixed timestamp when probing fails.
+func GenerateRandomPosterContext(ctx context.Context, videoPath, posterPath string, maxEdge int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	meta, err := ProbeVideoContext(ctx, videoPath)
+	if err != nil {
+		return fmt.Errorf("无法读取视频时长，未替换旧缩略图: %w", err)
+	}
+	if meta == nil || meta.DurationMS <= 0 {
+		return fmt.Errorf("无法确定视频时长，未替换旧缩略图")
+	}
+	variants, maxEdge := normalizePosterVariants([]imgpkg.ThumbnailVariant{{DestPath: posterPath, MaxEdge: maxEdge}})
+	if len(variants) == 0 {
+		return fmt.Errorf("视频缩略图目标路径无效")
+	}
+	if err := generatePosterVariantsWithRunnerContext(ctx, videoPath, variants, meta, execPosterRunner, maxEdge); err == nil {
+		return nil
+	} else if errors.Is(err, ErrPosterGeneratorUnavailable) {
+		return err
+	} else {
+		return err
+	}
+}
+
 func GeneratePosterVariants(videoPath string, variants []imgpkg.ThumbnailVariant) error {
+	return GeneratePosterVariantsContext(context.Background(), videoPath, variants)
+}
+
+func GeneratePosterVariantsContext(ctx context.Context, videoPath string, variants []imgpkg.ThumbnailVariant) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	filtered, maxEdge := normalizePosterVariants(variants)
 	if len(filtered) == 0 {
 		return nil
 	}
-	meta, _ := ProbeVideo(videoPath)
-	err := generatePosterVariantsWithRunner(videoPath, filtered, meta, execPosterRunner, maxEdge)
+	meta, _ := ProbeVideoContext(ctx, videoPath)
+	err := generatePosterVariantsWithRunnerContext(ctx, videoPath, filtered, meta, execPosterRunner, maxEdge)
 	if err == nil {
 		return nil
 	}
 	if runtime.GOOS == "darwin" && errors.Is(err, ErrPosterGeneratorUnavailable) {
-		if qlErr := generatePosterVariantsWithQuickLook(videoPath, filtered, maxEdge); qlErr == nil {
+		if qlErr := generatePosterVariantsWithQuickLookContext(ctx, videoPath, filtered, maxEdge); qlErr == nil {
 			return nil
 		}
 	}
@@ -76,13 +114,20 @@ func generatePosterWithRunner(videoPath, posterPath string, meta *VideoMeta, run
 }
 
 func generatePosterVariantsWithRunner(videoPath string, variants []imgpkg.ThumbnailVariant, meta *VideoMeta, runner commandRunner, maxEdge int) error {
+	return generatePosterVariantsWithRunnerContext(context.Background(), videoPath, variants, meta, runner, maxEdge)
+}
+
+func generatePosterVariantsWithRunnerContext(parent context.Context, videoPath string, variants []imgpkg.ThumbnailVariant, meta *VideoMeta, runner commandRunner, maxEdge int) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	for _, variant := range variants {
 		if err := os.MkdirAll(filepath.Dir(variant.DestPath), 0755); err != nil {
 			return fmt.Errorf("创建 poster 目录失败: %w", err)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 
 	tmpFrame, err := os.CreateTemp("", "video-frame-*.jpg")
@@ -158,6 +203,13 @@ func generatePosterWithQuickLook(videoPath, posterPath string, maxEdge int) erro
 }
 
 func generatePosterVariantsWithQuickLook(videoPath string, variants []imgpkg.ThumbnailVariant, maxEdge int) error {
+	return generatePosterVariantsWithQuickLookContext(context.Background(), videoPath, variants, maxEdge)
+}
+
+func generatePosterVariantsWithQuickLookContext(parent context.Context, videoPath string, variants []imgpkg.ThumbnailVariant, maxEdge int) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	tmpDir, err := os.MkdirTemp("", "echogallery-quicklook-*")
 	if err != nil {
 		return fmt.Errorf("创建 Quick Look 临时目录失败: %w", err)
@@ -167,7 +219,7 @@ func generatePosterVariantsWithQuickLook(videoPath string, variants []imgpkg.Thu
 	if maxEdge <= 0 {
 		maxEdge = imgpkg.DefaultThumbnailLongEdge
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "qlmanage", "-t", "-s", strconv.Itoa(maxEdge), "-o", tmpDir, videoPath).CombinedOutput()
 	if err != nil {

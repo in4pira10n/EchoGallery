@@ -59,7 +59,8 @@ func TestPortableLibraryLogoSurvivesNewServerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := NewRouter(cfg, okRegistrar())
-	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	// Full library metadata is loaded only after the settings page is opened.
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/libraries", nil)
 	req.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "alice")})
 	settings := httptest.NewRecorder()
 	router.ServeHTTP(settings, req)

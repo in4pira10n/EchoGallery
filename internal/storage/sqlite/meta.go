@@ -110,6 +110,7 @@ func (s *DB) setMeta(key, value string) error {
 	_, err := s.db.Exec(`
 		INSERT INTO app_meta(key, value) VALUES(?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		WHERE app_meta.value <> excluded.value
 	`, key, value)
 	return err
 }

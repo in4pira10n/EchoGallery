@@ -13,9 +13,13 @@ var ErrPortableLibraryOccupied = errors.New("resource library is in use by anoth
 // Availability is advisory; opening a working copy still acquires the lease.
 func PortableLibraryOccupied(source string) (bool, error) {
 	source = filepath.Clean(source)
+	gate := portableSourceGate(source)
+	gate.Lock()
+	defer gate.Unlock()
 	portableCopies.Lock()
-	defer portableCopies.Unlock()
-	if portableCopies.items[source] != nil {
+	owned := portableCopies.items[source] != nil
+	portableCopies.Unlock()
+	if owned {
 		return false, nil
 	}
 	if _, err := os.Stat(source + ".lease"); errors.Is(err, os.ErrNotExist) {

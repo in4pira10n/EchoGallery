@@ -251,3 +251,33 @@ test('date follows the media timeline and changes only at its midpoint', () => {
   context.echoFrameClock(frame);
   assert.equal(classes.has('is-visible'), true);
 });
+
+test('EchoFrame starts using the current prefetch cancellation API', () => {
+  const { context } = harness();
+  vm.runInContext('echoFrame = null', context);
+  const appended = [];
+  const root = {
+    style: { setProperty() {} }, setAttribute() {}, focus() {}, addEventListener() {},
+    querySelector: () => ({}), firstElementChild: {},
+  };
+  let cancelled = 0;
+  context.$ = () => ({ pause() {} });
+  context.el = () => root;
+  context.stopSlideshow = () => {};
+  context.clearLightboxMediaSession = () => {};
+  context.cancelMediaPrefetch = () => cancelled++;
+  context.lightboxIsFullscreenTarget = () => false;
+  context.echoFrameMobileMode = () => false;
+  context.document.body = { appendChild: value => appended.push(value) };
+  context.document.documentElement = { classList: { add() {} } };
+  context.echoFrameClock = () => {};
+  context.echoFrameWake = () => {};
+  context.echoFramePrefetch = async () => null;
+  context.echoFrameAdvance = () => {};
+  context.addUniversalLongPress = () => {};
+  context.setInterval = () => 1;
+  context.startEchoFrame();
+  assert.equal(cancelled, 1);
+  assert.deepEqual(appended, [root]);
+  assert.equal(vm.runInContext('echoFrame.root', context), root);
+});

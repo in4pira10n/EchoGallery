@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"echogallery/internal/config"
+	"echogallery/internal/service"
 )
 
 type LibraryBatchBuildLibraryStatus struct {
@@ -32,6 +33,7 @@ type LibraryBatchBuildLibraryStatus struct {
 }
 
 type LibraryBatchBuildStatus struct {
+	Discovery            *service.LibraryScanProgress     `json:"discovery,omitempty"`
 	Status               string                           `json:"status"`
 	Message              string                           `json:"message"`
 	MessageKey           string                           `json:"message_key,omitempty"`
@@ -40,6 +42,7 @@ type LibraryBatchBuildStatus struct {
 	SelectionConfigured  bool                             `json:"selection_configured,omitempty"`
 	MoveLegacyThumbnails bool                             `json:"move_legacy_thumbnails,omitempty"`
 	CleanThumbnailFiles  bool                             `json:"clean_thumbnail_files,omitempty"`
+	CleanFiles           bool                             `json:"clean_files,omitempty"`
 	BuildPlaybackCaches  bool                             `json:"build_playback_caches,omitempty"`
 	CurrentLibraryID     string                           `json:"current_library_id,omitempty"`
 	CurrentLibraryName   string                           `json:"current_library_name,omitempty"`
@@ -65,7 +68,7 @@ type LibraryBatchBuildStatus struct {
 
 type LibraryBatchBuildHooks struct {
 	Status               func(cfg *config.Config, profile *config.Profile, username string) LibraryBatchBuildStatus
-	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool) (LibraryBatchBuildStatus, error)
+	Start                func(cfg *config.Config, profile *config.Profile, username string, userID int64, aggressive bool, buildThumbnailsAfterScan bool, completeEXIF bool, moveLegacyThumbnails bool, cleanThumbnailFiles bool, buildPlaybackCaches bool, cleanFiles bool) (LibraryBatchBuildStatus, error)
 	Cancel               func(cfg *config.Config, username string) (LibraryBatchBuildStatus, error)
 	SetExitAfterComplete func(cfg *config.Config, username string, enabled bool) (LibraryBatchBuildStatus, error)
 	SetSelection         func(cfg *config.Config, username string, selectedLibraryIDs []string, selectedPaths []string) (LibraryBatchBuildStatus, error)
@@ -79,6 +82,7 @@ type libraryBatchBuildStartRequest struct {
 	Aggressive               bool `json:"aggressive"`
 	BuildThumbnailsAfterScan bool `json:"build_thumbnails_after_scan"`
 	CompleteEXIF             bool `json:"complete_exif"`
+	CleanFiles               bool `json:"clean_files"`
 	MoveLegacyThumbnails     bool `json:"move_legacy_thumbnails"`
 	CleanThumbnailFiles      bool `json:"clean_thumbnail_files"`
 	BuildPlaybackCaches      bool `json:"build_playback_caches"`
@@ -133,7 +137,7 @@ func handleStartLibraryBatchBuild(cfg *config.Config, hooks LibraryBatchBuildHoo
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.BuildThumbnailsAfterScan, req.CompleteEXIF, req.MoveLegacyThumbnails, req.CleanThumbnailFiles, req.BuildPlaybackCaches)
+		status, err := hooks.Start(cfg, profile, currentUsername(c), userID, req.Aggressive, req.BuildThumbnailsAfterScan, req.CompleteEXIF, req.MoveLegacyThumbnails, req.CleanThumbnailFiles, req.BuildPlaybackCaches, req.CleanFiles)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

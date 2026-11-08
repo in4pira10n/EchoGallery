@@ -61,7 +61,7 @@ func (s *PhotoService) subtitleCachePath(p *storage.Photo, index int) (string, e
 	// Bump the cache generation when cue positioning changes so existing
 	// subtitle files are regenerated with the new native WebVTT placement.
 	key := fmt.Sprintf("srt-v2-positioned:%s:%s:%d:%d:%d", p.UUID, p.SourceRelPath, info.Size(), info.ModTime().UnixNano(), index)
-	return filepath.Join(config.LibraryDataRoot(s.sourcePath), "subtitles", fmt.Sprintf("%x.vtt", sha256.Sum256([]byte(key)))), nil
+	return identifiedMediaCachePath(filepath.Join(config.LibraryDataRoot(s.sourcePath), "subtitles"), p.UUID, fmt.Sprintf("%x.vtt", sha256.Sum256([]byte(key)))), nil
 }
 
 func (s *PhotoService) BuildVideoSubtitle(ctx context.Context, id, userID int64, index int) (*SubtitleCacheEntry, error) {

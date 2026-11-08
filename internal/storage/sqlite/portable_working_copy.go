@@ -1,33 +1,51 @@
 package sqlite
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
+
+	sqlitedriver "modernc.org/sqlite"
 )
 
 type portableCopyCoordinator struct {
-	source string
-	cache  string
-	db     *sql.DB
-	lease  *sql.DB
-	refs   int
-	stop   chan struct{}
-	done   chan struct{}
-	mu     sync.Mutex
-	syncIO sync.Mutex
-	dirty  bool
+	source  string
+	cache   string
+	pending string
+	db      *sql.DB
+	lease   *sql.DB
+	refs    int
+	stop    chan struct{}
+	done    chan struct{}
+	syncNow chan struct{}
+	syncIO  sync.Mutex
+	// data_version is compared on the same persistent monitor connection.
+	syncedVersion int64
 }
 
 var portableCopies = struct {
 	sync.Mutex
 	items map[string]*portableCopyCoordinator
-}{items: make(map[string]*portableCopyCoordinator)}
+	gates map[string]*sync.Mutex
+}{items: make(map[string]*portableCopyCoordinator), gates: make(map[string]*sync.Mutex)}
+
+// Only coordinate opening/closing the same source; disk I/O must not hold the
+// process-wide registry mutex and block unrelated libraries.
+func portableSourceGate(source string) *sync.Mutex {
+	portableCopies.Lock()
+	defer portableCopies.Unlock()
+	gate := portableCopies.gates[source]
+	if gate == nil {
+		gate = &sync.Mutex{}
+		portableCopies.gates[source] = gate
+	}
+	return gate
+}
 
 // NewPortableWorkingCopy runs a portable library database from the OS cache
 // directory and keeps .echogallery/metadata.sqlite as its durable copy.
@@ -43,7 +61,6 @@ func NewPortableWorkingCopy(sourcePath string) (*DB, error) {
 		return nil, err
 	}
 	db.portableCopy = coordinator
-	coordinator.markDirty()
 	return db, nil
 }
 
@@ -51,8 +68,25 @@ func (s *DB) SyncPortable() error {
 	if s == nil || s.portableCopy == nil {
 		return nil
 	}
-	s.portableCopy.markDirty()
-	return s.portableCopy.sync(true)
+	return s.portableCopy.sync()
+}
+
+// SchedulePortableSync records that the working copy has newer data, then
+// lets the coordinator persist it without blocking the user-facing mutation.
+// The marker also makes the working copy recoverable after an unexpected exit.
+func (s *DB) SchedulePortableSync() error {
+	if s == nil || s.portableCopy == nil {
+		return nil
+	}
+	c := s.portableCopy
+	if err := os.WriteFile(c.pending, []byte("pending\n"), 0600); err != nil {
+		return fmt.Errorf("record pending library database sync: %w", err)
+	}
+	select {
+	case c.syncNow <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (s *DB) WorkingPath() string {
@@ -63,9 +97,13 @@ func (s *DB) WorkingPath() string {
 }
 
 func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
+	gate := portableSourceGate(source)
+	gate.Lock()
+	defer gate.Unlock()
 	portableCopies.Lock()
-	defer portableCopies.Unlock()
-	if existing := portableCopies.items[source]; existing != nil {
+	existing := portableCopies.items[source]
+	portableCopies.Unlock()
+	if existing != nil {
 		existing.refs++
 		return existing, nil
 	}
@@ -102,11 +140,27 @@ func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
 	}
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(source)))[:24]
 	// Another server process must never replace a database we have open.
-	dir := filepath.Join(root, "EchoGallery", "database", key, fmt.Sprintf("process-%d", os.Getpid()))
+	dir := filepath.Join(root, "EchoGallery", "database", key)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
 	cache := filepath.Join(dir, "metadata.sqlite")
+	pending := filepath.Join(dir, "sync-pending")
+	if _, err := os.Stat(pending); err == nil {
+		// A prior shutdown could not persist this working copy. The lease proves
+		// no other EchoGallery process currently owns the source database.
+		if _, err := os.Stat(cache); err != nil {
+			return nil, fmt.Errorf("pending library sync has no recoverable working copy: %w", err)
+		}
+		if err := snapshotSQLiteDatabase(cache, source); err != nil {
+			return nil, fmt.Errorf("recover pending library database sync: %w", err)
+		}
+		if err := os.Remove(pending); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("clear recovered library sync marker: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect pending library sync: %w", err)
+	}
 	if err := snapshotSQLiteDatabase(source, cache); err != nil {
 		return nil, fmt.Errorf("create SSD database working copy: %w", err)
 	}
@@ -116,53 +170,75 @@ func acquirePortableCopy(source string) (*portableCopyCoordinator, error) {
 	}
 	monitor.SetMaxOpenConns(1)
 	monitor.SetMaxIdleConns(1)
-	c := &portableCopyCoordinator{source: source, cache: cache, db: monitor, lease: lease, refs: 1, stop: make(chan struct{}), done: make(chan struct{})}
+	// Set working-copy journal mode before the baseline. This local storage
+	// detail is not a content change that needs copying back to the library.
+	if _, err := monitor.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = monitor.Close()
+		return nil, err
+	}
+	var version int64
+	if err := monitor.QueryRow(`PRAGMA data_version`).Scan(&version); err != nil {
+		_ = monitor.Close()
+		return nil, err
+	}
+	c := &portableCopyCoordinator{source: source, cache: cache, pending: pending, db: monitor, lease: lease, refs: 1, syncedVersion: version, stop: make(chan struct{}), done: make(chan struct{}), syncNow: make(chan struct{}, 1)}
+	portableCopies.Lock()
 	portableCopies.items[source] = c
+	portableCopies.Unlock()
 	owned = true
 	go c.run()
 	return c, nil
-}
-
-func (c *portableCopyCoordinator) markDirty() {
-	c.mu.Lock()
-	c.dirty = true
-	c.mu.Unlock()
 }
 
 func (c *portableCopyCoordinator) run() {
 	defer close(c.done)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	var lastVersion int64
-	_ = c.db.QueryRow(`PRAGMA data_version`).Scan(&lastVersion)
 	for {
 		select {
 		case <-ticker.C:
-			var version int64
-			if err := c.db.QueryRow(`PRAGMA data_version`).Scan(&version); err == nil && version != lastVersion {
-				lastVersion = version
-				c.markDirty()
-			}
-			_ = c.sync(false)
+			_ = c.sync()
+		case <-c.syncNow:
+			_ = c.sync()
 		case <-c.stop:
 			return
 		}
 	}
 }
 
-func (c *portableCopyCoordinator) sync(force bool) error {
+func (c *portableCopyCoordinator) sync() error {
 	c.syncIO.Lock()
 	defer c.syncIO.Unlock()
-	c.mu.Lock()
-	if !force && !c.dirty {
-		c.mu.Unlock()
+	var version int64
+	if err := c.db.QueryRow(`PRAGMA data_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == c.syncedVersion {
+		if err := os.Remove(c.pending); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("clear library database sync marker: %w", err)
+		}
 		return nil
 	}
-	c.dirty = false
-	c.mu.Unlock()
+	if err := os.WriteFile(c.pending, []byte("pending\n"), 0600); err != nil {
+		return fmt.Errorf("record pending library database sync: %w", err)
+	}
 	if err := snapshotSQLiteDatabase(c.cache, c.source); err != nil {
-		c.markDirty()
+		return err // Keep the old version and the lease so a retry persists changes.
+	}
+	c.syncedVersion = version
+	var latestVersion int64
+	if err := c.db.QueryRow(`PRAGMA data_version`).Scan(&latestVersion); err != nil {
 		return err
+	}
+	if latestVersion != version {
+		select {
+		case c.syncNow <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	if err := os.Remove(c.pending); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear library database sync marker: %w", err)
 	}
 	return nil
 }
@@ -171,23 +247,24 @@ func releasePortableCopy(c *portableCopyCoordinator) error {
 	if c == nil {
 		return nil
 	}
-	portableCopies.Lock()
+	gate := portableSourceGate(c.source)
+	gate.Lock()
+	defer gate.Unlock()
 	if c.refs > 1 {
 		c.refs--
-		portableCopies.Unlock()
 		return nil
 	}
 	// On failure retain the coordinator and lease for a safe retry.
-	if err := c.sync(true); err != nil {
-		portableCopies.Unlock()
+	if err := c.sync(); err != nil {
 		return err
 	}
+	portableCopies.Lock()
 	delete(portableCopies.items, c.source)
+	portableCopies.Unlock()
 	close(c.stop)
 	<-c.done
 	closeErr := c.db.Close()
 	leaseErr := c.lease.Close()
-	portableCopies.Unlock()
 	if closeErr != nil {
 		return closeErr
 	}
@@ -209,11 +286,48 @@ func snapshotSQLiteDatabase(source, target string) error {
 		_ = db.Close()
 		return err
 	}
-	_, err = db.Exec(`VACUUM INTO '` + strings.ReplaceAll(tmp, "'", "''") + `'`)
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		return err
+	}
+	err = conn.Raw(func(raw any) error {
+		backuper, ok := raw.(interface {
+			NewBackup(string) (*sqlitedriver.Backup, error)
+		})
+		if !ok {
+			return fmt.Errorf("SQLite driver does not support online backups")
+		}
+		backup, err := backuper.NewBackup(tmp)
+		if err != nil {
+			return err
+		}
+		var stepErr error
+		for {
+			more, err := backup.Step(-1)
+			if err != nil {
+				stepErr = err
+				break
+			}
+			if !more {
+				break
+			}
+		}
+		finishErr := backup.Finish()
+		if stepErr != nil {
+			return stepErr
+		}
+		return finishErr
+	})
+	connErr := conn.Close()
 	closeErr := db.Close()
 	if err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	if connErr != nil {
+		_ = os.Remove(tmp)
+		return connErr
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmp)

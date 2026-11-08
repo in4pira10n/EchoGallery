@@ -14,6 +14,7 @@ const STATIC_ASSETS = [
   `/pages/app.css?v=${EG_ASSET_VERSION}`,
   `/static/i18n.js?v=${EG_ASSET_VERSION}`,
   `/static/media-loader.js?v=${EG_ASSET_VERSION}`,
+  `/static/photo-wall.js?v=${EG_ASSET_VERSION}`,
   `/static/app.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa.js?v=${EG_ASSET_VERSION}`,
   `/static/pwa-icon.png?v=${EG_ASSET_VERSION}`,

@@ -270,10 +270,21 @@ func firstHEIFTag(tags map[string]string, keys ...string) string {
 // The output is first written beside the destination and renamed into place so
 // readers never see a partially converted preview.
 func ConvertHEIFToJPEG(inputPath, outputPath string) error {
-	return convertHEIFToJPEGWithRunner(inputPath, outputPath, runHEIFCommand)
+	return ConvertHEIFToJPEGContext(context.Background(), inputPath, outputPath)
+}
+
+func ConvertHEIFToJPEGContext(ctx context.Context, inputPath, outputPath string) error {
+	return convertHEIFToJPEGWithRunnerContext(ctx, inputPath, outputPath, runHEIFCommand)
 }
 
 func convertHEIFToJPEGWithRunner(inputPath, outputPath string, runner heifCommandRunner) error {
+	return convertHEIFToJPEGWithRunnerContext(context.Background(), inputPath, outputPath, runner)
+}
+
+func convertHEIFToJPEGWithRunnerContext(parent context.Context, inputPath, outputPath string, runner heifCommandRunner) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(inputPath) == "" || strings.TrimSpace(outputPath) == "" {
 		return errors.New("HEIF 转换路径为空")
 	}
@@ -292,7 +303,7 @@ func convertHEIFToJPEGWithRunner(inputPath, outputPath string, runner heifComman
 	}
 	defer os.Remove(tmpPath)
 
-	probe, err := readHEIFProbe(inputPath, runner, 30*time.Second)
+	probe, err := readHEIFProbeContext(parent, inputPath, runner, 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -326,7 +337,7 @@ func convertHEIFToJPEGWithRunner(inputPath, outputPath string, runner heifComman
 		"-update", "1",
 		tmpPath,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	out, err := runner(ctx, "ffmpeg", args...)
 	if err != nil {

@@ -525,7 +525,7 @@ function startEchoFrame() {
   stopSlideshow();
   $('#lb-video')?.pause();
   clearLightboxMediaSession();
-  resetLightboxPrefetchCache();
+  cancelMediaPrefetch();
   const root = el('section', `echo-frame echo-frame-${p.transition}${echoFrameMobileMode() ? ' echo-frame-mobile' : ''}`);
   root.style.setProperty('--echo-frame-text-opacity', String(p.text_opacity / 100));
   root.tabIndex = -1;

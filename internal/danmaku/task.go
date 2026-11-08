@@ -22,6 +22,8 @@ var ErrTaskRunning = errors.New("danmaku task is running")
 func (m *Manager) Delete(root, bvid string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	mediaCleanupGate.Lock()
+	defer mediaCleanupGate.Unlock()
 	if m.active[bvid] != "" {
 		return ErrTaskRunning
 	}
@@ -31,6 +33,8 @@ func (m *Manager) Delete(root, bvid string) error {
 func (m *Manager) RemoveMatch(root, mediaUUID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	mediaCleanupGate.Lock()
+	defer mediaCleanupGate.Unlock()
 	// A running download may still write its captured media association.
 	if len(m.active) > 0 {
 		return ErrTaskRunning
@@ -89,9 +93,21 @@ func (m *Manager) Start(ctx context.Context, root, input string, requestedPage i
 	state := &taskState{ctx: taskCtx, cancel: cancel, done: make(chan struct{}), task: task}
 	m.tasks[id] = state
 	m.active[bvid] = id
+	mediaCleanupGate.Lock()
+	mediaCleanupGate.active[filepath.Clean(root)]++
+	mediaCleanupGate.Unlock()
 	m.mu.Unlock()
 	go func() {
 		defer close(state.done)
+		defer func() {
+			mediaCleanupGate.Lock()
+			defer mediaCleanupGate.Unlock()
+			key := filepath.Clean(root)
+			mediaCleanupGate.active[key]--
+			if mediaCleanupGate.active[key] == 0 {
+				delete(mediaCleanupGate.active, key)
+			}
+		}()
 		m.run(id, input, root, requestedPage, overwrite)
 	}()
 	return task, nil

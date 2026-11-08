@@ -110,3 +110,13 @@ func TestPickFrameTimestamp_WithinPlayableRange(t *testing.T) {
 		t.Fatalf("期望随机时间点位于 10%%-90%% 区间，得到 %s", got)
 	}
 }
+
+func TestPickFrameTimestampSamplesDifferentRandomTimes(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 12; i++ {
+		seen[pickFrameTimestamp(&VideoMeta{DurationMS: 24 * 60 * 60 * 1000})] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("poster sampling is not varying timestamps: %v", seen)
+	}
+}

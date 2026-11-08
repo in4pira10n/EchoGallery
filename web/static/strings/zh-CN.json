@@ -456,7 +456,31 @@
       "prunedLabel": "已清理失效媒体",
       "exitAfterComplete": "构建完成后自动退出应用",
       "cancel": "停止构建",
-      "cancelling": "正在停止…"
+      "cancelling": "正在停止…",
+      "retry": "重试扫描",
+      "retryFailed": "无法重试扫描：",
+      "directoryProgress": "已检查 {directories} 个文件夹 · 待检查 {pending} 个 · 已发现 {media} 个媒体",
+      "operationWait": "此操作已用时 {seconds} 秒",
+      "scanPhase": {
+        "waiting": "等待上一次扫描结束",
+        "checking": "检查资源库变化",
+        "discovering": "发现媒体",
+        "indexing": "读取媒体索引",
+        "importing": "导入媒体",
+        "saving": "保存扫描结果",
+        "cleanup": "正在清理已删除媒体"
+      },
+      "scanOperation": {
+        "scan_lock": "等待扫描访问权限",
+        "metadata": "读取文件信息",
+        "read_directory": "读取文件夹内容",
+        "directory_complete": "已检查文件夹",
+        "database": "读取资源库记录",
+        "import_media": "读取媒体元数据",
+        "save": "保存资源库记录",
+        "check_missing": "检查已删除的源文件",
+        "remove_cache": "清理媒体生成文件"
+      }
     },
     "libraryBatchScan": {
       "cancel": "取消批量扫描",
@@ -793,7 +817,7 @@
       "shares": {
         "typeAlbum": "相册",
         "typeMedia": "照片 / 视频",
-        "lazyHint": "滚动到这里时再加载分享链接。",
+        "lazyHint": "展开此卡片后加载分享链接。",
         "loading": "正在加载分享链接…",
         "emptyTitle": "点击分享按钮，与他人共享回忆",
         "copy": "复制",
@@ -906,8 +930,11 @@
         "scanCompletedWithFailures": "批量扫描完成，{completed} 个资源库成功，{failed} 个失败",
         "thumbnailCompletedWithFailures": "批量缩略图构建完成，{completed} 个资源库成功，{failed} 个失败",
         "completeEXIF": "修复 EXIF 元数据",
-        "completeEXIFCopy": "扫描后补全所选资源库的 EXIF；即使资源库未变化也会执行。"
-
+        "completeEXIFCopy": "扫描后补全所选资源库的 EXIF；即使资源库未变化也会执行。",
+        "cleanFiles": "清理文件",
+        "cleanedMedia": "已清理媒体",
+        "cleanFilesCopy": "成功扫描后，清理已删除源媒体的记录及生成缓存；保留原始媒体、外部字幕和回收站内容。",
+        "taskCleanup": "正在清理「{name}」中已删除的媒体"
       }
     },
     "echoFrame": {
@@ -1041,6 +1068,9 @@
       "albumUserCreated": "用户创建的相册",
       "albumAddToAlbum": "添加到相册",
       "mediaOpenInFileManager": "在文件管理器中打开",
+      "refreshVideoThumbnail": "刷新缩略图",
+      "refreshVideoThumbnailDone": "视频缩略图已刷新",
+      "refreshVideoThumbnailFailed": "视频缩略图刷新失败",
       "selectionCancel": "取消选择",
       "settingsSaved": "设置已保存",
       "settingsSaveFailedPrefix": "设置失败: ",
@@ -1052,6 +1082,8 @@
       "d_generated_at": "生成于 {date}",
       "d_video_bookmarks": "视频书签 {count}/10",
       "d_bookmark_current_time": "当前 {time}",
+      "videoBookmarkMark": "标记 {slot}",
+      "videoBookmarkName": "标记 {slot} 的名称",
       "d_smart_rule_min": "规则 {index} 的最短时长",
       "d_smart_rule_max": "规则 {index} 的最长时长",
       "d_smart_rule_duration": "规则 {index} 的视频时长",
@@ -1555,6 +1587,8 @@
       "s_smart_preview_prompt": "填写条件后查看匹配样例",
       "s_smart_preview_empty": "暂无匹配媒体",
       "runtime": {
+        "libraryLoadFailed": "无法载入资源库，请检查连接后重试。",
+        "libraryLoadRetry": "重试",
         "mediaKindFilterAria": "媒体类型筛选",
         "trashContentFilterAria": "回收站内容类型筛选",
         "albumKindFilterAria": "相册类型筛选",

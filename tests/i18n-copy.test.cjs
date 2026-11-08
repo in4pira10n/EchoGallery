@@ -70,6 +70,19 @@ test('batch library editor scrolls its results and uses English labels', () => {
   assert.equal(englishCatalog.app.interface.s_2918633ac8, 'Explore');
 });
 
+test('library editor Enter activates Switch and timeline order confirmation is translated', () => {
+  const editor = appSource.slice(appSource.indexOf('function openLibraryEditorModal('), appSource.indexOf('\nfunction syncActiveLibrarySelect', appSource.indexOf('function openLibraryEditorModal(')));
+  assert.match(editor, /event\.key !== 'Enter'[\s\S]*?const action = editing && switchButton[\s\S]*?action\.click\(\)/);
+  for (const [copy, title, confirm] of [
+    [catalog, '反转时间线顺序', '切换'],
+    [englishCatalog, 'Reverse timeline order', 'Switch'],
+  ]) {
+    assert.equal(copy.app.interface.s_4b553446cb, title);
+    assert.equal(copy.app.interface.s_2f116b7d1c, confirm);
+    assert.equal(typeof copy.app.interface.d_8714d3085b, 'string');
+  }
+});
+
 test('every App interface copy entry is referenced by UI code', () => {
   const sources = [appSource, echoFrameSource, lightboxSource];
   const used = new Set();
@@ -113,7 +126,7 @@ test('library build page localizes backend status and all duration units', () =>
       escapeHTML: value => String(value || ''),
       renderSettingsToggle: (_id, label) => label,
     });
-    for (const name of ['interpolateCopy', 'copyText', 'formatSecondsShort', 'estimateLibraryBuildDiscoveryPercent', 'libraryBuildHeading', 'renderLibraryBuild']) {
+    for (const name of ['interpolateCopy', 'copyText', 'formatSecondsShort', 'renderLibraryScanDiscovery', 'libraryBuildHeading', 'renderLibraryBuild']) {
       const fn = appSource.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'));
       assert.ok(fn, `Missing ${name}`);
       vm.runInContext(fn[0], context);

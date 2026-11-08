@@ -175,7 +175,7 @@ type TimelineLocateResult struct {
 	TargetIndex        int      `json:"target_index"`
 	HasBefore          bool     `json:"has_before"`
 	HasAfter           bool     `json:"has_after"`
-	MissingBeforeCount int      `json:"missing_before_count,omitempty"`
+	MissingBeforeCount int      `json:"missing_before_count,omitempty"` // Unloaded items before Photos[0], excluding returned preceding media.
 	PrevCursor         string   `json:"prev_cursor,omitempty"`
 	NextCursor         string   `json:"next_cursor,omitempty"`
 }

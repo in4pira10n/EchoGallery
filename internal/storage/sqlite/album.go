@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"echogallery/internal/storage"
 )
@@ -110,7 +111,7 @@ func (s *DB) buildAlbumPhotoScope(albumID int64, userID int64, mediaKind string)
 		where += " AND instr(p.source_rel_path, '/') = 0"
 	} else if isFolderAlbum && sourceRelPath != "" {
 		where += ` AND (
-			(p.source_rel_path LIKE ? AND instr(substr(p.source_rel_path, ?), '/') = 0)
+			(substr(p.source_rel_path, 1, length(?) + 1) = ? || '/' AND instr(substr(p.source_rel_path, ?), '/') = 0)
 			OR (
 				p.source_rel_path = ''
 				AND EXISTS (
@@ -119,7 +120,7 @@ func (s *DB) buildAlbumPhotoScope(albumID int64, userID int64, mediaKind string)
 				)
 			)
 		)`
-		args = append(args, sourceRelPath+"/%", len(sourceRelPath)+2, albumID)
+		args = append(args, sourceRelPath, sourceRelPath, utf8.RuneCountInString(sourceRelPath)+2, albumID)
 	} else {
 		joinClause = "JOIN album_photos ap ON ap.photo_id = p.id"
 		where += " AND ap.album_id = ?"
@@ -433,10 +434,33 @@ func (s *DB) GetAlbumByID(id int64, userID int64) (*storage.Album, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err == nil && album != nil && (album.SourceKind == "folder" || (album.SourceKind == "" && album.Description == legacyFolderAlbumDescription)) {
+		album.PhotoCount, err = s.countFolderAlbumPhotos(album)
+	}
 	if err == nil && album != nil && album.SourceKind == "smart" {
 		err = s.refreshSmartAlbumStats(album)
 	}
 	return album, err
+}
+
+func (s *DB) countFolderAlbumPhotos(album *storage.Album) (int, error) {
+	path := normalizeAlbumSourcePath(album.SourceRelPath)
+	if path == "" && strings.TrimSpace(album.Name) != "根目录" {
+		path = normalizeAlbumSourcePath(album.Name)
+	}
+	where := "instr(source_rel_path, '/') = 0"
+	args := []interface{}{album.CreatedBy}
+	if path != "" {
+		where = `(p.source_rel_path >= ? AND p.source_rel_path < ?
+			AND instr(substr(p.source_rel_path, ?), '/') = 0)
+			OR (p.source_rel_path = '' AND EXISTS (
+				SELECT 1 FROM album_photos ap WHERE ap.album_id = ? AND ap.photo_id = p.id
+			))`
+		args = []interface{}{album.CreatedBy, path + "/", path + "0", utf8.RuneCountInString(path) + 2, album.ID}
+	}
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM photos p WHERE p.uploaded_by = ? AND p.deleted_at IS NULL AND (`+where+`)`, args...).Scan(&count)
+	return count, err
 }
 
 // ListAlbums 查询用户所有相册（photo_count 不含已软删除的图片，附带封面 UUID）
@@ -464,8 +488,18 @@ func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 			FROM album_photos ap
 			INNER JOIN user_albums ua ON ua.id = ap.album_id
 			INNER JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
-			WHERE NOT (ua.source_kind = 'folder' AND trim(ua.name) = '根目录' AND ua.source_rel_path = '')
+			WHERE ua.source_kind <> 'folder'
 			GROUP BY ap.album_id
+			UNION ALL
+			SELECT ua.id AS album_id,
+			       (SELECT COUNT(*) FROM photos p
+			        WHERE p.uploaded_by = ua.created_by AND p.deleted_at IS NULL
+			          AND p.source_rel_path >= (CASE WHEN ua.source_rel_path <> '' THEN ua.source_rel_path ELSE trim(ua.name) END) || '/'
+			          AND p.source_rel_path < (CASE WHEN ua.source_rel_path <> '' THEN ua.source_rel_path ELSE trim(ua.name) END) || '0'
+			          AND instr(substr(p.source_rel_path, length(CASE WHEN ua.source_rel_path <> '' THEN ua.source_rel_path ELSE trim(ua.name) END) + 2), '/') = 0) AS photo_count
+			FROM user_albums ua
+			WHERE ua.source_kind = 'folder'
+			  AND NOT (trim(ua.name) = '根目录' AND ua.source_rel_path = '')
 			UNION ALL
 			SELECT ua.id AS album_id, COUNT(p.id) AS photo_count
 			FROM user_albums ua
@@ -481,25 +515,20 @@ func (s *DB) ListAlbums(userID int64) ([]*storage.Album, error) {
 			SELECT album_id, SUM(photo_count) AS photo_count
 			FROM photo_count_parts
 			GROUP BY album_id
-		),
-		latest_album_photos AS (
-			SELECT album_id, uuid
-			FROM (
-				SELECT ap.album_id, ph.uuid,
-				       ROW_NUMBER() OVER (PARTITION BY ap.album_id ORDER BY ph.taken_at DESC, ph.id DESC) AS rn
-				FROM album_photos ap
-				INNER JOIN user_albums ua ON ua.id = ap.album_id
-				INNER JOIN photos ph ON ph.id = ap.photo_id AND ph.deleted_at IS NULL
-			)
-			WHERE rn = 1
 		)
 		SELECT ua.id, ua.name, ua.description, ua.cover_photo_id, ua.source_kind, ua.source_rel_path, ua.smart_match_mode, ua.smart_rules_json, ua.created_by, ua.created_at,
 		       COALESCE(pc.photo_count, 0) AS photo_count,
-		       COALESCE(cover.uuid, latest.uuid) AS cover_uuid
+		       COALESCE(cover.uuid, (
+		           SELECT ph.uuid
+		           FROM album_photos ap
+		           INNER JOIN photos ph ON ph.id = ap.photo_id AND ph.deleted_at IS NULL
+		           WHERE ap.album_id = ua.id
+		           ORDER BY ph.taken_at DESC, ph.id DESC
+		           LIMIT 1
+		       )) AS cover_uuid
 		FROM user_albums ua
 		LEFT JOIN photo_counts pc ON pc.album_id = ua.id
 		LEFT JOIN photos cover ON cover.id = ua.cover_photo_id AND cover.deleted_at IS NULL
-		LEFT JOIN latest_album_photos latest ON latest.album_id = ua.id
 		ORDER BY ua.created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询相册失败: %w", err)
@@ -547,6 +576,11 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 		       ) as cover_uuid
 		FROM target_photo
 		INNER JOIN albums a ON a.created_by = ? AND a.deleted_at IS NULL
+			AND (a.source_kind <> 'folder' OR trim(a.name) <> '根目录' OR COALESCE(a.source_rel_path, '') <> ''
+				OR a.id = (SELECT MIN(root.id) FROM albums root
+					WHERE root.created_by = a.created_by AND root.deleted_at IS NULL
+					AND root.source_kind = 'folder' AND trim(root.name) = '根目录'
+					AND COALESCE(root.source_rel_path, '') = ''))
 		LEFT JOIN album_photos target_ap ON target_ap.album_id = a.id AND target_ap.photo_id = target_photo.id
 		LEFT JOIN album_photos ap ON ap.album_id = a.id
 		LEFT JOIN photos p ON p.id = ap.photo_id AND p.deleted_at IS NULL
@@ -560,7 +594,7 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 						OR target_photo.source_rel_path = ''
 						OR (
 							(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
-							AND target_photo.source_rel_path LIKE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/%'
+							AND substr(target_photo.source_rel_path, 1, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 1) = (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/'
 							AND instr(substr(target_photo.source_rel_path, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 2), '/') = 0
 						)
 					)
@@ -568,8 +602,14 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 				OR (
 					(a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))
 					AND (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) <> ''
-					AND target_photo.source_rel_path LIKE (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/%'
+					AND substr(target_photo.source_rel_path, 1, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 1) = (CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) || '/'
 					AND instr(substr(target_photo.source_rel_path, length(CASE WHEN a.source_rel_path <> '' THEN a.source_rel_path ELSE trim(a.name) END) + 2), '/') = 0
+				)
+				OR (
+					(a.source_kind = 'folder' OR (a.source_kind = '' AND a.description = '自动从文件夹导入'))
+					AND trim(a.name) = '根目录'
+					AND COALESCE(a.source_rel_path, '') = ''
+					AND instr(target_photo.source_rel_path, '/') = 0
 				)
 			)
 		)
@@ -596,6 +636,12 @@ func (s *DB) ListAlbumsForPhoto(photoID int64, userID int64) ([]*storage.Album, 
 	}
 	matching := albums[:0]
 	for _, album := range albums {
+		if album.SourceKind == "folder" || (album.SourceKind == "" && album.Description == legacyFolderAlbumDescription) {
+			album.PhotoCount, err = s.countFolderAlbumPhotos(album)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if album.SourceKind == "smart" {
 			belongs, err := s.IsMediaInAlbum(album.ID, photoID, userID)
 			if err != nil {
@@ -987,6 +1033,39 @@ func (s *DB) AddPhotoToAlbum(albumID int64, photoID int64, userID int64) error {
 	return nil
 }
 
+func (s *DB) AddPhotosToAlbum(albumID int64, photoIDs []int64, userID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始批量添加相册媒体失败: %w", err)
+	}
+	defer tx.Rollback()
+	var sourceKind string
+	if err := tx.QueryRow(`SELECT source_kind FROM albums WHERE id = ? AND created_by = ? AND deleted_at IS NULL`, albumID, userID).Scan(&sourceKind); err != nil {
+		return fmt.Errorf("相册不存在")
+	}
+	if sourceKind == "smart" {
+		return fmt.Errorf("智能相册由匹配规则动态生成，不能手动添加媒体")
+	}
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO album_photos (album_id, photo_id, added_at) VALUES (?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("准备批量添加相册媒体失败: %w", err)
+	}
+	defer stmt.Close()
+	addedAt := time.Now()
+	for _, photoID := range photoIDs {
+		if photoID <= 0 {
+			continue
+		}
+		if _, err := stmt.Exec(albumID, photoID, addedAt); err != nil {
+			return fmt.Errorf("批量添加媒体到相册失败: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交批量添加相册媒体失败: %w", err)
+	}
+	return nil
+}
+
 // RemovePhotoFromAlbum 从相册移除图片
 func (s *DB) RemovePhotoFromAlbum(albumID int64, photoID int64, userID int64) error {
 	var sourceKind string
@@ -1153,7 +1232,7 @@ func (s *DB) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.Timel
 		TargetIndex:        targetIndex,
 		HasBefore:          beforePage.HasMore,
 		HasAfter:           afterPage.HasMore,
-		MissingBeforeCount: missingBeforeCount,
+		MissingBeforeCount: max(0, missingBeforeCount-len(beforePage.Photos)),
 	}
 	if len(beforePage.Photos) > 0 {
 		result.PrevCursor = albumLocateCursorForPhoto(beforePage.Photos[0], sort)

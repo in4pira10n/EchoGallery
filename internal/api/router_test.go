@@ -2614,7 +2614,7 @@ func TestListMedia_IncludesThumbnailMetadata(t *testing.T) {
 		t.Fatalf("期望 1 张媒体，得到 %d", len(resp.Photos))
 	}
 	photo := resp.Photos[0]
-	if photo.ThumbnailURL != "/media/thumbnails/photo-1" || !photo.ThumbnailReady {
+	if !strings.HasPrefix(photo.ThumbnailURL, "/media/thumbnails/photo-1?v=") || !photo.ThumbnailReady {
 		t.Fatalf("缩略图字段不正确: %+v", photo)
 	}
 	if photo.Width != 1200 || photo.Height != 800 {

@@ -456,7 +456,31 @@
       "prunedLabel": "Invalid media removed",
       "exitAfterComplete": "Quit the app when the build finishes",
       "cancel": "Stop build",
-      "cancelling": "Stopping…"
+      "cancelling": "Stopping…",
+      "retry": "Retry scan",
+      "retryFailed": "Could not retry the scan: ",
+      "directoryProgress": "{directories} folders checked · {pending} folders queued · {media} media found",
+      "operationWait": "{seconds}s on this operation",
+      "scanPhase": {
+        "waiting": "Waiting for the previous scan",
+        "checking": "Checking library changes",
+        "discovering": "Discovering media",
+        "indexing": "Reading the media index",
+        "importing": "Importing media",
+        "saving": "Saving scan results",
+        "cleanup": "Cleaning deleted media"
+      },
+      "scanOperation": {
+        "scan_lock": "Waiting for scan access",
+        "metadata": "Reading file information",
+        "read_directory": "Reading folder contents",
+        "directory_complete": "Folder checked",
+        "database": "Reading library records",
+        "import_media": "Reading media metadata",
+        "save": "Saving library records",
+        "check_missing": "Checking for deleted source files",
+        "remove_cache": "Removing generated media files"
+      }
     },
     "libraryBatchScan": {
       "cancel": "Cancel batch scan",
@@ -793,7 +817,7 @@
       "shares": {
         "typeAlbum": "Albums",
         "typeMedia": "Photos / videos",
-        "lazyHint": "Load share links when this section comes into view.",
+        "lazyHint": "Expand this section to load share links.",
         "loading": "Loading share links…",
         "emptyTitle": "Use the Share button to share memories with others",
         "copy": "Copy",
@@ -906,8 +930,11 @@
         "scanCompletedWithFailures": "Batch scan complete: {completed} libraries succeeded, {failed} failed",
         "thumbnailCompletedWithFailures": "Batch thumbnail build complete: {completed} libraries succeeded, {failed} failed",
         "completeEXIF": "Complete EXIF metadata",
-        "completeEXIFCopy": "Complete EXIF for selected libraries after scanning, even when no library changes are found."
-
+        "completeEXIFCopy": "Complete EXIF for selected libraries after scanning, even when no library changes are found.",
+        "cleanFiles": "Clean files",
+        "cleanedMedia": "Cleaned media",
+        "cleanFilesCopy": "Remove records and generated caches for deleted source media after a successful scan. Original media, external subtitles and trashed items are kept.",
+        "taskCleanup": "Cleaning deleted media in “{name}”"
       }
     },
     "echoFrame": {
@@ -1041,6 +1068,9 @@
       "albumUserCreated": "User album",
       "albumAddToAlbum": "Add to album",
       "mediaOpenInFileManager": "Open in file manager",
+      "refreshVideoThumbnail": "Refresh thumbnail",
+      "refreshVideoThumbnailDone": "Video thumbnail refreshed",
+      "refreshVideoThumbnailFailed": "Could not refresh video thumbnail",
       "selectionCancel": "Clear selection",
       "settingsSaved": "Settings saved",
       "settingsSaveFailedPrefix": "Settings failed: ",
@@ -1052,6 +1082,8 @@
       "d_generated_at": "生成于 {date}",
       "d_video_bookmarks": "视频书签 {count}/10",
       "d_bookmark_current_time": "Current {time}",
+      "videoBookmarkMark": "Mark {slot}",
+      "videoBookmarkName": "Name for mark {slot}",
       "d_smart_rule_min": "规则 {index} 的最短时长",
       "d_smart_rule_max": "规则 {index} 的最长时长",
       "d_smart_rule_duration": "规则 {index} 的视频时长",
@@ -1311,7 +1343,7 @@
       "s_0239c81603": "Failed to save batch scan selection: ",
       "s_c0d87ab62c": "Failed to save batch scope: ",
       "s_2c5af95723": "Failed to save batch thumbnail selection: ",
-      "s_2f116b7d1c": "切换",
+      "s_2f116b7d1c": "Switch",
       "s_efb41280d1": "已恢复默认快捷键，记得保存设置",
       "s_0820e77972": "恢复失败: ",
       "d_41d1498dab": "{v0} 分钟",
@@ -1555,6 +1587,8 @@
       "s_smart_preview_prompt": "Enter conditions to preview matches",
       "s_smart_preview_empty": "No matching media",
       "runtime": {
+        "libraryLoadFailed": "Unable to load this library. Check its connection and try again.",
+        "libraryLoadRetry": "Retry",
         "mediaKindFilterAria": "Filter by media type",
         "trashContentFilterAria": "Filter by Trash content type",
         "albumKindFilterAria": "Filter by album type",

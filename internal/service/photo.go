@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"image/jpeg"
@@ -33,38 +34,44 @@ type thumbnailWorkItem struct {
 
 // PhotoService 图片业务逻辑
 type PhotoService struct {
-	lifecycleMu          sync.Mutex
-	closing              bool
-	workerStop           chan struct{}
-	workerWG             sync.WaitGroup
-	repo                 storage.Repository
-	sourcePath           string
-	dataPath             string
-	thumbnailPath        string
-	thumbnailLibraryID   string
-	legacyThumbnailRoot  string
-	legacyReadOnly       bool
-	thumbnailBuildActive atomic.Bool
-	thumbnailSize        int
-	trashPath            string
-	syncThumbnail        bool // 测试用：同步生成缩略图
-	thumbPriorityHeavy   chan thumbnailWorkItem
-	thumbJobsHeavy       chan thumbnailWorkItem
-	thumbPriorityImage   chan thumbnailWorkItem
-	thumbJobsImage       chan thumbnailWorkItem
-	thumbPriorityVideo   chan thumbnailWorkItem
-	thumbJobsVideo       chan thumbnailWorkItem
-	thumbJobsMu          sync.Mutex
-	scanMu               sync.Mutex
-	thumbPending         map[string]struct{}
-	thumbUrgent          map[string]struct{}
-	thumbBuildMu         sync.Mutex
-	thumbBuild           *thumbnailBuildTask
-	playbackBuildMu      sync.Mutex
-	playbackBuild        *playbackCacheBuildTask
-	videoThumbRefresh    *videoThumbnailRefreshTask
-	exifBackfillMu       sync.Mutex
-	exifBackfill         *exifBackfillTask
+	lifecycleMu           sync.Mutex
+	closing               bool
+	workerContext         context.Context
+	workerCancel          context.CancelFunc
+	workerStop            chan struct{}
+	workerWG              sync.WaitGroup
+	repo                  storage.Repository
+	sourcePath            string
+	dataPath              string
+	thumbnailPath         string
+	thumbnailLibraryID    string
+	legacyThumbnailRoot   string
+	legacyReadOnly        bool
+	thumbnailBuildActive  atomic.Bool
+	thumbnailSize         int
+	trashPath             string
+	syncThumbnail         bool // 测试用：同步生成缩略图
+	thumbPriorityHeavy    chan thumbnailWorkItem
+	thumbJobsHeavy        chan thumbnailWorkItem
+	thumbPriorityImage    chan thumbnailWorkItem
+	thumbJobsImage        chan thumbnailWorkItem
+	thumbPriorityVideo    chan thumbnailWorkItem
+	thumbJobsVideo        chan thumbnailWorkItem
+	thumbJobsMu           sync.Mutex
+	thumbnailFileLocks    sync.Map
+	randomPosterGenerator func(context.Context, string, string, int) error
+	smbOnce               sync.Once
+	smbLibrary            bool
+	scanMu                sync.Mutex
+	thumbPending          map[string]struct{}
+	thumbUrgent           map[string]struct{}
+	thumbBuildMu          sync.Mutex
+	thumbBuild            *thumbnailBuildTask
+	playbackBuildMu       sync.Mutex
+	playbackBuild         *playbackCacheBuildTask
+	videoThumbRefresh     *videoThumbnailRefreshTask
+	exifBackfillMu        sync.Mutex
+	exifBackfill          *exifBackfillTask
 }
 
 func (s *PhotoService) LibraryUserID(fallback int64) int64 {
@@ -237,6 +244,11 @@ func (s *PhotoService) enqueueThumbnailTier(photo *storage.Photo, tier string, p
 	if s == nil || photo == nil || photo.UUID == "" {
 		return
 	}
+	select {
+	case <-s.workerStop:
+		return
+	default:
+	}
 	if s.syncThumbnail {
 		_ = s.generateThumbnailForPhotoTier(photo, tier)
 		return
@@ -337,6 +349,11 @@ func (s *PhotoService) warmImportedThumbnails(photos []*storage.Photo) {
 	const firstScreenWarmCount = 180
 	s.background(func() {
 		for index, photo := range photos {
+			select {
+			case <-s.workerStop:
+				return
+			default:
+			}
 			s.enqueueThumbnailGeneration(photo, index < firstScreenWarmCount)
 		}
 	})
@@ -506,6 +523,8 @@ func (s *PhotoService) generateThumbnailForPhotoTier(photo *storage.Photo, tier 
 	if tier != thumbnailTierFull {
 		tier = thumbnailTierFull
 	}
+	unlock := s.lockThumbnailFile(photo.UUID)
+	defer unlock()
 	if s.thumbnailExistsForTier(photo, tier) && !s.thumbnailBuildIsActive() {
 		return nil
 	}
@@ -516,10 +535,14 @@ func (s *PhotoService) generateThumbnailForPhotoTier(photo *storage.Photo, tier 
 }
 
 func (s *PhotoService) writeThumbnailForPhoto(photo *storage.Photo) error {
+	ctx := s.backgroundContext()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	maxEdge := s.thumbnailLongEdge()
 	destPath := s.ThumbnailPath(photo)
 	if photo.MediaKind == storage.MediaKindVideo {
-		if err := media.GeneratePoster(s.resolveFinderPath(photo), destPath, maxEdge); err != nil {
+		if err := media.GeneratePosterContext(ctx, s.resolveFinderPath(photo), destPath, maxEdge); err != nil {
 			return err
 		}
 		s.cleanupRedundantThumbnailFiles(photo)
@@ -551,6 +574,114 @@ func (s *PhotoService) writeThumbnailForPhoto(photo *storage.Photo) error {
 		s.cleanupStaleHEIFPreviewFiles(photo)
 	}
 	s.cleanupRedundantThumbnailFiles(photo)
+	return nil
+}
+
+func (s *PhotoService) lockThumbnailFile(uuid string) func() {
+	lock, _ := s.thumbnailFileLocks.LoadOrStore(uuid, &sync.Mutex{})
+	mutex := lock.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
+
+// RefreshVideoThumbnail replaces one generated poster only after a fresh,
+// randomly sampled frame has been encoded successfully.
+func (s *PhotoService) RefreshVideoThumbnail(photoID, userID int64) (int64, error) {
+	photo, err := s.repo.GetPhotoByID(photoID, s.LibraryUserID(userID))
+	if err != nil {
+		return 0, err
+	}
+	if photo == nil {
+		return 0, fmt.Errorf("media not found")
+	}
+	if photo.MediaKind != storage.MediaKindVideo {
+		return 0, fmt.Errorf("media is not a video")
+	}
+	if s.legacyReadOnly {
+		return 0, fmt.Errorf("legacy thumbnails are read-only")
+	}
+	unlock := s.lockThumbnailFile(photo.UUID)
+	defer unlock()
+	if err := s.backgroundContext().Err(); err != nil {
+		return 0, err
+	}
+	target := s.ThumbnailPath(photo)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return 0, err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+photo.UUID+"-refresh-*.webp")
+	if err != nil {
+		return 0, err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, err
+	}
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+	srcPath := s.MediaPath(photo)
+	if !resolveManagedFile(srcPath) {
+		return 0, fmt.Errorf("source video is unavailable; old thumbnail retained")
+	}
+	generate := s.randomPosterGenerator
+	if generate == nil {
+		generate = media.GenerateRandomPosterContext
+	}
+	if err := generate(s.backgroundContext(), srcPath, tmpPath, s.thumbnailLongEdge()); err != nil {
+		return 0, err
+	}
+	versionTime := time.Now()
+	if oldInfo, statErr := os.Stat(target); statErr == nil && !versionTime.After(oldInfo.ModTime().Add(time.Second)) {
+		// Advance by a full second so coarse-resolution filesystems still emit a
+		// distinct cache key after replacing an existing poster.
+		versionTime = oldInfo.ModTime().Add(time.Second)
+	}
+	if err := os.Chtimes(tmpPath, versionTime, versionTime); err != nil {
+		return 0, fmt.Errorf("set refreshed thumbnail version: %w", err)
+	}
+	if err := replaceThumbnailFile(tmpPath, target); err != nil {
+		return 0, err
+	}
+	// The newly installed poster is authoritative. Remove only other known
+	// generated thumbnail layouts, never the source video or sidecar files.
+	for _, oldPath := range s.legacyThumbnailCandidates(photo) {
+		if oldPath != "" && oldPath != target {
+			_ = removeThumbnailFileIfExists(oldPath)
+		}
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return 0, err
+	}
+	return info.ModTime().UnixNano(), nil
+}
+
+func replaceThumbnailFile(tempPath, targetPath string) error {
+	if err := os.Rename(tempPath, targetPath); err == nil {
+		return nil
+	} else if _, statErr := os.Lstat(targetPath); statErr != nil {
+		return fmt.Errorf("install refreshed thumbnail: %w", err)
+	}
+	backup, err := os.CreateTemp(filepath.Dir(targetPath), ".thumbnail-backup-*")
+	if err != nil {
+		return err
+	}
+	backupPath := backup.Name()
+	_ = backup.Close()
+	_ = os.Remove(backupPath)
+	if err := os.Rename(targetPath, backupPath); err != nil {
+		return fmt.Errorf("preserve old thumbnail: %w", err)
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		if rollbackErr := os.Rename(backupPath, targetPath); rollbackErr != nil {
+			return fmt.Errorf("install refreshed thumbnail: %v; restore old thumbnail: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("install refreshed thumbnail: %w", err)
+	}
+	if err := os.Remove(backupPath); err != nil {
+		return fmt.Errorf("new thumbnail installed but old backup remains at %s: %w", backupPath, err)
+	}
 	return nil
 }
 
@@ -797,7 +928,7 @@ func (s *PhotoService) ensureHEIFPreview(photo *storage.Photo, sourcePath string
 	if info, err := os.Stat(previewPath); err == nil && !info.IsDir() && info.Size() > 0 {
 		return previewPath, nil
 	}
-	if err := imgpkg.ConvertHEIFToJPEG(sourcePath, previewPath); err != nil {
+	if err := imgpkg.ConvertHEIFToJPEGContext(s.backgroundContext(), sourcePath, previewPath); err != nil {
 		return "", err
 	}
 	s.cleanupStaleHEIFPreviewFiles(photo)

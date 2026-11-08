@@ -143,15 +143,22 @@ func scanPhotoWithExtraInt64(row interface {
 	var deletedAt sql.NullTime
 	var deletedBy sql.NullInt64
 	var exifJSON string
+	var takenAt flexibleSQLiteTime
 
 	err := row.Scan(
 		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
 		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &exifJSON, &p.IsFavorite, &p.IsSuperFavorite,
-		&p.TakenAt, &p.UploadedAt, &p.UploadedBy,
+		&takenAt, &p.UploadedAt, &p.UploadedBy,
 		&deletedAt, &deletedBy, extra,
 	)
 	if err != nil {
 		return nil, err
+	}
+	p.TakenAt = takenAt.Time
+	if !takenAt.Valid {
+		// Random ordering uses random_sort_key, so malformed legacy capture
+		// timestamps can safely fall back without changing page boundaries.
+		p.TakenAt = p.UploadedAt
 	}
 	if deletedAt.Valid {
 		p.DeletedAt = &deletedAt.Time
@@ -164,6 +171,65 @@ func scanPhotoWithExtraInt64(row interface {
 	}
 	applyPhotoEXIFJSON(&p, exifJSON)
 	return &p, nil
+}
+
+type flexibleSQLiteTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+func (t *flexibleSQLiteTime) Scan(value any) error {
+	if t == nil {
+		return fmt.Errorf("cannot scan SQLite time into nil receiver")
+	}
+	t.Time = time.Time{}
+	t.Valid = false
+	switch value := value.(type) {
+	case time.Time:
+		t.Time = value
+		t.Valid = !value.IsZero()
+	case string:
+		t.Time, t.Valid = parseFlexibleSQLiteTime(value)
+	case []byte:
+		t.Time, t.Valid = parseFlexibleSQLiteTime(string(value))
+	case int64:
+		if value > 1_000_000_000_000 || value < -1_000_000_000_000 {
+			t.Time = time.UnixMilli(value).UTC()
+		} else {
+			t.Time = time.Unix(value, 0).UTC()
+		}
+		t.Valid = true
+	}
+	return nil
+}
+
+func parseFlexibleSQLiteTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02T15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02 15:04:05.999999999 -0700",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04",
+		"2006-01-02",
+	} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func (s *DB) attachSharedPlaybackMetadata(photos []*storage.Photo) error {
@@ -681,7 +747,7 @@ func (s *DB) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage
 		TargetIndex:        targetIndex,
 		HasBefore:          beforePage.HasMore,
 		HasAfter:           afterPage.HasMore,
-		MissingBeforeCount: missingBeforeCount,
+		MissingBeforeCount: max(0, missingBeforeCount-len(beforePage.Photos)),
 	}
 	if len(beforePage.Photos) > 0 {
 		first := beforePage.Photos[0]
@@ -857,6 +923,12 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 		media_kind LIKE ? ESCAPE '\'
 	)`
 	args := []interface{}{params.UserID, pattern, pattern, pattern, pattern}
+	if canUsePhotoSearchIndex(query) {
+		where = `uploaded_by = ? AND deleted_at IS NULL AND id IN (
+			SELECT rowid FROM photos_search WHERE photos_search MATCH ?
+		)`
+		args = []interface{}{params.UserID, photoSearchMatch(query)}
+	}
 	if params.MediaKind != "" {
 		where += " AND media_kind = ?"
 		args = append(args, params.MediaKind)

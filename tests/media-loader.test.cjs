@@ -270,3 +270,38 @@ test('desktop prefetch keeps one neighbor on each side and PWA serves the shared
   assert.ok(html.indexOf('/static/media-loader.js') < html.indexOf('/static/app.js'));
   assert.match(sw, /\/static\/media-loader\.js\?v=/);
 });
+
+for (const mobile of [true, false]) {
+  test(`visible video metadata is bounded and drops obsolete queued cards (${mobile ? 'touch' : 'desktop'})`, async () => {
+    const h = appHarness(mobile);
+    const metadata = [];
+    h.context.isRootDebugMedia = () => false;
+    const request = (kind, photo) => new Promise(resolve => metadata.push({ kind, id: photo.id, finish: resolve }));
+    h.context.loadVideoPlaybackPreference = photo => request('playback', photo);
+    h.context.probeSubtitleMatch = photo => request('subtitles', photo);
+    const images = [1, 2, 3, 4, 5].map(id => ({
+      id, dataset: {}, isConnected: true,
+      closest: () => ({ classList: { add() {}, remove() {} } }),
+      removeAttribute(name) { delete this[name]; },
+    }));
+    images.forEach(image => h.context.registerManagedThumbnail(image, { id: image.id, media_kind: 'video' }));
+    h.observers[0].fn(images.map(target => ({ target, isIntersecting: true })));
+    assert.equal(metadata.length, 0, 'buffered cards must not request metadata');
+    h.observers[1].fn(images.map(target => ({ target, isIntersecting: true })));
+    const active = mobile ? 1 : 2;
+    assert.equal(metadata.length, active * 2);
+    // Repeated visibility callbacks cannot duplicate active tasks.
+    h.observers[1].fn(images.map(target => ({ target, isIntersecting: true })));
+    assert.equal(metadata.length, active * 2);
+    const obsolete = images[active];
+    h.observers[1].fn([{ target: obsolete, isIntersecting: false }]);
+    metadata.slice().forEach(call => call.finish());
+    await tick();
+    assert.equal(metadata.some(call => call.id === obsolete.id), false);
+    assert.equal(metadata.length, active * 4);
+    h.context.resetMediaLoadingRuntime();
+    metadata.slice().forEach(call => call.finish());
+    await tick();
+    assert.equal(metadata.length, active * 4, 'library teardown must not start queued metadata');
+  });
+}

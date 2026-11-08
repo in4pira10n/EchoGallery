@@ -92,6 +92,24 @@ func TestImportExistingPhotos_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRootFolderAlbumIsReusedAcrossScans(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	repo := svc.repo.(*mockRepo)
+	seen := map[string]bool{rootFolderAlbumKey: true}
+	for range 3 {
+		cache, err := svc.loadAlbumCache(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.ensureFolderAlbums(1, seen, cache, nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(repo.albums) != 1 || cache[rootFolderAlbumKey] == 0 {
+			t.Fatalf("根目录相册应重复使用同一条记录，得到 %d 条、缓存 %#v", len(repo.albums), cache)
+		}
+	}
+}
+
 func TestImportExistingPhotos_RestoresDeletedFileThatReappears(t *testing.T) {
 	svc, _ := newTestPhotoService(t)
 	path := filepath.Join(svc.sourcePath, "restored.jpg")
@@ -649,5 +667,84 @@ func TestImportExistingPhotosContext_Canceled(t *testing.T) {
 	}
 	if summary == nil {
 		t.Fatal("取消时仍应返回可读取的 summary")
+	}
+}
+
+func TestDirectoryCheckEnumeratesEachDirectoryOnce(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a", "a/deep", "b", ".hidden/ignored"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "photo.jpg"), []byte("not opened"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	reads := make(map[string]int)
+	readDir := func(path string) ([]os.DirEntry, error) {
+		reads[path]++
+		return os.ReadDir(path)
+	}
+	visited := 0
+	if err := walkLibraryDirectories(context.Background(), root, readDir, func(path string, entry os.DirEntry, entries []os.DirEntry) error {
+		visited++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if visited != 4 || len(reads) != 4 {
+		t.Fatalf("unexpected directories: visited=%d reads=%v", visited, reads)
+	}
+	for path, count := range reads {
+		if count != 1 {
+			t.Fatalf("directory %s enumerated %d times", path, count)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := walkLibraryDirectories(ctx, root, readDir, func(string, os.DirEntry, []os.DirEntry) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled directory check continued: %v", err)
+	}
+}
+
+func TestBackgroundScanDetectsNestedChangesWithoutSnapshotUpgrade(t *testing.T) {
+	svc, _ := newTestPhotoService(t)
+	ctx := WithBackgroundLibraryScan(context.Background())
+	folder := filepath.Join(svc.sourcePath, "nested", "deep")
+	if err := os.MkdirAll(folder, 0755); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := filepath.Join(folder, "first.jpg")
+	if err := os.WriteFile(firstPath, createJPEGBytes(12, 8), 0644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := svc.ImportExistingPhotosContext(ctx, 1, nil)
+	if err != nil || !first.Changed || first.Imported != 1 {
+		t.Fatalf("first scan: %+v %v", first, err)
+	}
+	unchanged, err := svc.ImportExistingPhotosContext(ctx, 1, nil)
+	if err != nil || unchanged.Changed || unchanged.Imported != 0 || unchanged.Pruned != 0 {
+		t.Fatalf("unchanged scan: %+v %v", unchanged, err)
+	}
+	before, err := os.Stat(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "second.jpg"), createJPEGBytes(14, 10), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(folder, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	added, err := svc.ImportExistingPhotosContext(ctx, 1, nil)
+	if err != nil || !added.Changed || added.Imported != 1 {
+		t.Fatalf("new media under unchanged directory timestamp missed: %+v %v", added, err)
+	}
+	if err := os.Remove(firstPath); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := svc.ImportExistingPhotosContext(ctx, 1, nil)
+	if err != nil || !removed.Changed || removed.Pruned != 1 {
+		t.Fatalf("removed media missed: %+v %v", removed, err)
 	}
 }
