@@ -6550,7 +6550,8 @@ function mediaLoadingRuntime() {
   const runtime = { library, cards: new Map(), prefetch: [], timer: 0, current: null,
     preview: null, direction: 1, lastIndex: null, hidden: document.hidden, frame: 0, swipe: new Map(), warm: new Set() };
   runtime.loader = window.EchoGalleryMediaLoader.create({ limit: mobile ? 3 : 6,
-    maxBytes: (mobile ? 24 : 64) * 1024 * 1024, maxEntries: mobile ? 48 : 96,
+    maxBytes: (mobile ? 12 : 64) * 1024 * 1024, maxEntries: mobile ? 24 : 96,
+    maxDecodedBytes: mobile ? 32 * 1024 * 1024 : Infinity,
     fetch: (url, options) => fetchWithPageSession(url, options) });
   runtime.metadataQueue = new Set();
   runtime.metadataActive = 0;
@@ -6610,6 +6611,8 @@ function mediaLoadingRuntime() {
         if (!current()) return;
         record.image.closest('.photo-thumb')?.classList.remove('thumb-loading', 'thumb-load-failed');
       };
+      // Visibility can change while a thumbnail finishes decoding.
+      if (!record.near) { runtime.releaseCard(record); return; }
       record.image.src = result.url;
     }).catch(error => {
       if (!current() || error.name === 'AbortError') return;
@@ -6752,7 +6755,9 @@ function queueMediaPrefetch(list, index) {
         || document.hidden || !isWarmEnabled() || !state.experimentalPrefetchNeighbors) return;
     const offsets = isTouchLikeDevice() ? [direction] : [direction, -direction];
     runtime.prefetch = offsets.map(offset => list[index + offset]).filter(Boolean)
-      .filter(photo => isVideoMedia(photo) || !(Number(photo.size) > runtime.loader.stats().maxBytes)).map(photo => {
+      .filter(photo => isVideoMedia(photo) || (!(Number(photo.size) > runtime.loader.stats().maxBytes)
+        && (!isTouchLikeDevice() || (Number(photo.width) * Number(photo.height) * 4 || 0)
+          <= runtime.loader.stats().maxDecodedBytes))).map(photo => {
       const spec = mediaResourceSpec(photo, isVideoMedia(photo) ? 'thumb' : 'full');
       const handle = runtime.loader.acquire(spec.key, spec.url, 3);
       handle.promise.catch(() => {}).finally(() => handle.release());

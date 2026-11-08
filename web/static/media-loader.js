@@ -6,6 +6,9 @@
     const limit = options.limit || 4;
     const maxBytes = options.maxBytes ?? 32 * 1024 * 1024;
     const maxEntries = options.maxEntries ?? 72;
+    // RGBA estimate supplements compressed bytes; current owned images can
+    // exceed the budget, but must become evictable as soon as they are released.
+    const maxDecodedBytes = options.maxDecodedBytes ?? Infinity;
     const request = options.fetch || root.fetch.bind(root);
     const createURL = options.createURL || (blob => URL.createObjectURL(blob));
     const revokeURL = options.revokeURL || (url => URL.revokeObjectURL(url));
@@ -19,17 +22,17 @@
       task.url = '';
     }
     function trim() {
-      let bytes = 0, count = 0;
+      let bytes = 0, decodedBytes = 0, count = 0;
       const idle = [];
       for (const task of tasks.values()) {
         if (task.status !== 'complete') continue;
-        bytes += task.bytes; count++;
+        bytes += task.bytes; decodedBytes += task.decodedBytes; count++;
         if (!task.owners.size) idle.push(task);
       }
       idle.sort((a, b) => a.used - b.used);
       for (const task of idle) {
-        if (bytes <= maxBytes && count <= maxEntries) break;
-        bytes -= task.bytes; count--; drop(task);
+        if (bytes <= maxBytes && decodedBytes <= maxDecodedBytes && count <= maxEntries) break;
+        bytes -= task.bytes; decodedBytes -= task.decodedBytes; count--; drop(task);
       }
     }
     function priority(task) { return Math.min(...task.owners.values()); }
@@ -61,8 +64,9 @@
         if (signal.aborted) throw abortError();
         objectURL = createURL(blob);
         const start = now();
-        if (options.decode) await options.decode(objectURL, signal);
-        else await decode(objectURL, signal);
+        const dimensions = await (options.decode || decode)(objectURL, signal);
+        task.decodedBytes = Math.max(0, Number(dimensions?.width) || 0)
+          * Math.max(0, Number(dimensions?.height) || 0) * 4;
         metrics.decodeMS += now() - start;
         if (signal.aborted) throw abortError();
         task.url = objectURL; objectURL = '';
@@ -90,7 +94,7 @@
         // Consumers still receive rejection, even if released before attaching a handler.
         promise.catch(() => {});
         task = { key, source, owners: new Map(), controller: new AbortController(), status: 'queued',
-          promise, resolve, reject, order: ++clock, used: clock, url: '', bytes: 0 };
+          promise, resolve, reject, order: ++clock, used: clock, url: '', bytes: 0, decodedBytes: 0 };
         tasks.set(key, task);
       } else metrics.shared++;
       const owner = Symbol();
@@ -127,8 +131,8 @@
       stats() {
         const items = [...tasks.values()];
         return { ...metrics, active, queued: items.filter(t => t.status === 'queued').length,
-          retainedBytes: items.reduce((n, t) => n + t.bytes, 0), entries: items.length,
-          pinned: items.filter(t => t.owners.size).length, limit, maxBytes, maxEntries };
+          retainedBytes: items.reduce((n, t) => n + t.bytes, 0), estimatedDecodedBytes: items.reduce((n, t) => n + t.decodedBytes, 0), entries: items.length,
+          pinned: items.filter(t => t.owners.size).length, limit, maxBytes, maxEntries, maxDecodedBytes };
       },
     };
   }
@@ -140,10 +144,11 @@
       function finish(error) {
         if (finished) return;
         finished = true;
+        const dimensions = { width: image.naturalWidth, height: image.naturalHeight };
         image.onload = image.onerror = null;
         signal.removeEventListener('abort', abort);
         image.removeAttribute('src');
-        if (error) reject(error); else resolve();
+        if (error) reject(error); else resolve(dimensions);
       }
       const abort = () => finish(abortError());
       image.onload = () => {

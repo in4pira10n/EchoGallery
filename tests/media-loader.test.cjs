@@ -113,7 +113,7 @@ test('clear aborts pending work, revokes cached objects, pause prevents restarti
 
 const source = fs.readFileSync(require.resolve('../web/static/app.js'), 'utf8');
 function appHarness(mobile = true) {
-  const h = harness();
+  const h = harness({ maxDecodedBytes: mobile ? 32 * 1024 * 1024 : Infinity });
   const timers = new Map(), observers = [];
   let timer = 0;
   const lightbox = { open: false, classList: { contains: () => lightbox.open } };
@@ -305,3 +305,27 @@ for (const mobile of [true, false]) {
     assert.equal(metadata.length, active * 4, 'library teardown must not start queued metadata');
   });
 }
+
+test('decoded pixel budget evicts a small compressed full image after its last owner leaves', async () => {
+  const h = harness({ maxBytes: 100, maxDecodedBytes: 32 * 1024 * 1024,
+    decode: async () => ({ width: 6000, height: 4000 }) });
+  const current = h.loader.acquire('full', '/full', 0);
+  const shared = h.loader.acquire('full', '/full', 0);
+  h.calls[0].finish(1); await current.promise;
+  assert.equal(h.loader.stats().estimatedDecodedBytes, 96000000);
+  current.release(); assert.equal(h.revoked.length, 0, 'visible shared image stays valid');
+  shared.release();
+  assert.equal(h.loader.stats().estimatedDecodedBytes, 0);
+  assert.deepEqual(h.revoked, ['blob:1']);
+  h.loader.dispose();
+});
+
+test('mobile avoids speculative decoding of oversized photos; desktop keeps its existing behavior', async () => {
+  for (const mobile of [true, false]) {
+    const h = appHarness(mobile);
+    const photos = [{ id: 1 }, { id: 2, width: 6000, height: 4000 }];
+    h.context.queueMediaPrefetch(photos, 0); h.flush();
+    assert.equal(h.calls.length, mobile ? 0 : 1);
+    h.context.resetMediaLoadingRuntime(); await tick();
+  }
+});

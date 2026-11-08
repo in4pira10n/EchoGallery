@@ -1,13 +1,13 @@
 /* Bounded square-card grids. Media order and pagination stay with the caller. */
 (function (root) {
   'use strict';
-  function layout({ count, width, columns, gap = 0, top = 0, viewport = 0, focus = null }) {
+  function layout({ count, width, columns, gap = 0, top = 0, viewport = 0, focus = null, mobile = false }) {
     columns = Math.max(1, columns || 1);
     const cell = Math.max(1, (width - gap * (columns - 1)) / columns);
     const pitch = cell + gap;
     const rows = Math.ceil(count / columns);
     const height = Math.max(0, rows * pitch - (rows ? gap : 0));
-    const buffer = Math.min(8, Math.max(2, Math.ceil(viewport / pitch)));
+    const buffer = mobile ? Math.max(1, Math.ceil(viewport / pitch)) : Math.min(8, Math.max(2, Math.ceil(viewport / pitch)));
     let first = Math.max(0, Math.floor(-top / pitch) - buffer);
     let last = Math.min(rows, Math.ceil((viewport - top) / pitch) + buffer);
     if (focus != null) {
@@ -29,8 +29,8 @@
     let mountedPeak = 0, created = 0, released = 0, previousScrollY = win.scrollY || 0;
     let userScrollActive = false, userScrollTimer = 0;
     // Touch scrolling can continue after touchend because of native inertia.
-    // On coarse-pointer devices defer only DOM pruning until the viewport is
-    // stable; cards entering the viewport are still mounted immediately.
+    // On coarse-pointer devices defer nearby DOM pruning until the viewport
+    // is stable. Distant cards have a hard cap even during prolonged inertia.
     const touchDevice = Boolean(win.matchMedia?.('(pointer: coarse)').matches &&
       win.matchMedia?.('(hover: none)').matches && win.navigator?.maxTouchPoints > 0);
     let touchSettling = false, settleFrame = 0, settleTimer = 0, stableFrames = 0;
@@ -73,7 +73,7 @@
       }
       return { ...layout({ count: controller.items.length + controller.placeholders,
         width: controller.cell * columns + gap * (columns - 1), columns, gap,
-        top: rect.top, viewport: win.innerHeight, focus }), top: rect.top, width: rect.width };
+        top: rect.top, viewport: win.innerHeight, focus, mobile: touchDevice }), top: rect.top, width: rect.width };
     }
     function rememberAnchor(controller, measured) {
       if (!controller.items.length || measured.top >= win.innerHeight || measured.top + measured.height <= 0) {
@@ -149,7 +149,13 @@
             node.style.gridColumnStart = String(i % g.columns + 1);
             continue;
           }
-          if (!touching && !touchSettling) drop(c, key, node);
+          // Explicit grid positions and fixed height make distant deletion independent
+          // of layout. Keep one extra window during inertia, rather than every
+          // card traversed since the finger first touched the screen.
+          const slot = key.startsWith('placeholder:') ? Number(key.slice(12)) :
+            (c.indices.get(key) ?? -Infinity) + c.placeholders;
+          const distant = slot < g.start - g.budget || slot >= g.end + g.budget;
+          if ((!touching && !touchSettling) || (touchDevice && distant)) drop(c, key, node);
         }
       }
       mountedPeak = Math.max(mountedPeak, [...grids.values()].reduce((n, value) => n + value.nodes.size, 0));
@@ -296,9 +302,12 @@
         const anchor = c.anchor;
         const oldSlot = anchor ? c.indices.get(anchor.key) + (c.placeholders || 0) : null;
         c.list = config.list;
+        // Keep an order snapshot: callers can splice the source list before
+        // notifying us about a deletion, so anchors need the previous indices.
         c.items = Array.from(items); c.placeholders = config.placeholders || 0;
         c.kind = config.kind; c.cardOptions = config.cardOptions || {};
-        c.indices = new Map(c.items.map((item, index) => [keyOf(item), index]));
+        c.indices = new Map();
+        c.items.forEach((item, index) => c.indices.set(keyOf(item), index));
         const newIndex = anchor ? c.indices.get(anchor.key) : null;
         const columns = c.geometry?.columns || 1;
         if (!pendingAnchor && newIndex != null &&
@@ -330,7 +339,8 @@
           const anchor = c.anchor;
           const oldIndex = anchor ? c.indices.get(anchor.key) : null;
           c.items = c.items.filter(item => !removed.has(Number(item.id)));
-          c.indices = new Map(c.items.map((item, index) => [keyOf(item), index]));
+          c.indices = new Map();
+          c.items.forEach((item, index) => c.indices.set(keyOf(item), index));
           const newIndex = anchor ? c.indices.get(anchor.key) : null;
           const columns = c.geometry?.columns || 1;
           if (!pendingAnchor && newIndex != null &&
@@ -345,7 +355,7 @@
       relayout: onResize,
       stats() {
         return { created, released, mountedPeak, grids: [...grids.values()].map(c => ({
-          id: c.grid.id, total: c.items.length + c.placeholders, mounted: c.nodes.size,
+          id: c.grid.id, total: c.items.length + c.placeholders, retainedItems: c.items.length, mounted: c.nodes.size,
           budget: c.geometry?.budget || 0, height: c.geometry?.height || 0,
         })) };
       },

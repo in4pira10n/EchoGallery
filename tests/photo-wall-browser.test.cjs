@@ -219,6 +219,27 @@ test('real browser: long scrolling, pagination, recycling, resize anchors and of
     assert.equal(interrupted.actual,interrupted.stopped,'interrupting inertia keeps the position chosen by the user');
     assert.deepEqual(interrupted.corrections,[],'second touch invalidates deferred anchor corrections');
     assert.ok(interrupted.stats.grids[0].mounted<=interrupted.stats.grids[0].budget,'DOM pruning resumes after the interrupted gesture settles');
+    const bounded = await evaluate(`(async()=>{
+      const height=snapshot().height;
+      let peak=0, budget=0;
+      document.dispatchEvent(new Event('touchstart'));
+      for(let i=0;i<50;i++){
+        scrollTo(0,10000+i*1200);
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        const s=snapshot();budget=s.stats.grids[0].budget;
+        peak=Math.max(peak,s.mounted);
+        if(Math.abs(s.height-height)>.5) throw new Error('grid height changed during recycling');
+        if(s.mounted>budget*3+1) throw new Error('unbounded mobile card accumulation');
+        if(s.resources!==s.mounted) throw new Error('detached card still owns a media record');
+      }
+      const stopped=scrollY;
+      document.dispatchEvent(new Event('touchend'));
+      await new Promise(r=>setTimeout(r,700));
+      return {peak,budget,stopped,actual:scrollY,mounted:snapshot().mounted};
+    })()`);
+    assert.equal(bounded.actual,bounded.stopped,'bounded recycling does not change scroll position');
+    assert.ok(bounded.mounted<=bounded.budget,'settled wall returns to its normal card budget');
+    t.diagnostic(JSON.stringify({mobileContinuousScroll:bounded}));
     const mobileAnchor=await evaluate('snapshot().lead');
     await evaluate('document.dispatchEvent(new Event("touchstart"));document.querySelector(".photo-grid").style.setProperty("--grid-size","140px");photoWallRuntime.relayout();document.dispatchEvent(new Event("touchend"))');
     await sleep(700);
