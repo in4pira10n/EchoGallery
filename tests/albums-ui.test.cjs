@@ -20,9 +20,11 @@ test('view in album returns through parent albums and never to the originating t
   for (const sourceView of ['timeline', 'random-album', 'favorites']) {
     const calls = [];
     const context = vm.createContext({
+      AbortController,
       state: { view: sourceView },
-      saveViewScroll() {}, copyText: key => key,
+      copyText: key => key,
       showTimelineLocateBlocking() {}, closeLightbox() {},
+      cancelAlbumLocate() {},
       parentAlbumFor: album => album.id === child.id ? root : null,
       openAlbumDetail: album => { context.state.currentAlbum = album; context.state.view = 'album-detail'; calls.push(album.id); },
       switchView: view => calls.push(view),

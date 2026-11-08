@@ -1920,7 +1920,6 @@ function bindMediaKindFilterControl() {
       localStorage.setItem(mediaKindFilterStorageKey, next);
       clearSelection();
       resetMediaFilteredViewState();
-      state.viewScrollPositions[viewScrollKeyFor()] = 0;
       renderView();
     });
   });
@@ -1973,7 +1972,6 @@ function bindAlbumKindFilterControl() {
       state.albumKindFilter = next;
       localStorage.setItem(albumKindFilterStorageKey, next);
       clearSelection();
-      state.viewScrollPositions.albums = 0;
       renderAlbums();
     });
   });
@@ -6233,7 +6231,6 @@ const state = {
   rootConsoleUsers: [],
   rootConsoleLoaded: false,
   settingsFocus: '',
-  settingsScrollRestorePending: true,
   lightboxPlaybackToken: 0,
   lightboxMediaLoading: false,
   lightboxSuppressLoading: false,
@@ -6261,7 +6258,6 @@ const state = {
   lightboxSwipeClickSuppressUntil: 0,
   lightboxLastPointerType: '',
   autoplayMutedHintShown: false,
-  viewScrollPositions: {},
   loadMoreObservers: {},
   gridScalePersistTimer: null,
   searchOpen: false,
@@ -6333,22 +6329,12 @@ const state = {
   libraryRandomLogoTried: {},
   libraryRandomLogoLoading: false,
   libraryLogosRefreshStarted: false,
-  pendingScrollRestoreID: '',
-  pendingScrollRestoreStartedAt: 0,
-  ignoreScrollSaveUntil: 0,
+  programmaticScrollGuardUntil: 0,
   programmaticScrollTargetTop: 0,
-  lastManualScrollAt: 0,
   lastManualScrollTop: 0,
   albumChildrenIndex: null,
 };
 
-function viewScrollKeyFor(view = state.view, albumID = state.currentAlbumID) {
-  if (view === 'album-detail') return `album-detail:${albumID || 0}`;
-  return view;
-}
-function saveViewScroll(view = state.view, albumID = state.currentAlbumID) {
-  state.viewScrollPositions[viewScrollKeyFor(view, albumID)] = window.scrollY || window.pageYOffset || 0;
-}
 function resetTimelineToInitialPage() {
   state.photos = [];
   state.timelineCursor = '';
@@ -6359,12 +6345,12 @@ function resetTimelineToInitialPage() {
   state.timelineTotal = 0;
   state.timelineLoaded = false;
   state.timelineLocateWindow = null;
+  state.timelineReturnWindow = null;
   state.timelineLocateTargetIndex = -1;
   state.timelineLocateMissingBeforeCount = 0;
   state.timelineLocatingActive = false;
   state.pendingTimelinePhotoID = null;
   state.timelineJumpCancelRequested = false;
-  state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
 }
 function timelineUsesManualBeforeLoading() {
   return timelinePlaceholderCount() > 0;
@@ -6374,15 +6360,16 @@ function albumUsesManualBeforeLoading() {
 }
 function noteManualViewScroll() {
   const top = window.scrollY || window.pageYOffset || 0;
-  if (Date.now() < state.ignoreScrollSaveUntil && Math.abs(top - state.programmaticScrollTargetTop) <= 2) {
+  if (state.lightboxReturnInFlight && state.lightboxReturnView === 'timeline') {
     state.lastManualScrollTop = top;
-    saveViewScroll();
+    return;
+  }
+  if (Date.now() < state.programmaticScrollGuardUntil && Math.abs(top - state.programmaticScrollTargetTop) <= 2) {
+    state.lastManualScrollTop = top;
     return;
   }
   const scrollingUp = top < (Number(state.lastManualScrollTop) || 0);
   state.lastManualScrollTop = top;
-  state.lastManualScrollAt = Date.now();
-  saveViewScroll();
   if (scrollingUp) {
     maybeTriggerTimelineBeforeLoadFromVisibleBoundary({ source: 'manual-scroll' });
     maybeTriggerAlbumBeforeLoadFromVisibleBoundary({ source: 'manual-scroll' });
@@ -6499,31 +6486,6 @@ function maybeTriggerAlbumBeforeLoadFromVisibleBoundary(options = {}) {
   if (rect.top <= threshold) {
     void loadMoreAlbumBefore();
   }
-}
-function restoreViewScroll(view = state.view, albumID = state.currentAlbumID) {
-  const key = viewScrollKeyFor(view, albumID);
-  const top = state.viewScrollPositions[key] || 0;
-  const restoreID = `${view}:${albumID || 0}:${Date.now()}:${Math.random()}`;
-  state.pendingScrollRestoreID = restoreID;
-  state.pendingScrollRestoreStartedAt = Date.now();
-  const stillCurrent = () => {
-    if (view !== state.view) return;
-    if (view === 'album-detail' && albumID !== state.currentAlbumID) return;
-    if (state.lastManualScrollAt > state.pendingScrollRestoreStartedAt + 24) return;
-    return state.pendingScrollRestoreID === restoreID;
-  };
-  const apply = () => {
-    if (!stillCurrent()) return;
-    state.ignoreScrollSaveUntil = Date.now() + 120;
-    state.programmaticScrollTargetTop = top;
-    state.lastManualScrollTop = top;
-    window.scrollTo(0, top);
-  };
-  requestAnimationFrame(() => {
-    apply();
-    requestAnimationFrame(apply);
-  });
-  [80, 180, 360, 700, 1100].forEach(delay => window.setTimeout(apply, delay));
 }
 
 // ── 分享状态加载 ─────────────────────────────────────
@@ -7939,12 +7901,8 @@ function switchView(view) {
   if (state.view === 'settings' && view !== 'settings' && canManageLibraries() && !isRootUser()) {
     syncLibraryDraftsToRuntime();
   }
-  saveViewScroll();
   disconnectLoadMoreObserver();
   closeNavPicker();
-  if (view === 'settings' && state.view !== 'settings') {
-    state.settingsScrollRestorePending = true;
-  }
   if (view !== 'settings') stopSettingsAvailabilityPolling();
   if (view !== 'album-detail') cancelAlbumLocate();
   setSettingsViewVisible(view === 'settings');
@@ -8508,7 +8466,7 @@ async function renderRandomAlbum() {
     await renderRandomAlbumGrid();
     requestVisibleThumbnailWarmup('random-album', randomAlbumWarmCandidates(state.randomAlbumPhotos));
     observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
-    if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
+    await focusPendingRandomAlbumPhoto();
     return;
   }
 
@@ -8529,10 +8487,9 @@ async function renderRandomAlbum() {
     if (state.randomAlbumPhotos !== items || state.view !== 'random-album') return;
     state.randomAlbumViewLoaded = true;
     observeLoadMore('load-more', loadMoreRandomAlbum, canLoadMoreRandomAlbum);
-    if (!(await focusPendingRandomAlbumPhoto())) restoreViewScroll('random-album');
+    await focusPendingRandomAlbumPhoto();
   } catch (e) {
     $('#random-album-wrap').innerHTML = `<p style="color:var(--danger)">${copyText('app.interface.d_random_album_load_failed', { error: (e && e.error) || e })}</p>`;
-    restoreViewScroll('random-album');
   }
 }
 
@@ -9184,10 +9141,6 @@ async function renderSettings() {
     if (state.view !== 'settings') return;
     try {
       await ensureSettingsViewMounted();
-      if (state.settingsScrollRestorePending) {
-        restoreViewScroll('settings');
-        state.settingsScrollRestorePending = false;
-      }
     } catch (e) {
       console.error('render root console failed', e);
       host.innerHTML = `<div class="card settings-panel"><h3>${escapeHTML(copyText('app.interface.runtime.rootConsoleLoadFailed'))}</h3><p style="color:var(--danger)">${escapeHTML((e && e.message) || e)}</p></div>`;
@@ -9210,10 +9163,6 @@ async function renderSettings() {
   try {
     await ensureSettingsViewMounted();
     bindSettingsTopSaveButton();
-    if (state.settingsScrollRestorePending) {
-      restoreViewScroll('settings');
-      state.settingsScrollRestorePending = false;
-    }
     refreshMissingLibraryLogosOnce();
     refreshShareManagementUI();
     if (state.settingsFocus === 'libraries') {
@@ -9224,10 +9173,6 @@ async function renderSettings() {
   } catch (e) {
     console.error('render settings failed', e);
     host.innerHTML = `<div class="card settings-panel"><h3>${escapeHTML(settingsText('common.loadFailedTitle'))}</h3><p>${escapeHTML(settingsText('common.loadFailedCopy'))}</p><p style="color:var(--danger)">${(e && e.message) || e}</p></div>`;
-    if (state.settingsScrollRestorePending) {
-      restoreViewScroll('settings');
-      state.settingsScrollRestorePending = false;
-    }
   }
 }
 
@@ -11908,7 +11853,6 @@ async function renderTimeline() {
     state.timelineHasMore = true;
     state.timelineTotal = 0;
     state.timelineLoaded = false;
-    state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
     switchView('timeline');
   });
   $('#timeline-load-all-btn').addEventListener('click', openTimelineLoadAllModal);
@@ -11929,7 +11873,7 @@ async function renderTimeline() {
     requestVisibleThumbnailWarmup('timeline', state.photos);
     observeLoadMore('load-more-top', loadMoreTimelineBefore, () => state.timelineHasBefore && !timelineUsesManualBeforeLoading() && !state.timelineLoadingBefore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused, { rootMargin: '50% 0px 0px 0px' });
     observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
-    if (!(await focusPendingTimelinePhoto())) restoreViewScroll('timeline');
+    await focusPendingTimelinePhoto();
     finishLightboxReturnTransition();
     return;
   }
@@ -11937,7 +11881,8 @@ async function renderTimeline() {
   if (hasPendingFocus) {
     try {
       state.timelineLocatingActive = true;
-      const located = await loadTimelineLocateWindow(state.pendingTimelinePhotoID);
+      const located = state.timelineReturnWindow || await loadTimelineLocateWindow(state.pendingTimelinePhotoID);
+      state.timelineReturnWindow = null;
       state.photos = Array.isArray(located && located.photos) ? located.photos : [];
       state.timelineLocateWindow = located || null;
       state.timelineLocateTargetIndex = Number.isFinite(Number(located && located.target_index)) ? Number(located.target_index) : -1;
@@ -11948,10 +11893,9 @@ async function renderTimeline() {
       state.timelineTotal = state.photos.length;
       state.timelineLoaded = true;
       renderTimelineGrid();
-      const focusedPending = await focusPendingTimelinePhoto();
+      await focusPendingTimelinePhoto();
       observeLoadMore('load-more-top', loadMoreTimelineBefore, () => state.timelineHasBefore && !timelineUsesManualBeforeLoading() && !state.timelineLoadingBefore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused, { rootMargin: '50% 0px 0px 0px' });
       observeLoadMore('load-more', loadMoreTimeline, () => state.timelineHasMore && !state.timelineLoading && !state.timelineBulkLoading && !state.timelineAutoLoadPaused);
-      if (!focusedPending) restoreViewScroll('timeline');
       finishLightboxReturnTransition();
       return;
     } catch (e) {
@@ -11973,7 +11917,6 @@ async function renderTimeline() {
   state.timelineCursor = '';
   state.timelineHasMore = true;
   state.timelineTotal = 0;
-  state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
   window.scrollTo(0, 0);
   await loadMoreTimeline();
   state.timelineLoaded = true;
@@ -11985,7 +11928,6 @@ async function renderTimeline() {
     return;
   }
   finishLightboxReturnTransition();
-  state.viewScrollPositions[viewScrollKeyFor('timeline')] = 0;
   window.scrollTo(0, 0);
 }
 
@@ -12183,7 +12125,6 @@ async function renderFavorites() {
     updateFavoriteTotalHint();
     updateLoadMoreUI('load-more', state.favoriteHasMore);
     observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
-    restoreViewScroll('favorites');
     return;
   }
 
@@ -12194,7 +12135,6 @@ async function renderFavorites() {
   updateFavoriteTotalHint();
   await loadMoreFavorites();
   observeLoadMore('load-more', loadMoreFavorites, () => state.favoriteHasMore && !state.favoriteLoading);
-  restoreViewScroll('favorites');
 }
 
 async function loadMoreTimeline() {
@@ -12488,7 +12428,6 @@ async function renderMemories() {
   $('#content').innerHTML = `<div id="memory-groups"></div>`;
   if (state.memoriesLoaded) {
     renderMemoryGroups();
-    restoreViewScroll('memories');
     return;
   }
   state.memoriesLoading = true;
@@ -12512,7 +12451,6 @@ async function renderMemories() {
   state.memoriesLoaded = true;
   saveMemoryEntries(liveEntries);
   renderMemoryGroups();
-  restoreViewScroll('memories');
   state.memoriesLoading = false;
 }
 
@@ -14901,12 +14839,13 @@ function removeTrashPhotosFromUI(ids) {
   }
 }
 
-function openInTimeline(photoId, photo = null, { showLocateDialog = true, keepLightboxOpen = false } = {}) {
+function openInTimeline(photoId, photo = null, { showLocateDialog = true, keepLightboxOpen = false, locatedWindow = null } = {}) {
   if (photo && !mediaKindMatchesFilter(photo)) {
     state.mediaKindFilter = 'all';
     localStorage.setItem(mediaKindFilterStorageKey, 'all');
   }
   resetTimelineToInitialPage();
+  state.timelineReturnWindow = locatedWindow;
   state.pendingTimelinePhotoID = photoId;
   state.timelineJumpCancelRequested = false;
   if (showLocateDialog) showTimelineLocateBlocking();
@@ -14970,7 +14909,6 @@ async function loadAlbumBeforeWindow(albumId, photoId) {
 
 function openInAlbum(album, photoId) {
   if (!album || !album.id) return;
-  saveViewScroll();
   cancelAlbumLocate();
   state.pendingAlbumPhotoID = photoId;
   state.albumLocateAbortController = new AbortController();
@@ -15005,6 +14943,11 @@ async function focusPendingTimelinePhoto(options = {}) {
     return false;
   }
   if (!skipScroll) thumb.scrollIntoView({ behavior: 'auto', block: 'center' });
+  if (state.lightboxReturnInFlight) {
+    state.programmaticScrollTargetTop = window.scrollY || window.pageYOffset || 0;
+    state.lastManualScrollTop = state.programmaticScrollTargetTop;
+    state.programmaticScrollGuardUntil = Date.now() + 500;
+  }
   setFocusedPhoto(photoId, { scroll: false });
   thumb.classList.add('photo-thumb-focus');
   setTimeout(() => thumb.classList.remove('photo-thumb-focus'), 1000);
@@ -15074,13 +15017,11 @@ async function renderAlbums() {
   $('#content').innerHTML = `<div id="album-grid-wrap"></div>`;
   if (state.albumsLoaded) {
     renderAlbumGrid();
-    restoreViewScroll('albums');
     return;
   }
   try {
     await ensureAlbumsLoaded();
     renderAlbumGrid();
-    restoreViewScroll('albums');
   } catch(e) { $('#content').innerHTML = `<p style="color:var(--danger)">${escapeHTML(copyText('app.interface.runtime.loadFailed'))}</p>`; }
 }
 
@@ -15295,7 +15236,6 @@ function makeAlbumCard(album, options = {}) {
 
 // ── 相册详情 ──────────────────────────────────────────
 async function openAlbumDetail(album) {
-  saveViewScroll();
   const nextID = Number(album && album.id);
   const prevID = Number(state.currentAlbumID || 0);
   const cached = (state.albums || []).find(item => Number(item && item.id) === nextID);
@@ -15419,7 +15359,6 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
         state.albumLocateMissingBeforeCount = 0;
         state.albumLocatingActive = false;
         state.albumDetailLoadedKey = '';
-        state.viewScrollPositions[viewScrollKeyFor('album-detail', album.id)] = 0;
         renderAlbumDetail();
       });
     });
@@ -15457,7 +15396,6 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
     $('#album-groups').innerHTML = '';
     updateLoadMoreUI('load-more', false);
     updateLoadMoreUI('load-more-top', false);
-    restoreViewScroll('album-detail', album.id);
     return;
   }
   const canReuseLoadedAlbumForPendingFocus = hasPendingAlbumFocus
@@ -15471,7 +15409,6 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
     updateLoadMoreUI('load-more-top', state.albumHasBefore);
     observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
     maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
-    restoreViewScroll('album-detail', album.id);
     return;
   }
   if (canReuseLoadedAlbumForPendingFocus) {
@@ -15483,7 +15420,7 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
     updateLoadMoreUI('load-more-top', state.albumHasBefore);
     observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
     maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
-    if (!(await focusPendingAlbumPhoto())) restoreViewScroll('album-detail', album.id);
+    await focusPendingAlbumPhoto();
     return;
   }
   state.albumPhotos = [];
@@ -15508,11 +15445,10 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
       state.albumHasMore = !!(located && located.has_after);
       state.albumDetailLoadedKey = detailStateKey;
       renderAlbumGroups(state.albumPhotos);
-      const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
+      await focusPendingAlbumPhoto();
       observeLoadMore('load-more-top', loadMoreAlbumBefore, () => state.albumHasBefore && !albumUsesManualBeforeLoading() && !state.albumLoadingBefore && !state.albumLoading, { rootMargin: '50% 0px 0px 0px' });
       observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
       maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
-      if (!focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
       return;
     } catch (e) {
       if (locateRequestID !== state.albumLocateRequestID) return;
@@ -15526,11 +15462,10 @@ ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-
   state.albumLocatingActive = false;
   await loadMoreAlbumPhotos();
   state.albumDetailLoadedKey = detailStateKey;
-  const focusedPendingAlbumPhoto = await focusPendingAlbumPhoto();
+  await focusPendingAlbumPhoto();
   observeLoadMore('load-more-top', loadMoreAlbumBefore, () => state.albumHasBefore && !albumUsesManualBeforeLoading() && !state.albumLoadingBefore && !state.albumLoading, { rootMargin: '50% 0px 0px 0px' });
   observeLoadMore('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
   maybeLoadMoreImmediately('load-more', loadMoreAlbumPhotos, () => state.albumHasMore && !state.albumLoading);
-  if (!hasPendingAlbumFocus || !focusedPendingAlbumPhoto) restoreViewScroll('album-detail', album.id);
 }
 
 function renderAlbumChildGrid(albums = []) {
@@ -15792,7 +15727,6 @@ async function renderTrash() {
     renderTrashGroups([], { reset: true });
   }
   syncTrashLoadMoreObserver();
-  restoreViewScroll('trash');
 }
 
 async function loadTrashAlbums() {
@@ -17026,6 +16960,7 @@ async function openLightbox(photos, index, options = {}) {
   lbRender();
 }
 function closeLightbox() {
+  state.lightboxReturnRequestID = (Number(state.lightboxReturnRequestID) || 0) + 1;
   resetLightboxTrackpad();
   state.lightboxSuppressLoading = false;
   cancelVideoSoundtrackRequest($('#lb-video'));
@@ -17105,9 +17040,11 @@ function exitLightboxToContext() {
   // Rebuild the bounded timeline window around the current item, even when it
   // is already present in the old grid. Reuse the explicit timeline action.
   if (currentPhotoID && returnView === 'timeline') {
+    if (state.lightboxReturnInFlight) return;
     state.lightboxReturnInFlight = true;
     state.lightboxReturnTargetID = Number(currentPhotoID);
-    openInTimeline(currentPhotoID, currentPhoto, { showLocateDialog: false, keepLightboxOpen: true });
+    const requestID = state.lightboxReturnRequestID = (Number(state.lightboxReturnRequestID) || 0) + 1;
+    void prepareTimelineLightboxReturn(currentPhotoID, currentPhoto, requestID);
     return;
   }
   const shouldUseOriginalScroll = currentPhotoID && Number(currentPhotoID) === Number(state.lightboxSeedPhotoID || 0);
@@ -17143,6 +17080,36 @@ function exitLightboxToContext() {
   }
   if (currentPhotoID && returnView === 'favorites') {
     focusPhotoThumbInCurrentView(currentPhotoID);
+  }
+}
+async function prepareTimelineLightboxReturn(photoID, photo, requestID) {
+  const libraryKey = activeLibraryIdentity(state.serverSettings);
+  try {
+    if (photo && !mediaKindMatchesFilter(photo)) {
+      state.mediaKindFilter = 'all';
+      localStorage.setItem(mediaKindFilterStorageKey, 'all');
+    }
+    const locatedWindow = await loadTimelineLocateWindow(photoID);
+    if (state.lightboxReturnRequestID !== requestID || !state.lightboxReturnInFlight || state.lightboxReturnView !== 'timeline'
+        || Number(state.lightboxReturnTargetID) !== Number(photoID)
+        || !$('#lightbox')?.classList.contains('open')) return;
+    if (libraryKey !== activeLibraryIdentity(state.serverSettings)
+        || Number(state.lightboxPhotos[state.lightboxIndex]?.id) !== Number(photoID)) {
+      state.lightboxReturnInFlight = false;
+      state.lightboxReturnTargetID = null;
+      return;
+    }
+    if (!Array.isArray(locatedWindow?.photos) || !locatedWindow.photos.some(item => Number(item.id) === Number(photoID))) {
+      throw new Error('Timeline return target missing from locate response');
+    }
+    openInTimeline(photoID, photo, { showLocateDialog: false, keepLightboxOpen: true, locatedWindow });
+  } catch (error) {
+    if (state.lightboxReturnRequestID !== requestID || !state.lightboxReturnInFlight || Number(state.lightboxReturnTargetID) !== Number(photoID)) return;
+    state.lightboxReturnInFlight = false;
+    state.lightboxReturnTargetID = null;
+    if (libraryKey !== activeLibraryIdentity(state.serverSettings)) return;
+    console.warn('timeline return locate failed', error);
+    showToast(copyText('app.interface.s_aa18e0c728'));
   }
 }
 function lightboxCanLoadMoreForward() {

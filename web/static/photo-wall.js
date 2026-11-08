@@ -28,6 +28,13 @@
     let frame = 0, idleTimer = 0, touching = false, lastScroll = -Infinity, pendingAnchor = null;
     let mountedPeak = 0, created = 0, released = 0, previousScrollY = win.scrollY || 0;
     let userScrollActive = false, userScrollTimer = 0;
+    // Touch scrolling can continue after touchend because of native inertia.
+    // On coarse-pointer devices defer only DOM pruning until the viewport is
+    // stable; cards entering the viewport are still mounted immediately.
+    const touchDevice = Boolean(win.matchMedia?.('(pointer: coarse)').matches &&
+      win.matchMedia?.('(hover: none)').matches && win.navigator?.maxTouchPoints > 0);
+    let touchSettling = false, settleFrame = 0, settleTimer = 0, stableFrames = 0;
+    let lastViewport = null, viewportWidth = win.innerWidth;
     const keyOf = item => String(item.uuid || item.id);
     const clock = () => win.performance.now();
     function drop(controller, key, node) {
@@ -35,6 +42,7 @@
       node.remove(); controller.nodes.delete(key); released++;
     }
     function dispose(controller) {
+      if (pendingAnchor?.controller === controller) pendingAnchor = null;
       for (const [key, node] of controller.nodes) drop(controller, key, node);
       resize?.unobserve(controller.grid);
       grids.delete(controller.grid);
@@ -71,6 +79,9 @@
       if (!controller.items.length || measured.top >= win.innerHeight || measured.top + measured.height <= 0) {
         controller.anchor = null; return;
       }
+      if (measured.top + Math.floor(controller.placeholders / measured.columns) * measured.pitch >= win.innerHeight) {
+        controller.anchor = null; return;
+      }
       const cell = Math.max(controller.placeholders,
         Math.max(0, Math.floor(-measured.top / measured.pitch)) * measured.columns);
       const index = Math.min(controller.items.length - 1, Math.max(0, cell - controller.placeholders));
@@ -89,7 +100,7 @@
         win.clearTimeout(idleTimer);
         return;
       }
-      if (touching || clock() - lastScroll < 160) {
+      if (touching || touchSettling || clock() - lastScroll < 160) {
         win.clearTimeout(idleTimer); idleTimer = win.setTimeout(restoreAnchor, 180); return;
       }
       const anchor = pendingAnchor; pendingAnchor = null;
@@ -138,7 +149,7 @@
             node.style.gridColumnStart = String(i % g.columns + 1);
             continue;
           }
-          drop(c, key, node);
+          if (!touching && !touchSettling) drop(c, key, node);
         }
       }
       mountedPeak = Math.max(mountedPeak, [...grids.values()].reduce((n, value) => n + value.nodes.size, 0));
@@ -158,6 +169,15 @@
       grids.forEach(c => { c.relayout = true; });
       schedule();
     }
+    function onViewportResize() {
+      const widthChanged = viewportWidth !== win.innerWidth || [...grids.values()].some(c =>
+        Math.abs(c.grid.getBoundingClientRect().width - (c.geometry?.width || 0)) > .5);
+      viewportWidth = win.innerWidth;
+      // Safari's browser chrome changes viewport height during scrolling. The
+      // square grid geometry is unchanged, so this must not queue a correction.
+      if (widthChanged) onResize();
+      else schedule();
+    }
     const resize = typeof win.ResizeObserver === 'function' ? new win.ResizeObserver(entries => {
       if (entries.some(entry => {
         const c = grids.get(entry.target);
@@ -175,6 +195,47 @@
       }, 180);
     }
     function onInput() { userScrollActive = true; trackUserScrollEnd(); }
+    function viewportSnapshot() {
+      const vv = win.visualViewport;
+      return [win.scrollY || 0, vv?.offsetTop || 0, vv?.offsetLeft || 0,
+        vv?.width || win.innerWidth, vv?.height || win.innerHeight,
+        doc.documentElement.scrollHeight, doc.body?.scrollHeight || 0];
+    }
+    function sameViewport(a, b) {
+      return a && b && a.length === b.length && a.every((value, index) => Math.abs(value - b[index]) < .25);
+    }
+    function stopTouchSettling() {
+      touchSettling = false; stableFrames = 0; lastViewport = null;
+      if (settleFrame) { win.cancelAnimationFrame(settleFrame); settleFrame = 0; }
+      win.clearTimeout(settleTimer); settleTimer = 0;
+      schedule();
+    }
+    function probeTouchSettling() {
+      if (!touchDevice || !touchSettling || touching || settleFrame) return;
+      settleFrame = win.requestAnimationFrame(() => {
+        settleFrame = 0;
+        if (!touchSettling) return;
+        const current = viewportSnapshot();
+        if (sameViewport(lastViewport, current)) stableFrames++;
+        else stableFrames = 0;
+        lastViewport = current;
+        if (stableFrames >= 5 && !touching) {
+          stopTouchSettling();
+          restoreAnchor();
+          return;
+        }
+        probeTouchSettling();
+      });
+    }
+    function armTouchSettlingCheck() {
+      if (!touchDevice || !touchSettling || touching) return;
+      win.clearTimeout(settleTimer);
+      if (settleFrame) { win.cancelAnimationFrame(settleFrame); settleFrame = 0; }
+      stableFrames = 0; lastViewport = viewportSnapshot();
+      // Avoid a frame loop during native momentum. Sample only after scroll
+      // events have gone quiet, then use a handful of frames to confirm.
+      settleTimer = win.setTimeout(() => { settleTimer = 0; probeTouchSettling(); }, 120);
+    }
     function onScroll() {
       const y = win.scrollY || 0;
       // Touch inertia can continue long after the last input event. Keep the
@@ -184,11 +245,33 @@
       previousScrollY = y;
       if (userScrollActive) trackUserScrollEnd();
       lastScroll = clock(); schedule();
+      if (touchSettling) armTouchSettlingCheck();
     }
-    function onTouchStart() { touching = true; onInput(); }
-    function onTouchEnd() { touching = false; onInput(); restoreAnchor(); }
+    function onTouchStart() {
+      touching = true;
+      if (touchDevice) {
+        // A new touch can stop native momentum before its final scroll event.
+        // The position under the finger supersedes every deferred correction.
+        pendingAnchor = null;
+        win.clearTimeout(idleTimer); idleTimer = 0;
+        previousScrollY = win.scrollY || 0;
+        for (const c of grids.values()) {
+          if (c.grid.isConnected) rememberAnchor(c, geometry(c));
+        }
+      }
+      if (settleFrame) { win.cancelAnimationFrame(settleFrame); settleFrame = 0; }
+      win.clearTimeout(settleTimer); settleTimer = 0;
+      touchSettling = touchDevice; stableFrames = 0; lastViewport = null;
+      onInput(); schedule();
+    }
+    function onTouchEnd() {
+      touching = false; onInput();
+      if (touchDevice) { touchSettling = true; armTouchSettlingCheck(); }
+      else restoreAnchor();
+    }
     win.addEventListener('scroll', onScroll, { passive: true });
-    win.addEventListener('resize', onResize, { passive: true });
+    win.addEventListener('resize', onViewportResize, { passive: true });
+    if (touchDevice) win.visualViewport?.addEventListener('resize', onViewportResize, { passive: true });
     win.addEventListener('wheel', onInput, { passive: true });
     doc.addEventListener('touchstart', onTouchStart, { passive: true });
     doc.addEventListener('touchend', onTouchEnd, { passive: true });
@@ -207,11 +290,21 @@
           });
           grids.set(grid, c); resize?.observe(grid);
         }
-        if (!pendingAnchor && c.anchor) pendingAnchor = c.anchor;
+        // Read the current viewport before changing media order. Ordinary
+        // appends and metadata updates never need scroll compensation.
+        if (c.geometry && c.grid.isConnected && !pendingAnchor) rememberAnchor(c, geometry(c));
+        const anchor = c.anchor;
+        const oldSlot = anchor ? c.indices.get(anchor.key) + (c.placeholders || 0) : null;
         c.list = config.list;
         c.items = Array.from(items); c.placeholders = config.placeholders || 0;
         c.kind = config.kind; c.cardOptions = config.cardOptions || {};
         c.indices = new Map(c.items.map((item, index) => [keyOf(item), index]));
+        const newIndex = anchor ? c.indices.get(anchor.key) : null;
+        const columns = c.geometry?.columns || 1;
+        if (!pendingAnchor && newIndex != null &&
+            Math.floor(oldSlot / columns) !== Math.floor((newIndex + c.placeholders) / columns)) {
+          pendingAnchor = anchor;
+        }
         render(c); restoreAnchor();
         // Callers can populate a grid just before inserting it in the page.
         if (!grid.isConnected) schedule();
@@ -233,9 +326,17 @@
         const removed = new Set([...ids].map(Number));
         for (const c of grids.values()) {
           if (grid !== undefined && c.grid !== grid) continue;
-          if (!pendingAnchor && c.anchor && !removed.has(Number(c.items[c.indices.get(c.anchor.key)]?.id))) pendingAnchor = c.anchor;
+          if (!pendingAnchor && c.grid.isConnected) rememberAnchor(c, geometry(c));
+          const anchor = c.anchor;
+          const oldIndex = anchor ? c.indices.get(anchor.key) : null;
           c.items = c.items.filter(item => !removed.has(Number(item.id)));
           c.indices = new Map(c.items.map((item, index) => [keyOf(item), index]));
+          const newIndex = anchor ? c.indices.get(anchor.key) : null;
+          const columns = c.geometry?.columns || 1;
+          if (!pendingAnchor && newIndex != null &&
+              Math.floor((oldIndex + c.placeholders) / columns) !== Math.floor((newIndex + c.placeholders) / columns)) {
+            pendingAnchor = anchor;
+          }
           render(c);
         }
         restoreAnchor();
@@ -251,8 +352,9 @@
       dispose() {
         for (const c of grids.values()) dispose(c);
         resize?.disconnect(); mutations.disconnect();
-        win.cancelAnimationFrame(frame); win.clearTimeout(idleTimer); win.clearTimeout(userScrollTimer);
-        win.removeEventListener('scroll', onScroll); win.removeEventListener('resize', onResize);
+        win.cancelAnimationFrame(frame); win.cancelAnimationFrame(settleFrame); win.clearTimeout(settleTimer); win.clearTimeout(idleTimer); win.clearTimeout(userScrollTimer);
+        win.removeEventListener('scroll', onScroll); win.removeEventListener('resize', onViewportResize);
+        if (touchDevice) win.visualViewport?.removeEventListener('resize', onViewportResize);
         win.removeEventListener('wheel', onInput);
         doc.removeEventListener('touchstart', onTouchStart); doc.removeEventListener('touchend', onTouchEnd);
         doc.removeEventListener('touchcancel', onTouchEnd);

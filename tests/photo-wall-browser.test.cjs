@@ -186,4 +186,41 @@ test('real browser: long scrolling, pagination, recycling, resize anchors and of
       await evaluate('document.querySelector("main").innerHTML=""');await settle();
       assert.equal(await evaluate('mediaLoadRuntime.cards.size'),0,view);
     }
+    // Start a fresh runtime with coarse-pointer detection enabled. Desktop
+    // wheel tests above deliberately exercise the separate desktop path.
+    await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:5});
+    await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}`});
+    for(let i=0;i<100;i++){if(await evaluate('typeof photoWallRuntime!=="undefined"&&!!photoWallRuntime'))break;await sleep(25)}
+    await settle();
+    assert.equal(await evaluate('matchMedia("(pointer: coarse)").matches && navigator.maxTouchPoints > 0'),true);
+    await evaluate('scrollTo(0,20000)');await settle();
+    const interrupted = await evaluate(`(async()=>{
+      window.corrections=[];
+      const nativeScrollBy=window.scrollBy.bind(window);
+      window.scrollBy=(...args)=>{corrections.push(args);nativeScrollBy(...args)};
+      document.dispatchEvent(new Event('touchstart'));
+      document.querySelector('.photo-grid').style.setProperty('--grid-size','96px');
+      photoWallRuntime.relayout();
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      document.dispatchEvent(new Event('touchend'));
+      scrollTo(0,scrollY+160);
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      // A second touch interrupts inertia before layout compensation can run.
+      document.dispatchEvent(new Event('touchstart'));
+      const stopped=scrollY;
+      state.photos.push({id:40001,uuid:'interrupted'});appendTimelineGrid([]);
+      document.dispatchEvent(new Event('touchend'));
+      // Height-only browser chrome events must not revive the old anchor.
+      window.dispatchEvent(new Event('resize'));
+      visualViewport.dispatchEvent(new Event('resize'));
+      await new Promise(r=>setTimeout(r,700));
+      return {stopped,actual:scrollY,corrections,stats:photoWallRuntime.stats()};
+    })()`);
+    assert.equal(interrupted.actual,interrupted.stopped,'interrupting inertia keeps the position chosen by the user');
+    assert.deepEqual(interrupted.corrections,[],'second touch invalidates deferred anchor corrections');
+    assert.ok(interrupted.stats.grids[0].mounted<=interrupted.stats.grids[0].budget,'DOM pruning resumes after the interrupted gesture settles');
+    const mobileAnchor=await evaluate('snapshot().lead');
+    await evaluate('document.dispatchEvent(new Event("touchstart"));document.querySelector(".photo-grid").style.setProperty("--grid-size","140px");photoWallRuntime.relayout();document.dispatchEvent(new Event("touchend"))');
+    await sleep(700);
+    assert.ok(Math.abs((await evaluate(`findPhotoThumb(${mobileAnchor.id}).getBoundingClientRect().top`))-mobileAnchor.top)<1,'a new mobile layout change still preserves its media anchor after settling');
   });

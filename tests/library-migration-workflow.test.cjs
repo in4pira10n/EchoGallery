@@ -239,6 +239,7 @@ test('summary shows only scan and thumbnail build counters', () => {
   const match = source.match(/^function renderLibraryBatchWorkflowSummary\([^]*?^}/m);
   assert.ok(match);
   const context = vm.createContext({
+    settingsText: key => key,
     copyText: key => ({
       'app.interface.s_83f794b00a': '检查并构建',
       'app.interface.s_073957fea3': '本阶段',

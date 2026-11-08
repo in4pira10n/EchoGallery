@@ -101,26 +101,33 @@ test('ending stops on last media; loop resets cursor and avoids an immediate rep
   assert.equal((await context.echoFrameNextPhoto(frame)).uuid, 'two');
 });
 
-test('returning to any timeline item refreshes its window and uses server-side location', () => {
+test('returning to a timeline item locates it before replacing the existing wall', async () => {
   const appSource = fs.readFileSync(require('node:path').join(__dirname, '../web/static/app.js'), 'utf8');
   for (const [loaded, filter] of [[false, 'all'], [true, 'image'], [true, 'all']]) {
     const calls = [];
     const context = vm.createContext({
       state: { view: 'timeline', lightboxReturnView: 'timeline', lightboxPhotos: [{ id: 42, media_kind: 'video' }], lightboxIndex: 0, mediaKindFilter: filter },
+      activeLibraryIdentity: () => 'library',
       findPhotoThumb: () => loaded ? {} : null,
       mediaKindFilterStorageKey: 'kind', localStorage: { setItem() {} },
       resetTimelineToInitialPage: () => calls.push('reset'),
       showTimelineLocateBlocking: () => calls.push('blocking'),
       closeLightbox: () => calls.push('close'),
       switchView: view => calls.push(view),
+      $: () => ({ classList: { contains: () => true } }),
+      loadTimelineLocateWindow: async () => { calls.push('locate'); return { photos: [{ id: 42 }] }; },
+      console,
     });
-    for (const name of ['currentMediaKindParam', 'mediaKindMatchesFilter', 'openInTimeline', 'exitLightboxToContext']) {
-      const match = appSource.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'));
+    for (const name of ['currentMediaKindParam', 'mediaKindMatchesFilter', 'openInTimeline', 'exitLightboxToContext', 'prepareTimelineLightboxReturn']) {
+      const match = appSource.match(new RegExp('^(?:async )?function ' + name + '\\([^]*?^}', 'm'));
       assert.ok(match);
       vm.runInContext(match[0], context);
     }
     context.exitLightboxToContext();
-    assert.deepEqual(calls, ['reset', 'close', 'timeline']);
+    assert.deepEqual(calls, ['locate'], 'the old wall remains present while the request is pending');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls, ['locate', 'reset', 'timeline']);
+    assert.equal(context.state.timelineReturnWindow.photos[0].id, 42);
     assert.equal(context.state.pendingTimelinePhotoID, 42);
     assert.equal(context.state.mediaKindFilter, 'all');
     calls.length = 0;
