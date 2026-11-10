@@ -136,7 +136,7 @@ function appHarness(mobile = true) {
     cancelActivePreloads() {}, cancelVisibleThumbnailWarmups() {},
     videoPosterPlaceholder: 'data:poster', console,
   });
-  vm.runInContext('let mediaLoadRuntime = null;', context);
+  vm.runInContext('let mediaLoadRuntime = null; let photoWallRuntime = null;', context);
   for (const name of ['mediaResourceSpec', 'mediaLoadingRuntime', 'resetMediaLoadingRuntime', 'registerManagedThumbnail',
     'refreshManagedThumbnail', 'cancelMediaPrefetch', 'syncMediaLoadingActivity', 'queueMediaPrefetch',
     'loadManagedLightboxImage', 'prefetchAdjacentMedia', 'prefetchPhotosForLightboxIntent']) {

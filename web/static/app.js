@@ -6755,6 +6755,7 @@ function queueMediaPrefetch(list, index) {
         || document.hidden || !isWarmEnabled() || !state.experimentalPrefetchNeighbors) return;
     const offsets = isTouchLikeDevice() ? [direction] : [direction, -direction];
     runtime.prefetch = offsets.map(offset => list[index + offset]).filter(Boolean)
+      .filter(photo => !photoWallRuntime || photoWallRuntime.full(photo))
       .filter(photo => isVideoMedia(photo) || (!(Number(photo.size) > runtime.loader.stats().maxBytes)
         && (!isTouchLikeDevice() || (Number(photo.width) * Number(photo.height) * 4 || 0)
           <= runtime.loader.stats().maxDecodedBytes))).map(photo => {
@@ -12898,6 +12899,8 @@ let photoWallRuntime = null;
 function setPhotoWallGrid(grid, photos, listRef = photos, options = {}) {
   if (!photoWallRuntime) {
     photoWallRuntime = window.EchoGalleryPhotoWall.create({
+      pinned: () => $('#lightbox')?.classList.contains('open')
+        ? state.lightboxPhotos.slice(Math.max(0, state.lightboxIndex - 2), state.lightboxIndex + 3) : [],
       card: (photo, list, opts) => makePhotoThumb(photo, list, opts),
       placeholder: (kind, index) => makeLocatePlaceholder(kind, index),
       release: node => {
@@ -16904,7 +16907,20 @@ function restoreLightboxStatusBarSurface() {
     themeMeta.content = state.lightboxPreviousThemeColor;
   }
 }
+let lightboxDataRequest = 0;
+async function prepareLightboxPhotoData(photos, index) {
+  try { await photoWallRuntime?.prepare(photos, index); return true; }
+  catch (error) {
+    console.warn('Lightbox record readback failed', error);
+    showToast(copyText('app.interface.s_62bf2d195f'));
+    return false;
+  }
+}
 async function openLightbox(photos, index, options = {}) {
+  const request = ++lightboxDataRequest;
+  const library = activeLibraryIdentity(state.serverSettings);
+  if (!(await prepareLightboxPhotoData(photos, Math.max(0, index))) || request !== lightboxDataRequest
+      || library !== activeLibraryIdentity(state.serverSettings)) return;
   state.lightboxSuppressLoading = false;
   resetLightboxTrackpad();
   state.lightboxLastRememberedPhotoID = null;
@@ -16965,6 +16981,7 @@ async function openLightbox(photos, index, options = {}) {
   lbRender();
 }
 function closeLightbox() {
+  lightboxDataRequest++;
   state.lightboxReturnRequestID = (Number(state.lightboxReturnRequestID) || 0) + 1;
   resetLightboxTrackpad();
   state.lightboxSuppressLoading = false;
@@ -17174,19 +17191,19 @@ async function loadMoreForLightbox() {
 }
 
 async function ensureLightboxIndexAvailable(index) {
-  if (index < state.lightboxPhotos.length) return true;
   if (index < 0) return false;
+  if (index < state.lightboxPhotos.length) return prepareLightboxPhotoData(state.lightboxPhotos, index);
   const allowForegroundLoad = state.slideshowPlaying || index === state.lightboxPhotos.length;
   if (!allowForegroundLoad) return false;
   if (state.slideshowPreloadPromise) {
     await state.slideshowPreloadPromise;
-    if (index < state.lightboxPhotos.length) return true;
+    if (index < state.lightboxPhotos.length) return prepareLightboxPhotoData(state.lightboxPhotos, index);
   }
   for (let attempt = 0; attempt < 3 && index >= state.lightboxPhotos.length && lightboxCanLoadMoreForward(); attempt += 1) {
     const loaded = await loadMoreForLightbox();
     if (!loaded) break;
   }
-  return index < state.lightboxPhotos.length;
+  return index < state.lightboxPhotos.length && prepareLightboxPhotoData(state.lightboxPhotos, index);
 }
 
 async function lbNav(dir) {
@@ -17207,7 +17224,10 @@ function playNextVideoFromLightbox() {
 }
 async function lbGoTo(index, options = {}) {
   if (index < 0) return;
-  if (!(await ensureLightboxIndexAvailable(index))) return;
+  const request = ++lightboxDataRequest;
+  const library = activeLibraryIdentity(state.serverSettings);
+  if (!(await ensureLightboxIndexAvailable(index)) || request !== lightboxDataRequest
+      || library !== activeLibraryIdentity(state.serverSettings)) return;
   clearLightboxUnderzoomState();
   clearLightboxDismissGesture();
   if (state.lightboxPinchZoomActive) {

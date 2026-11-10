@@ -16,13 +16,13 @@ function actual(name) {
 const fixture = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/style.css"><style>body{margin:0}header{height:120px}.photo-grid{--grid-size:180px;--grid-gap:2px} .photo-thumb{background:#375c4d}</style>
 <header></header><main id="timeline-wrap"></main><footer style="height:80px"></footer><div id="lightbox"></div>
-<script src="/wall.js"></script><script>
+<script src="/data.js"></script><script src="/wall.js"></script><script>
 const $ = s => document.querySelector(s), $$ = (s,scope=document) => Array.from(scope.querySelectorAll(s));
 const el = (tag,cls) => {const n=document.createElement(tag);n.className=cls;return n};
 const copyText = key => key, escapeHTML = value => value, icons = {photo:''};
 let photoWallRuntime=null, released=0;
 const mediaLoadRuntime={cards:new Map(),releaseCard(){released++}};
-const state={view:'timeline',photos:Array.from({length:10000},(_,i)=>({id:i+1,uuid:'p'+(i+1)})),timelineTotal:10000,
+const state={view:'timeline',photos:Array.from({length:10000},(_,i)=>({id:i+1,uuid:'p'+(i+1),original_name:'Photo '+i+'.jpg',width:4032,height:3024,exif:{model:'Camera '+i,make:'Canon'}})),timelineTotal:10000,
 timelineHasMore:false,timelineLoading:false,serverSettings:{library:'one'},selected:new Set([9000]),focusedPhotoID:null,
 timelineLocateMissingBeforeCount:0};
 const activeLibraryIdentity = settings => settings.library;
@@ -45,15 +45,16 @@ function snapshot(){const grid=$('#timeline-grid');const nodes=$$('.photo-thumb[
 const visible=nodes.filter(n=>{const r=n.getBoundingClientRect();return r.bottom>0&&r.top<innerHeight});
 return {stats:photoWallRuntime.stats(),height:grid.getBoundingClientRect().height,scrollY,
 lead:visible[0]?{id:Number(visible[0].dataset.id),top:visible[0].getBoundingClientRect().top}:null,
-mounted:nodes.length,resources:mediaLoadRuntime.cards.size,released};}
+pending:nodes.filter(n=>n.dataset.recordPending).length,detached:[...mediaLoadRuntime.cards.keys()].filter(n=>!n.isConnected).length,mounted:nodes.length,resources:mediaLoadRuntime.cards.size,released};}
 renderTimelineGrid();
 </script>`;
 
 test('real browser: long scrolling, pagination, recycling, resize anchors and offscreen focus',
-  { skip: !fs.existsSync(chrome), timeout: 30000 }, async t => {
+  { skip: !fs.existsSync(chrome), timeout: 60000 }, async t => {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'eg-wall-browser-'));
     const server = http.createServer((request, response) => {
       if (request.url === '/wall.js') { response.setHeader('Content-Type','text/javascript'); response.end(fs.readFileSync(path.join(__dirname,'../web/static/photo-wall.js'))); }
+      else if (request.url === '/data.js') { response.setHeader('Content-Type','text/javascript'); response.end(fs.readFileSync(path.join(__dirname,'../web/static/','photo-data-window.js'))); }
       else if (request.url === '/style.css') { response.setHeader('Content-Type','text/css'); response.end(fs.readFileSync(path.join(__dirname,'../web/pages/app.css'))); }
       else { response.setHeader('Content-Type','text/html'); response.end(fixture); }
     });
@@ -230,7 +231,7 @@ test('real browser: long scrolling, pagination, recycling, resize anchors and of
         peak=Math.max(peak,s.mounted);
         if(Math.abs(s.height-height)>.5) throw new Error('grid height changed during recycling');
         if(s.mounted>budget*3+1) throw new Error('unbounded mobile card accumulation');
-        if(s.resources!==s.mounted) throw new Error('detached card still owns a media record');
+        if(s.resources!==s.mounted-s.pending || s.detached) throw new Error('detached card still owns a media record');
       }
       const stopped=scrollY;
       document.dispatchEvent(new Event('touchend'));
@@ -240,6 +241,21 @@ test('real browser: long scrolling, pagination, recycling, resize anchors and of
     assert.equal(bounded.actual,bounded.stopped,'bounded recycling does not change scroll position');
     assert.ok(bounded.mounted<=bounded.budget,'settled wall returns to its normal card budget');
     t.diagnostic(JSON.stringify({mobileContinuousScroll:bounded}));
+    // Real IndexedDB eviction/readback keeps the same list objects and metadata.
+    for(let i=0;i<100;i++) {
+      if(await evaluate('photoWallRuntime.stats().data.resident<=160'))break;
+      await sleep(100);
+    }
+    const dataStats=await evaluate('photoWallRuntime.stats().data');
+    assert.ok(dataStats.archived>9000,JSON.stringify(dataStats));
+    assert.ok(dataStats.resident<=160,JSON.stringify(dataStats));
+    await evaluate('window.originalRecord=state.photos[0];state.photos[0].is_favorite=true;scrollTo(0,0)');
+    await sleep(500);await settle();
+    assert.equal(await evaluate('state.photos[0]===originalRecord && originalRecord.exif.model==="Camera 0" && originalRecord.is_favorite'),true);
+    assert.equal(await evaluate('snapshot().pending'),0,'readback replaces temporary cells');
+    assert.equal(await evaluate('snapshot().detached'),0);
+    assert.notEqual(await evaluate('document.documentElement.style.overflowY'),'hidden','metadata paging preserves native document scrolling');
+    t.diagnostic(JSON.stringify({mobileMetadata:dataStats}));
     const mobileAnchor=await evaluate('snapshot().lead');
     await evaluate('document.dispatchEvent(new Event("touchstart"));document.querySelector(".photo-grid").style.setProperty("--grid-size","140px");photoWallRuntime.relayout();document.dispatchEvent(new Event("touchend"))');
     await sleep(700);

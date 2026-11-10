@@ -33,6 +33,16 @@
     // is stable. Distant cards have a hard cap even during prolonged inertia.
     const touchDevice = Boolean(win.matchMedia?.('(pointer: coarse)').matches &&
       win.matchMedia?.('(hover: none)').matches && win.navigator?.maxTouchPoints > 0);
+    const data = (touchDevice && win.EchoGalleryPhotoDataWindow?.create({ window: win, onChange: schedule })) || null;
+    function pinData(extra = []) {
+      if (!data) return;
+      const pinned = [...extra, ...(options.pinned?.() || [])];
+      for (const c of grids.values()) for (const key of c.nodes.keys()) {
+        const i = c.indices.get(key);
+        if (i != null) pinned.push(c.items[i]);
+      }
+      data.pin(pinned);
+    }
     let touchSettling = false, settleFrame = 0, settleTimer = 0, stableFrames = 0;
     let lastViewport = null, viewportWidth = win.innerWidth;
     const keyOf = item => String(item.uuid || item.id);
@@ -46,6 +56,7 @@
       for (const [key, node] of controller.nodes) drop(controller, key, node);
       resize?.unobserve(controller.grid);
       grids.delete(controller.grid);
+      pinData();
     }
     function geometry(controller, focus = null) {
       const rect = controller.grid.getBoundingClientRect();
@@ -122,6 +133,14 @@
       c.grid.style.gridAutoRows = `${g.cell}px`;
       c.grid.style.alignContent = 'start';
       c.grid.style.overflowAnchor = 'none';
+      const range = c.items.slice(Math.max(0, g.start - c.placeholders), Math.max(0, g.end - c.placeholders));
+      pinData(range);
+      if (data && range.some(item => !data.full(item)) && !c.reading && !c.readFailed) {
+        c.reading = data.ready(range).catch(error => {
+          c.readFailed = true;
+          console.warn('Photo record readback failed', error);
+        }).finally(() => { c.reading = null; if (!c.readFailed) schedule(); });
+      }
       const wanted = new Set();
       let cursor = c.grid.firstElementChild;
       for (let i = g.start; i < g.end; i++) {
@@ -130,8 +149,14 @@
         const key = placeholder ? `placeholder:${i}` : keyOf(item);
         wanted.add(key);
         let node = c.nodes.get(key);
+        const archived = !placeholder && data && !data.full(item);
+        if (node?.dataset.recordPending && !archived) {
+          if (node === cursor) cursor = cursor.nextElementSibling;
+          drop(c, key, node); node = null;
+        }
         if (!node) {
-          node = placeholder ? options.placeholder(c.kind, i) : options.card(item, c.liveList, c.cardOptions);
+          node = placeholder || archived ? options.placeholder(c.kind, i) : options.card(item, c.liveList, c.cardOptions);
+          if (archived) { node.dataset.id = item.id; node.dataset.recordPending = '1'; }
           c.nodes.set(key, node); created++;
         }
         node.style.gridRowStart = String(Math.floor(i / g.columns) + 1);
@@ -160,6 +185,7 @@
       }
       mountedPeak = Math.max(mountedPeak, [...grids.values()].reduce((n, value) => n + value.nodes.size, 0));
       rememberAnchor(c, g);
+      pinData();
     }
     function refresh() {
       frame = 0;
@@ -304,7 +330,7 @@
         c.list = config.list;
         // Keep an order snapshot: callers can splice the source list before
         // notifying us about a deletion, so anchors need the previous indices.
-        c.items = Array.from(items); c.placeholders = config.placeholders || 0;
+        c.items = Array.from(items); data?.track(c.items); c.readFailed = false; c.placeholders = config.placeholders || 0;
         c.kind = config.kind; c.cardOptions = config.cardOptions || {};
         c.indices = new Map();
         c.items.forEach((item, index) => c.indices.set(keyOf(item), index));
@@ -329,6 +355,12 @@
         }
         return null;
       },
+      async prepare(list, index) {
+        const items = Array.from({ length: 5 }, (_, offset) => list[index + offset - 2]).filter(Boolean);
+        pinData(items);
+        if (data) await data.ready(items);
+      },
+      full(item) { return !data || data.full(item); },
       columns(grid) { return grids.get(grid)?.geometry?.columns || 1; },
       items(grid) { return grids.get(grid)?.items || []; },
       remove(ids, grid) {
@@ -354,7 +386,7 @@
       refresh: schedule,
       relayout: onResize,
       stats() {
-        return { created, released, mountedPeak, grids: [...grids.values()].map(c => ({
+        return { created, released, mountedPeak, data: data?.stats() || null, grids: [...grids.values()].map(c => ({
           id: c.grid.id, total: c.items.length + c.placeholders, retainedItems: c.items.length, mounted: c.nodes.size,
           budget: c.geometry?.budget || 0, height: c.geometry?.height || 0,
         })) };
@@ -362,6 +394,7 @@
       dispose() {
         for (const c of grids.values()) dispose(c);
         resize?.disconnect(); mutations.disconnect();
+        void data?.dispose();
         win.cancelAnimationFrame(frame); win.cancelAnimationFrame(settleFrame); win.clearTimeout(settleTimer); win.clearTimeout(idleTimer); win.clearTimeout(userScrollTimer);
         win.removeEventListener('scroll', onScroll); win.removeEventListener('resize', onViewportResize);
         if (touchDevice) win.visualViewport?.removeEventListener('resize', onViewportResize);
