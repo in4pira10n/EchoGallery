@@ -255,6 +255,10 @@ test('real browser: long scrolling, pagination, recycling, resize anchors and of
     assert.equal(await evaluate('snapshot().pending'),0,'readback replaces temporary cells');
     assert.equal(await evaluate('snapshot().detached'),0);
     assert.notEqual(await evaluate('document.documentElement.style.overflowY'),'hidden','metadata paging preserves native document scrolling');
+    await evaluate('window.returnCard=findPhotoThumb(1);state.lightboxReturnInFlight=true;state.lightboxReturnThumbnailWarmup=true;renderTimelineGrid()');await settle();
+    assert.equal(await evaluate('returnCard===findPhotoThumb(1)'),true,'touch return retains decoded card DOM through the refreshed window');
+    assert.equal(await evaluate('snapshot().detached'),0,'return reuses live scheduler ownership');
+    await evaluate('state.lightboxReturnInFlight=false;state.lightboxReturnThumbnailWarmup=false');
     t.diagnostic(JSON.stringify({mobileMetadata:dataStats}));
     const mobileAnchor=await evaluate('snapshot().lead');
     await evaluate('document.dispatchEvent(new Event("touchstart"));document.querySelector(".photo-grid").style.setProperty("--grid-size","140px");photoWallRuntime.relayout();document.dispatchEvent(new Event("touchend"))');

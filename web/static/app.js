@@ -2939,6 +2939,7 @@ function beginVideoSurfaceSwipe(e) {
     width,
     height,
   };
+  beginLightboxTouchDismiss(e, state.videoSurfaceSwipe);
   if (body && body.setPointerCapture) {
     try { body.setPointerCapture(e.pointerId); } catch (_) {}
   }
@@ -2966,6 +2967,12 @@ function updateVideoSurfaceSwipe(e) {
   }
   if (swipe.mode === 'dismiss') {
     const downY = Math.max(0, dy);
+    if (swipe.touchDismiss) {
+      swipe.dismissProgress = clampLightboxValue(downY / swipe.height, 0, 1);
+      updateLightboxTouchDismiss(e, swipe, downY);
+      e.preventDefault(); e.stopPropagation();
+      return true;
+    }
     const amplifiedDownY = downY * 1.22;
     const dismissProgress = clampLightboxValue(amplifiedDownY / swipe.height, 0, 1);
     swipe.dismissProgress = dismissProgress;
@@ -2996,6 +3003,12 @@ function endVideoSurfaceSwipe(e) {
   if (!swipe.dragging) return false;
   state.videoProgressClickSuppressUntil = Date.now() + 520;
   if (swipe.mode === 'dismiss') {
+    if (swipe.touchDismiss) {
+      endLightboxTouchDismiss(e, swipe);
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
+      e.preventDefault(); e.stopPropagation();
+      return true;
+    }
     const cancelled = e.type === 'pointercancel';
     const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.24;
     if (shouldExit) {
@@ -3740,6 +3753,138 @@ function setLightboxUnderzoomProgress(progress, options = {}) {
   lightbox.style.setProperty('--lightbox-underzoom-overlay-alpha', visibleRatio.toFixed(4));
   lightbox.style.setProperty('--lightbox-underzoom-media-opacity', '1');
 }
+function setLightboxReturnThumbnailWarmup(active) {
+  const next = !!active;
+  if (!!state.lightboxReturnThumbnailWarmup === next) return;
+  state.lightboxReturnThumbnailWarmup = next;
+  syncMediaLoadingActivity();
+}
+function lightboxReturnThumbnailsReady() {
+  const runtime = mediaLoadRuntime;
+  if (!state.lightboxReturnThumbnailWarmup || !runtime || runtime.hidden) return true;
+  let ready = true;
+  const height = window.innerHeight || document.documentElement.clientHeight;
+  for (const record of runtime.cards.values()) {
+    const image = record.image;
+    if (!image.isConnected || !image.closest('#timeline-grid')) continue;
+    const rect = image.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= height || rect.width <= 0) continue;
+    const card = image.closest('.photo-thumb');
+    // Terminal errors retain their normal fallback and must not trap the user.
+    if (card?.classList.contains('thumb-load-failed')) continue;
+    record.near = record.visible = true;
+    if (!image.complete || !image.naturalWidth) {
+      runtime.updateCard(record);
+      ready = false;
+    }
+  }
+  return ready;
+}
+// Only real touch/pen dismissals use this motion; trackpad and pinch keep their path.
+let lightboxTouchDismissMotion = null;
+function stopLightboxTouchDismissMotion() {
+  const motion = lightboxTouchDismissMotion;
+  if (!motion) return null;
+  cancelAnimationFrame(motion.frame);
+  if (motion.returnRequestID && state.lightboxReturnRequestID === motion.returnRequestID && state.lightboxReturnInFlight) {
+    state.lightboxReturnRequestID++;
+    state.lightboxReturnInFlight = false;
+    state.lightboxReturnTargetID = null;
+  }
+  lightboxTouchDismissMotion = null;
+  return motion;
+}
+function beginLightboxTouchDismiss(e, swipe) {
+  if (e.pointerId === -1) return;
+  const motion = stopLightboxTouchDismissMotion();
+  swipe.touchDismiss = true;
+  swipe.dismissSamples = [{ y: e.clientY, time: performance.now() }];
+  if (motion) {
+    swipe.startY = e.clientY - motion.y;
+    swipe.dragging = true;
+    swipe.mode = 'dismiss';
+    swipe.dismissProgress = motion.progress;
+  }
+}
+function updateLightboxTouchDismiss(e, swipe, y) {
+  setLightboxReturnThumbnailWarmup(true);
+  const time = performance.now();
+  swipe.dismissSamples.push({ y: e.clientY, time });
+  swipe.dismissSamples = swipe.dismissSamples.filter(sample => time - sample.time <= 100).slice(-8);
+  renderLightboxTouchDismiss(y, clampLightboxValue(y / swipe.height, 0, 1));
+}
+function renderLightboxTouchDismiss(y, progress) {
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  setLightboxDismissGesture(reduced ? 0 : progress, reduced ? 0 : y);
+  setLightboxUnderzoomProgress(reduced ? 0 : progress);
+  if (reduced) {
+    const lightbox = $('#lightbox');
+    lightbox?.classList.add('lightbox-dismiss-dragging');
+    lightbox?.style.setProperty('--lightbox-underzoom-overlay-alpha', String(1 - progress));
+    lightbox?.style.setProperty('--lightbox-underzoom-controls-opacity', String(1 - progress));
+    lightbox?.style.setProperty('--lightbox-underzoom-media-opacity', String(1 - progress));
+  }
+  setLightboxDismissFade(progress);
+}
+function endLightboxTouchDismiss(e, swipe) {
+  const samples = swipe.dismissSamples;
+  const last = samples[samples.length - 1];
+  const first = samples[0];
+  let velocity = last && performance.now() - last.time <= 100 && last.time > first.time
+    ? (last.y - first.y) / (last.time - first.time) * 1000 : 0;
+  velocity = clampLightboxValue(velocity, -2500, 2500);
+  const y = Math.max(0, (last?.y ?? swipe.startY) - swipe.startY);
+  const deceleration = .995;
+  const projected = y + (velocity / 1000) * deceleration / (1 - deceleration);
+  const exit = e.type !== 'pointercancel' && velocity > -100 &&
+    (y >= swipe.height * .22 || (y > 20 && velocity > 650 && projected >= swipe.height * .18));
+  animateLightboxTouchDismiss(y, swipe.dismissProgress || 0, velocity, exit);
+  return exit;
+}
+function animateLightboxTouchDismiss(y, progress, velocity, exit) {
+  stopLightboxTouchDismissMotion();
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const target = exit ? Math.max(window.innerHeight || 1, y + 360) : 0;
+  const motion = lightboxTouchDismissMotion = { y, progress, frame: 0 };
+  // Locate and restore the wall while the media leaves, rather than starting
+  // disk/network work only after the spring's imperceptible settling tail.
+  if (exit && state.lightboxReturnView === 'timeline') {
+    exitLightboxToContext();
+    motion.returnRequestID = state.lightboxReturnRequestID;
+  }
+  const started = performance.now(), omega = 24;
+  const initial = y - target, coefficient = velocity + omega * initial;
+  function tick(now) {
+    if (lightboxTouchDismissMotion !== motion) return;
+    const time = Math.max(0, (now - started) / 1000);
+    const decay = Math.exp(-omega * time);
+    const next = Math.max(0, target + (initial + coefficient * time) * decay);
+    const speed = (velocity - omega * coefficient * time) * decay;
+    const fraction = reduced ? Math.min(1, time / .14)
+      : clampLightboxValue((next - y) / (target - y || 1), 0, 1);
+    motion.y = next;
+    motion.progress = progress + ((exit ? 1 : 0) - progress) * fraction;
+    renderLightboxTouchDismiss(next, motion.progress);
+    const done = reduced ? time >= .14 : exit ? fraction >= .98 : Math.abs(next - target) < .5 && Math.abs(speed) < 8;
+    if (!done) { motion.frame = requestAnimationFrame(tick); return; }
+    if (exit && motion.returnRequestID) {
+      motion.finished = true;
+      motion.frame = 0;
+      if (motion.returnReady) finishLightboxReturnTransition();
+      // Keep the motion available for interruption/error recovery while a slow
+      // disk finishes preparing. The existing return callback will close it.
+      return;
+    }
+    lightboxTouchDismissMotion = null;
+    if (exit) exitLightboxToContext();
+    else {
+      clearLightboxDismissGesture();
+      clearLightboxUnderzoomState();
+      clearLightboxDismissFade();
+    }
+  }
+  motion.frame = requestAnimationFrame(tick);
+}
 function setLightboxDismissGesture(progress, translateY = 0) {
   const lightbox = $('#lightbox');
   if (!lightbox) return;
@@ -3751,6 +3896,8 @@ function setLightboxDismissGesture(progress, translateY = 0) {
   lightbox.style.setProperty('--lightbox-dismiss-translate-y', `${offset.toFixed(2)}px`);
 }
 function clearLightboxDismissGesture(options = {}) {
+  setLightboxReturnThumbnailWarmup(false);
+  stopLightboxTouchDismissMotion();
   const lightbox = $('#lightbox');
   clearTimeout(state.lightboxDismissResetTimer);
   state.lightboxDismissResetTimer = null;
@@ -3774,6 +3921,8 @@ function clearLightboxDismissGesture(options = {}) {
   lightbox.style.removeProperty('--lightbox-dismiss-translate-y');
 }
 function clearLightboxUnderzoomState() {
+  setLightboxReturnThumbnailWarmup(false);
+  stopLightboxTouchDismissMotion();
   clearTimeout(state.lightboxUnderzoomExitTimer);
   state.lightboxUnderzoomExitTimer = null;
   state.lightboxUnderzoomProgress = 0;
@@ -4100,6 +4249,7 @@ function beginLightboxSwipe(e) {
       .then(ok => { if (ok) refreshLightboxSwipePreviewNeighbor(state.lightboxIndex + 1); })
       .catch(() => {});
   }
+  beginLightboxTouchDismiss(e, state.lightboxSwipe);
   if (body.setPointerCapture) {
     try { body.setPointerCapture(e.pointerId); } catch (_) {}
   }
@@ -4126,6 +4276,12 @@ function updateLightboxSwipe(e) {
   if (!media) return false;
   if (swipe.mode === 'dismiss') {
     const downY = Math.max(0, dy);
+    if (swipe.touchDismiss) {
+      swipe.dismissProgress = clampLightboxValue(downY / swipe.height, 0, 1);
+      updateLightboxTouchDismiss(e, swipe, downY);
+      e.preventDefault(); e.stopPropagation();
+      return true;
+    }
     const amplifiedDownY = downY * 1.34;
     const dismissProgress = clampLightboxValue(amplifiedDownY / swipe.height, 0, 1);
     swipe.lastY = e.clientY;
@@ -4163,6 +4319,12 @@ async function endLightboxSwipe(e, animationMs = lightboxSwipeAnimationMs) {
     try { body.releasePointerCapture(e.pointerId); } catch (_) {}
   }
   if (swipe.mode === 'dismiss') {
+    if (swipe.touchDismiss) {
+      endLightboxTouchDismiss(e, swipe);
+      state.lightboxSwipeClickSuppressUntil = Date.now() + 420;
+      e.preventDefault(); e.stopPropagation();
+      return true;
+    }
     const cancelled = e.type === 'pointercancel';
     const shouldExit = !cancelled && (Number(swipe.dismissProgress) || 0) >= 0.22;
     if (shouldExit) {
@@ -6104,6 +6266,7 @@ const state = {
   lightboxReturnView: '',
   lightboxReturnAlbumID: null,
   lightboxReturnInFlight: false,
+  lightboxReturnThumbnailWarmup: false,
   lightboxReturnTargetID: null,
   lightboxPageLoading: false,
   lightboxSkipScrollRestore: false,
@@ -6593,7 +6756,10 @@ function mediaLoadingRuntime() {
   };
   runtime.updateCard = record => {
     if (runtime !== mediaLoadRuntime || runtime.library !== activeLibraryIdentity(state.serverSettings)) return;
-    if (!record.image.isConnected || runtime.hidden || $('#lightbox')?.classList.contains('open') || !record.near) {
+    const lightboxOpen = !!$('#lightbox')?.classList.contains('open');
+    const returning = lightboxOpen && state.lightboxReturnThumbnailWarmup;
+    if (!record.image.isConnected || runtime.hidden || (lightboxOpen && !returning) || !record.near
+        || (returning && !record.visible)) {
       runtime.releaseCard(record); return;
     }
     runtime.updateMetadata(record);
@@ -6605,12 +6771,18 @@ function mediaLoadingRuntime() {
     record.handle = handle;
     const current = () => record.handle === handle && record.image.isConnected && !runtime.hidden
       && runtime === mediaLoadRuntime && runtime.library === activeLibraryIdentity(state.serverSettings);
+    record.image.onload = () => {
+      if (!current()) return;
+      record.image.closest('.photo-thumb')?.classList.remove('thumb-loading', 'thumb-load-failed');
+      if (state.lightboxReturnInFlight && state.lightboxReturnThumbnailWarmup) finishLightboxReturnTransition();
+    };
+    record.image.onerror = () => {
+      if (!current() || !state.lightboxReturnThumbnailWarmup) return;
+      record.image.closest('.photo-thumb')?.classList.add('thumb-load-failed');
+      if (state.lightboxReturnInFlight) finishLightboxReturnTransition();
+    };
     handle.promise.then(result => {
       if (!current()) return;
-      record.image.onload = () => {
-        if (!current()) return;
-        record.image.closest('.photo-thumb')?.classList.remove('thumb-loading', 'thumb-load-failed');
-      };
       // Visibility can change while a thumbnail finishes decoding.
       if (!record.near) { runtime.releaseCard(record); return; }
       record.image.src = result.url;
@@ -6618,6 +6790,11 @@ function mediaLoadingRuntime() {
       if (!current() || error.name === 'AbortError') return;
       handle.release(); record.handle = null;
       if (isVideoMedia(record.photo)) {
+        record.image.onload = record.image.onerror = () => {
+          if (runtime !== mediaLoadRuntime || !record.image.isConnected) return;
+          if (!record.image.naturalWidth) record.image.closest('.photo-thumb')?.classList.add('thumb-load-failed');
+          if (state.lightboxReturnInFlight && state.lightboxReturnThumbnailWarmup) finishLightboxReturnTransition();
+        };
         record.image.src = videoPosterPlaceholder;
         record.image.closest('.photo-thumb')?.classList.remove('thumb-loading');
         return;
@@ -6626,7 +6803,10 @@ function mediaLoadingRuntime() {
         record.retryTimer = setTimeout(() => {
           record.reload = Date.now(); runtime.updateCard(record);
         }, record.attempt * 800);
-      } else record.image.closest('.photo-thumb')?.classList.add('thumb-load-failed');
+      } else {
+        record.image.closest('.photo-thumb')?.classList.add('thumb-load-failed');
+        if (state.lightboxReturnInFlight && state.lightboxReturnThumbnailWarmup) finishLightboxReturnTransition();
+      }
     });
   };
   if (typeof IntersectionObserver === 'function') {
@@ -6732,7 +6912,7 @@ function syncMediaLoadingActivity() {
     return;
   }
   runtime.loader.setPaused(false);
-  const gridSuspended = !!$('#lightbox')?.classList.contains('open');
+  const gridSuspended = !!$('#lightbox')?.classList.contains('open') && !state.lightboxReturnThumbnailWarmup;
   if (wasHidden || runtime.gridSuspended !== gridSuspended) {
     runtime.gridSuspended = gridSuspended;
     runtime.cards.forEach(record => runtime.updateCard(record));
@@ -11864,9 +12044,13 @@ async function renderTimeline() {
   $('#timeline-load-all-btn').addEventListener('click', openTimelineLoadAllModal);
   $('#upload-btn')?.addEventListener('click', openUploadModal);
 
-  $('#content').innerHTML = `
+  // Retain decoded cards during a touch return; the new locate window still
+  // replaces the data/index through the normal bounded photo-wall renderer.
+  if (!(state.lightboxReturnInFlight && state.lightboxReturnThumbnailWarmup && $('#timeline-grid'))) {
+    $('#content').innerHTML = `
 <div id="timeline-wrap"></div>
 <div class="load-more" id="load-more"><div class="spinner"></div>${copyText('app.interface.commonLoading')}</div>`;
+  }
 
   const hasPendingFocus = !!state.pendingTimelinePhotoID;
   const canReuseLoadedTimelineForPendingFocus = hasPendingFocus
@@ -12269,8 +12453,10 @@ function prependTimelineGrid(newPhotos) {
 function renderTimelineGrid() {
   const container = $('#timeline-wrap');
   if (!container) return;
-  container.innerHTML = '';
-  container.insertAdjacentHTML('beforeend', `<div class="load-more load-more-top" id="load-more-top"><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div>`);
+  if (!(state.lightboxReturnInFlight && state.lightboxReturnThumbnailWarmup && $('#timeline-grid'))) {
+    container.innerHTML = '';
+    container.insertAdjacentHTML('beforeend', `<div class="load-more load-more-top" id="load-more-top"><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div>`);
+  }
   appendTimelineGrid(state.photos);
   if (state.photos.length === 0 && !state.timelineHasMore && !state.timelineLoading) {
     container.innerHTML = `<div class="empty">${icons.photo}<p>${escapeHTML(copyText('app.interface.runtime.emptyMedia'))}</p></div>`;
@@ -14870,6 +15056,12 @@ function finishLightboxReturnTransition() {
   }
   const targetID = Number(state.lightboxReturnTargetID || 0);
   if (targetID && !findPhotoThumb(targetID)) return;
+  if (!lightboxReturnThumbnailsReady()) return;
+  const motion = lightboxTouchDismissMotion;
+  if (motion?.returnRequestID === state.lightboxReturnRequestID && motion.returnRequestID && !motion.finished) {
+    motion.returnReady = true;
+    return;
+  }
   state.lightboxSkipScrollRestore = true;
   state.lightboxReturnInFlight = false;
   closeLightbox();
@@ -17124,12 +17316,30 @@ async function prepareTimelineLightboxReturn(photoID, photo, requestID) {
     if (!Array.isArray(locatedWindow?.photos) || !locatedWindow.photos.some(item => Number(item.id) === Number(photoID))) {
       throw new Error('Timeline return target missing from locate response');
     }
+    if (state.lightboxReturnThumbnailWarmup && mediaLoadRuntime) {
+      // Retained card handlers and the live list must share the same objects.
+      // Inspect only mounted records, never walk a potentially huge library.
+      const retained = new Map();
+      for (const record of mediaLoadRuntime.cards.values()) {
+        if (record.image.isConnected && record.image.closest('#timeline-grid')) {
+          retained.set(String(record.photo.uuid || record.photo.id), record.photo);
+        }
+      }
+      locatedWindow.photos = locatedWindow.photos.map(latest => {
+        const existing = retained.get(String(latest.uuid || latest.id));
+        return existing ? Object.assign(existing, latest) : latest;
+      });
+    }
     openInTimeline(photoID, photo, { showLocateDialog: false, keepLightboxOpen: true, locatedWindow });
   } catch (error) {
     if (state.lightboxReturnRequestID !== requestID || !state.lightboxReturnInFlight || Number(state.lightboxReturnTargetID) !== Number(photoID)) return;
     state.lightboxReturnInFlight = false;
     state.lightboxReturnTargetID = null;
     if (libraryKey !== activeLibraryIdentity(state.serverSettings)) return;
+    const motion = lightboxTouchDismissMotion;
+    if (motion?.returnRequestID === requestID) {
+      animateLightboxTouchDismiss(motion.y, motion.progress, 0, false);
+    }
     console.warn('timeline return locate failed', error);
     showToast(copyText('app.interface.s_aa18e0c728'));
   }

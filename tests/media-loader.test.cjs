@@ -137,7 +137,7 @@ function appHarness(mobile = true) {
     videoPosterPlaceholder: 'data:poster', console,
   });
   vm.runInContext('let mediaLoadRuntime = null; let photoWallRuntime = null;', context);
-  for (const name of ['mediaResourceSpec', 'mediaLoadingRuntime', 'resetMediaLoadingRuntime', 'registerManagedThumbnail',
+  for (const name of ['setLightboxReturnThumbnailWarmup', 'lightboxReturnThumbnailsReady', 'mediaResourceSpec', 'mediaLoadingRuntime', 'resetMediaLoadingRuntime', 'registerManagedThumbnail',
     'refreshManagedThumbnail', 'cancelMediaPrefetch', 'syncMediaLoadingActivity', 'queueMediaPrefetch',
     'loadManagedLightboxImage', 'prefetchAdjacentMedia', 'prefetchPhotosForLightboxIntent']) {
     const match = source.match(new RegExp('^function ' + name + '\\([^]*?^}', 'm'));
@@ -327,5 +327,52 @@ test('mobile avoids speculative decoding of oversized photos; desktop keeps its 
     h.context.queueMediaPrefetch(photos, 0); h.flush();
     assert.equal(h.calls.length, mobile ? 0 : 1);
     h.context.resetMediaLoadingRuntime(); await tick();
+  }
+});
+
+test('touch return loads only visible thumbnails under the lightbox and waits for image load', async () => {
+  const h = appHarness();h.context.window.innerHeight = 800;
+  const makeImage = top => {
+    const classes = new Set(['thumb-loading']);
+    const card = { classList: { contains: name => classes.has(name), add: name => classes.add(name), remove: (...names) => names.forEach(name => classes.delete(name)) } };
+    return { isConnected: true, complete: false, naturalWidth: 0,
+      getBoundingClientRect: () => ({ top, bottom: top + 120, width: 120 }),
+      closest: () => card, removeAttribute(name) { delete this[name]; } };
+  };
+  const visible = makeImage(100), buffered = makeImage(900);
+  h.context.registerManagedThumbnail(visible, { id: 10 });h.context.registerManagedThumbnail(buffered, { id: 11 });
+  h.lightbox.open = true;h.context.syncMediaLoadingActivity();
+  h.observers[0].fn([{ target: visible, isIntersecting: true }, { target: buffered, isIntersecting: true }]);
+  h.observers[1].fn([{ target: visible, isIntersecting: true }]);
+  assert.equal(h.calls.length, 0, 'ordinary lightbox viewing still suspends the wall');
+  h.context.setLightboxReturnThumbnailWarmup(true);
+  assert.deepEqual(h.calls.map(call => call.url), ['/thumb/10']);
+  assert.equal(h.context.lightboxReturnThumbnailsReady(), false);
+  h.calls[0].finish();await tick();assert.match(visible.src, /^blob:/);
+  assert.equal(h.context.lightboxReturnThumbnailsReady(), false, 'assigned URL alone does not mean pixels are ready');
+  let ready = 0;h.context.finishLightboxReturnTransition = () => { ready++; };
+  h.context.state.lightboxReturnInFlight = true;
+  visible.complete = true;visible.naturalWidth = 120;visible.onload();
+  assert.equal(ready, 1);assert.equal(h.context.lightboxReturnThumbnailsReady(), true);
+  h.context.setLightboxReturnThumbnailWarmup(false);
+  assert.equal(visible.src, undefined, 'cancelling a return releases its image ownership');
+  assert.equal(h.calls.length, 1, 'buffered rows did not start loading');h.context.resetMediaLoadingRuntime();
+});
+
+test('failed return image and video fallback cannot leave the return waiting forever', async () => {
+  for (const video of [false, true]) {
+    const h = appHarness();h.context.window.innerHeight = 800;h.lightbox.open = true;
+    const classes = new Set();
+    const card = { classList: { contains: name => classes.has(name), add: name => classes.add(name), remove() {} } };
+    const image = { isConnected: true, complete: false, naturalWidth: 0, closest: () => card,
+      getBoundingClientRect: () => ({ top: 100, bottom: 200, width: 100 }), removeAttribute(name) { delete this[name]; } };
+    let finishes = 0;h.context.finishLightboxReturnTransition = () => { finishes++; };
+    h.context.registerManagedThumbnail(image, { id: 1, media_kind: video ? 'video' : 'image' });
+    h.observers[0].fn([{ target: image, isIntersecting: true }]);h.observers[1].fn([{ target: image, isIntersecting: true }]);
+    h.context.setLightboxReturnThumbnailWarmup(true);h.context.state.lightboxReturnInFlight = true;
+    if (video) { h.calls[0].fail();await tick(); }
+    else { h.calls[0].finish();await tick(); }
+    image.onerror();assert.equal(finishes, 1);assert.equal(h.context.lightboxReturnThumbnailsReady(), true);
+    h.context.resetMediaLoadingRuntime();
   }
 });
