@@ -4,7 +4,7 @@ set -eu
 cd "$(dirname "$0")/.."
 build_os=$(go env GOOS)
 build_arch=$(go env GOARCH)
-build_version=v3.0.0
+build_version=v3.1.0
 build_package=false
 for arg in "$@"; do
  case "$arg" in

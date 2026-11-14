@@ -164,10 +164,13 @@ const (
 
 // PhotoPage 图片分页结果（游标分页）
 type PhotoPage struct {
-	Photos     []*Photo `json:"photos"`
-	NextCursor string   `json:"next_cursor"` // 空字符串表示没有更多
-	HasMore    bool     `json:"has_more"`
-	Total      int      `json:"total,omitempty"`
+	LastID         int64    `json:"-"` // Last consumed row, including unreadable metadata (ID-based repair).
+	Skipped        int      `json:"-"` // Invalid rows skipped while advancing the page boundary.
+	BoundaryCursor string   `json:"-"` // Consumed boundary for locate windows, even on the final page.
+	Photos         []*Photo `json:"photos"`
+	NextCursor     string   `json:"next_cursor"` // 空字符串表示没有更多
+	HasMore        bool     `json:"has_more"`
+	Total          int      `json:"total,omitempty"`
 }
 
 type TimelineLocateResult struct {

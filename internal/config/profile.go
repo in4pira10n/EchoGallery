@@ -82,19 +82,20 @@ type BatchTaskState struct {
 
 type profileDefaultsProbe struct {
 	Preferences struct {
-		WarmEnabled               *bool   `json:"warm_enabled"`
-		LowResourceMode           *bool   `json:"low_resource_mode"`
-		LightboxUIIdleSeconds     *int    `json:"lightbox_ui_idle_seconds"`
-		ThrottledVideoSeek        *bool   `json:"throttled_video_seek"`
-		VideoSeekThrottleMS       *int    `json:"video_seek_throttle_ms"`
-		VideoVolumeMinPercent     *int    `json:"video_volume_min_percent"`
-		VideoVolumeMaxPercent     *int    `json:"video_volume_max_percent"`
-		ExperimentalAutoplayVideo *bool   `json:"experimental_autoplay_video"`
-		VideoAutoplayNext         *bool   `json:"video_autoplay_next"`
-		SubtitlesEnabled          *bool   `json:"subtitles_enabled"`
-		SubtitleFontSize          *int    `json:"subtitle_font_size"`
-		SubtitleColor             *string `json:"subtitle_color"`
-		SubtitleBackgroundOpacity *int    `json:"subtitle_background_opacity"`
+		ProgressiveLinearLayerEnabled *bool   `json:"progressive_linear_layer_enabled"`
+		WarmEnabled                   *bool   `json:"warm_enabled"`
+		LowResourceMode               *bool   `json:"low_resource_mode"`
+		LightboxUIIdleSeconds         *int    `json:"lightbox_ui_idle_seconds"`
+		ThrottledVideoSeek            *bool   `json:"throttled_video_seek"`
+		VideoSeekThrottleMS           *int    `json:"video_seek_throttle_ms"`
+		VideoVolumeMinPercent         *int    `json:"video_volume_min_percent"`
+		VideoVolumeMaxPercent         *int    `json:"video_volume_max_percent"`
+		ExperimentalAutoplayVideo     *bool   `json:"experimental_autoplay_video"`
+		VideoAutoplayNext             *bool   `json:"video_autoplay_next"`
+		SubtitlesEnabled              *bool   `json:"subtitles_enabled"`
+		SubtitleFontSize              *int    `json:"subtitle_font_size"`
+		SubtitleColor                 *string `json:"subtitle_color"`
+		SubtitleBackgroundOpacity     *int    `json:"subtitle_background_opacity"`
 	} `json:"preferences"`
 }
 
@@ -176,6 +177,7 @@ func NewUserProfileTemplate(cfg *Config) *Profile {
 	profile.Preferences.ExperimentalAutoplayVideo = true
 	profile.Preferences.VideoAutoplayNext = true
 	profile.Preferences.VideoVolumeMaxPercent = 100
+	profile.Preferences.ProgressiveLinearLayerEnabled = true
 	profile.Preferences.SubtitlesEnabled = true
 	profile.Preferences.SubtitleFontSize = 100
 	profile.Preferences.SubtitleColor = "#ffffff"
@@ -202,6 +204,9 @@ func LoadProfile(cfg *Config, username string) (*Profile, error) {
 	}
 	if probe.Preferences.LowResourceMode == nil {
 		profile.Preferences.LowResourceMode = false
+	}
+	if probe.Preferences.ProgressiveLinearLayerEnabled == nil {
+		profile.Preferences.ProgressiveLinearLayerEnabled = true
 	}
 	if probe.Preferences.WarmEnabled == nil {
 		profile.Preferences.WarmEnabled = true

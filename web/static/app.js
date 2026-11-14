@@ -3297,6 +3297,14 @@ function initDisplaySettings() {
 function applyDisplaySettings() {
   document.documentElement.style.setProperty('--grid-gap', state.gridGap + 'px');
   document.documentElement.style.setProperty('--thumb-radius', state.thumbRadius + 'px');
+  document.documentElement.style.setProperty('--page-fade-display', state.serverSettings.progressive_linear_layer_enabled === false ? 'none' : 'block');
+  // The original color preference now applies to the light theme.
+  for (const [theme, key] of [['light', 'progressive_linear_layer_color'], ['dark', 'progressive_linear_layer_dark_color']]) {
+    const fadeColor = normalizeHexColor(state.serverSettings[key]);
+    if (fadeColor) document.documentElement.style.setProperty(`--page-fade-${theme}-color`, fadeColor);
+    else document.documentElement.style.removeProperty(`--page-fade-${theme}-color`);
+  }
+  pageEdgeFades?.update();
 }
 function setGridGap(size) {
   state.gridGap = Math.min(24, Math.max(0, Number(size) || 0));
@@ -3389,6 +3397,7 @@ function beginTouchPinch(e) {
   }
   const distance = touchDistance(e.touches);
   if (distance <= 0) return false;
+  if (context === 'lightbox' || context === 'blocked') cancelLightboxTouchGesture();
   if (context === 'blocked') {
     state.pinchGesture = {
       context,
@@ -3794,6 +3803,23 @@ function stopLightboxTouchDismissMotion() {
   lightboxTouchDismissMotion = null;
   return motion;
 }
+function cancelLightboxTouchGesture(pointerId = null) {
+  const swipes = [state.lightboxSwipe, state.videoSurfaceSwipe].filter(swipe =>
+    swipe?.touchDismiss && (pointerId == null || swipe.pointerId === pointerId));
+  // A normal pointerup clears its owner before releasing capture. Its subsequent
+  // lostpointercapture must not cancel the newly started settling animation.
+  if (!swipes.length && (pointerId != null || !lightboxTouchDismissMotion)) return;
+  for (const swipe of swipes) {
+    if (state.lightboxSwipe === swipe) state.lightboxSwipe = null;
+    if (state.videoSurfaceSwipe === swipe) state.videoSurfaceSwipe = null;
+  }
+  const body = $('.lightbox-body');
+  for (const swipe of swipes) {
+    try { body?.releasePointerCapture?.(swipe.pointerId); } catch (_) {}
+  }
+  resetLightboxSwipeVisual();
+  clearLightboxDismissGesture();
+}
 function beginLightboxTouchDismiss(e, swipe) {
   if (e.pointerId === -1) return;
   const motion = stopLightboxTouchDismissMotion();
@@ -3913,12 +3939,15 @@ function clearLightboxDismissGesture(options = {}) {
       lightbox.style.removeProperty('--lightbox-dismiss-progress');
       lightbox.style.removeProperty('--lightbox-dismiss-translate-y');
       clearLightboxUnderzoomState();
+      clearLightboxDismissFade();
     }, 220);
     return;
   }
   lightbox.classList.remove('lightbox-dismiss-dragging');
   lightbox.style.removeProperty('--lightbox-dismiss-progress');
   lightbox.style.removeProperty('--lightbox-dismiss-translate-y');
+  clearLightboxUnderzoomState();
+  clearLightboxDismissFade();
 }
 function clearLightboxUnderzoomState() {
   setLightboxReturnThumbnailWarmup(false);
@@ -5748,6 +5777,9 @@ function applyServerSettings(data = {}) {
   state.experimentalRestoreLastView = !!data.experimental_restore_last_view;
   state.continueLastVideoPosition = false;
   state.subtitlesEnabled = data.subtitles_enabled !== false;
+  state.serverSettings.progressive_linear_layer_enabled = data.progressive_linear_layer_enabled !== false;
+  state.serverSettings.progressive_linear_layer_color = normalizeHexColor(data.progressive_linear_layer_color);
+  state.serverSettings.progressive_linear_layer_dark_color = normalizeHexColor(data.progressive_linear_layer_dark_color);
   state.serverSettings.warm_enabled = data.warm_enabled !== false;
   state.serverSettings.lightbox_ui_idle_seconds = normalizeLightboxUIIdleSeconds(data.lightbox_ui_idle_seconds, 0);
   state.serverSettings.low_resource_mode = !!data.low_resource_mode;
@@ -5793,6 +5825,9 @@ function buildSettingsPayload() {
     grid_size: state.gridSize,
     grid_gap: state.gridGap,
     thumb_radius: state.thumbRadius,
+    progressive_linear_layer_enabled: state.serverSettings.progressive_linear_layer_enabled !== false,
+    progressive_linear_layer_color: normalizeHexColor(state.serverSettings.progressive_linear_layer_color),
+    progressive_linear_layer_dark_color: normalizeHexColor(state.serverSettings.progressive_linear_layer_dark_color),
     sidebar_auto_hide: false,
     slideshow_mode: state.slideshowMode,
     slideshow_loop: !!state.slideshowLoop,
@@ -6349,6 +6384,9 @@ const state = {
     subtitle_font_size: 100,
     subtitle_color: '#ffffff',
     subtitle_background_opacity: 72,
+    progressive_linear_layer_enabled: true,
+    progressive_linear_layer_color: '',
+    progressive_linear_layer_dark_color: '',
     warm_enabled: true,
     lightbox_ui_idle_seconds: 0,
     low_resource_mode: false,
@@ -7833,6 +7871,145 @@ function closeContextMenu() {
   if (_ctxMenu) { _ctxMenu.remove(); _ctxMenu = null; }
 }
 
+// Page effects are independent of lightbox gestures and cross-tab navigation.
+let pageEdgeFades = null;
+let albumSwipeBack = null;
+const albumBackPreviews = new Map();
+function pageEffectControls(scope = document) {
+  return [...scope.querySelectorAll('.topbar-title, .topbar-leading, .topbar-meta, #topbar-actions, .nav-logo-floating, .nav, .floating-search-btn, .floating-grid-scale-control, .album-detail-pill, .album-detail-bottom-controls')];
+}
+function phonePageEffectsEnabled() {
+  return isPhoneTouchLayout() && window.matchMedia('(pointer: coarse)').matches
+    && Math.min(window.screen.width, window.screen.height) <= 640;
+}
+function albumPageKey(album = null, direct = false) {
+  return `${activeLibraryIdentity(state.serverSettings)}:${album ? Number(album.id) : 'albums'}:${direct ? 'media' : 'folders'}:${state.albumViewMode}:${state.albumKindFilter}`;
+}
+function captureAlbumPage(scope = document) {
+  return EchoPageEffects.capturePage({
+    content: [...scope.querySelectorAll('.album-card, .photo-thumb, .empty, .load-more')],
+    controls: pageEffectControls(scope),
+    fades: scope.querySelector('.page-edge-fades'),
+  });
+}
+function rememberAlbumBackPage() {
+  if (typeof EchoPageEffects === 'undefined' || !phonePageEffectsEnabled() || !['albums', 'album-detail'].includes(state.view)) return;
+  pageEdgeFades?.measure();
+  const key = albumPageKey(state.view === 'album-detail' ? state.currentAlbum : null,
+    state.view === 'album-detail' && Number(state.albumDirectMediaOnlyID) === Number(state.currentAlbumID));
+  albumBackPreviews.delete(key);
+  albumBackPreviews.set(key, { page: captureAlbumPage(), scrollY: window.scrollY,
+    width: window.innerWidth, height: window.innerHeight });
+  // Only viewport-sized previews, bounded independently of library size/depth.
+  while (albumBackPreviews.size > 4) albumBackPreviews.delete(albumBackPreviews.keys().next().value);
+}
+function albumBackDestination() {
+  const current = state.currentAlbum;
+  if (state.view !== 'album-detail' || !current) return null;
+  const direct = Number(state.albumDirectMediaOnlyID) === Number(current.id)
+    && albumChildAlbumsForDetail(current).length > 0;
+  return { album: direct ? current : parentAlbumFor(current), direct };
+}
+function buildAlbumBackPreview(destination) {
+  // Deep links / View in album have no visited parent. Build its real folder
+  // listing from the loaded album index, without navigating or reading media.
+  const stage = el('div', 'album-back-preview-stage');
+  stage.inert = true;
+  const content = el('div', 'content');
+  const grid = el('div', `album-grid${state.albumViewMode === 'list' ? ' list' : ''}`);
+  content.append(grid); stage.append(content);
+  const album = destination.album;
+  const children = album ? albumChildAlbumsForDetail(album) : albumChildrenForParent('', state.albumKindFilter);
+  const entries = [];
+  if (album && albumDirectMediaCount(album) > 0 && children.length) {
+    entries.push(makeAlbumCard({ ...album, name: copyText('app.interface.s_18755acbbb'), source_rel_path: '', source_kind: 'folder' },
+      { rootEntry: true, itemCount: albumDirectMediaCount(album) }));
+  }
+  // A fallback starts at the parent's top. Only build enough cards to paint
+  // that viewport; the actual return renders the full listing normally.
+  const visibleLimit = Math.ceil(window.innerHeight / 80) * 2;
+  entries.push(...children.slice(0, visibleLimit).map(child => makeAlbumCard(child)));
+  grid.append(...entries);
+  if (!entries.length) content.append(el('div', 'empty', `${icons.album}<p>${escapeHTML(copyText('app.empty.albums'))}</p>`));
+  const topbar = $('.topbar').cloneNode(true);
+  $('.topbar-title', topbar).textContent = album ? albumDisplayTitle(album) : copyText('app.interface.s_c657c81e6b');
+  $('.topbar-leading', topbar).innerHTML = album ? '' : renderTopbarLeadingGroup([
+    renderTopbarGlassButton({ icon: icons.topbarNewAlbum, label: copyText('app.interface.s_0d7af6be71'), variant: 'accent' }),
+  ]);
+  $('.topbar-meta', topbar).innerHTML = renderAlbumViewModeControl() + (album ? '' : renderAlbumKindFilterControl());
+  $('#topbar-actions', topbar).innerHTML = '';
+  stage.append(topbar);
+  for (const selector of ['#nav-logo-btn', '#main-nav', '#floating-search-btn']) {
+    const control = $(selector)?.cloneNode(true);
+    if (!control) continue;
+    if (selector === '#main-nav') {
+      control.classList.remove('nav-picker-open', 'open');
+      $$('.nav-item', control).forEach(item => {
+        const active = item.dataset.view === 'albums';
+        item.classList.toggle('active', active);
+        item.innerHTML = `${navIconMarkup(item.dataset.view, active)}<span class="nav-label">${escapeHTML(item.dataset.label || '')}</span>`;
+      });
+    }
+    stage.append(control);
+  }
+  if (album) stage.append(el('div', 'album-detail-pill', albumDetailPillContent(album)));
+  // Page IDs stay detached; SVG drawing definitions get independent local IDs.
+  EchoPageEffects.preparePreviewTree(stage);
+  document.body.append(stage);
+  try {
+    const fades = el('div', 'page-edge-fades'); stage.append(fades);
+    const controls = pageEffectControls(stage);
+    const canvas = fades.getBoundingClientRect(), upper = [], lower = [];
+    for (const control of controls) {
+      const rect = control.getBoundingClientRect();
+      if (!rect.width || !rect.height || getComputedStyle(control).display === 'none') continue;
+      ((rect.top + rect.bottom) / 2 < window.innerHeight / 2 ? upper : lower).push(rect);
+    }
+    const heights = EchoPageEffects.edgeFadeHeights(canvas, upper, lower);
+    fades.style.setProperty('--page-fade-top', `${heights.top}px`);
+    fades.style.setProperty('--page-fade-bottom', `${heights.bottom}px`);
+    // The stage is inert to input, but capturePage must see its painted pieces.
+    stage.inert = false;
+    return { page: captureAlbumPage(stage), scrollY: 0, width: window.innerWidth, height: window.innerHeight };
+  } finally { stage.remove(); }
+}
+function getAlbumBackPreview() {
+  const destination = albumBackDestination();
+  if (!destination) return null;
+  const cached = albumBackPreviews.get(albumPageKey(destination.album));
+  const preview = cached && cached.width === window.innerWidth && cached.height === window.innerHeight
+    ? cached : buildAlbumBackPreview(destination);
+  return { ...preview, destination, library: activeLibraryIdentity(state.serverSettings) };
+}
+async function completeAlbumSwipeBack(preview) {
+  if (preview.library !== activeLibraryIdentity(state.serverSettings)) return false;
+  disconnectLoadMoreObserver();
+  if (preview.destination.direct) {
+    state.albumDirectMediaOnlyID = null;
+    state.albumDetailLoadedKey = '';
+    await renderAlbumDetail();
+  } else {
+    await returnToAlbumParent();
+  }
+  window.scrollTo({ top: preview.scrollY, left: 0, behavior: 'instant' });
+  pageEdgeFades?.measure();
+  return true;
+}
+function initPageEffects() {
+  if (typeof EchoPageEffects === 'undefined') return;
+  albumSwipeBack?.destroy(); pageEdgeFades?.destroy(); albumBackPreviews.clear();
+  pageEdgeFades = EchoPageEffects.createEdgeFades({ container: $('#app'), controls: pageEffectControls, extension: 50 });
+  albumSwipeBack = EchoPageEffects.installSwipeBack({
+    isEnabled: () => phonePageEffectsEnabled() && state.view === 'album-detail' && !!state.currentAlbum
+      && !isLibraryBuildBlocking() && !state.searchOpen && !state.selected.size
+      && !document.querySelector('.lightbox.open, .modal-overlay.open, .context-menu, .echo-frame, .blocking-overlay, .timeline-locate-blocking')
+      && !$('#main-nav')?.classList.contains('nav-picker-open'),
+    createPreview: getAlbumBackPreview,
+    createCurrent: () => { pageEdgeFades?.measure(); return captureAlbumPage(); },
+    onBack: completeAlbumSwipeBack,
+  });
+}
+
 // ── 渲染框架 ──────────────────────────────────────────
 function renderApp() {
   const navItem = (view, icon, label, active = state.view === view) =>
@@ -7887,6 +8064,7 @@ ${renderLibraryLogoGuideModal()}`;
 
   bindNav();
   bindGlobal();
+  initPageEffects();
   syncSidebarUI();
   syncRoleAwareNavigation();
   syncRangeProgress();
@@ -8080,6 +8258,8 @@ function openLastAlbumDetail() {
 }
 
 function switchView(view) {
+  if (!document.documentElement.classList.contains('page-back-committing')) albumSwipeBack?.cancel();
+  if (!['albums', 'album-detail'].includes(view)) albumBackPreviews.clear();
   if (!isAllowedRootView(view) && view !== 'album-detail') {
     view = isRootUser() ? 'root-debug' : 'timeline';
   }
@@ -8104,7 +8284,7 @@ function switchView(view) {
   }
   syncNavActiveView(view);
   applyLibraryBranding();
-  renderView();
+  return renderView();
 }
 function isLibraryBuildBlocking(status = state.libraryBuildStatus) {
   return ['discovering', 'running', 'cancelling', 'error'].includes(status && status.status);
@@ -11377,6 +11557,18 @@ function renderSettingsContent({ host = settingsViewHost() } = {}) {
         <label for="settings-thumbnail-size"><span>${escapeHTML(settingsText('display.thumbnailSize'))}</span><span id="settings-thumbnail-size-value">${thumbnailBuildSize}px</span></label>
         <input class="input" id="settings-thumbnail-size" type="range" min="512" max="512" step="1" value="512" disabled>
       </div>
+      ${renderSettingsToggle('settings-progressive-linear-layer', settingsText('display.progressiveLinearLayer'), state.serverSettings.progressive_linear_layer_enabled !== false, settingsText('display.progressiveLinearLayerCopy'))}
+      <div class="settings-control settings-control-panel library-editor-inline">
+        <div class="library-editor-accent-row">
+          <label for="settings-progressive-linear-layer-color"><span>${escapeHTML(settingsText('display.gradientLightColor'))}</span><span>${escapeHTML(settingsText('display.gradientColorCopy'))}</span></label>
+          <input class="library-editor-accent-picker" id="settings-progressive-linear-layer-color" type="color" value="${normalizeHexColor(state.serverSettings.progressive_linear_layer_color) || '#f7f4ef'}">
+        </div>
+        <div class="library-editor-accent-row">
+          <label for="settings-progressive-linear-layer-dark-color"><span>${escapeHTML(settingsText('display.gradientDarkColor'))}</span><span>${escapeHTML(settingsText('display.gradientColorCopy'))}</span></label>
+          <input class="library-editor-accent-picker" id="settings-progressive-linear-layer-dark-color" type="color" value="${normalizeHexColor(state.serverSettings.progressive_linear_layer_dark_color) || '#1a1a1a'}">
+        </div>
+        <div class="settings-actions settings-actions-fill"><button class="btn" id="settings-progressive-linear-layer-theme" type="button">${escapeHTML(settingsText('display.gradientFollowTheme'))}</button></div>
+      </div>
       ${renderSettingsToggle('settings-warm-enabled', settingsText('display.warmEnabled'), isWarmEnabled(), settingsText('display.warmEnabledCopy'))}
       <div class="settings-control">
         <label for="settings-lightbox-ui-idle-seconds"><span>${escapeHTML(settingsText('display.uiIdle'))}</span><span id="settings-lightbox-ui-idle-seconds-value">${escapeHTML(idleSeconds === 0 ? settingsText('display.uiIdleTap') : settingsText('display.seconds', { count: idleSeconds }))}</span></label>
@@ -11725,6 +11917,29 @@ function renderSettingsContent({ host = settingsViewHost() } = {}) {
   });
   $('#settings-low-resource-mode')?.addEventListener('change', e => {
     state.serverSettings.low_resource_mode = !!e.target.checked;
+    setSettingsDirty();
+  });
+  $('#settings-progressive-linear-layer')?.addEventListener('change', e => {
+    state.serverSettings.progressive_linear_layer_enabled = !!e.target.checked;
+    applyDisplaySettings();
+    setSettingsDirty();
+  });
+  $('#settings-progressive-linear-layer-color')?.addEventListener('input', e => {
+    state.serverSettings.progressive_linear_layer_color = normalizeHexColor(e.target.value);
+    applyDisplaySettings();
+    setSettingsDirty();
+  });
+  $('#settings-progressive-linear-layer-dark-color')?.addEventListener('input', e => {
+    state.serverSettings.progressive_linear_layer_dark_color = normalizeHexColor(e.target.value);
+    applyDisplaySettings();
+    setSettingsDirty();
+  });
+  $('#settings-progressive-linear-layer-theme')?.addEventListener('click', () => {
+    state.serverSettings.progressive_linear_layer_color = '';
+    state.serverSettings.progressive_linear_layer_dark_color = '';
+    $('#settings-progressive-linear-layer-color').value = '#f7f4ef';
+    $('#settings-progressive-linear-layer-dark-color').value = '#1a1a1a';
+    applyDisplaySettings();
     setSettingsDirty();
   });
   $('#settings-warm-enabled')?.addEventListener('change', e => {
@@ -15361,6 +15576,7 @@ function buildAlbumChildrenIndex() {
 
 function clearAlbumChildrenIndex() {
   state.albumChildrenIndex = null;
+  if (typeof albumBackPreviews !== 'undefined') albumBackPreviews.clear();
 }
 
 function findAlbumByPath(path = '') {
@@ -15376,9 +15592,9 @@ function parentAlbumFor(album) {
 function returnToAlbumParent(album = state.currentAlbum) {
   const parent = parentAlbumFor(album);
   if (parent) {
-    openAlbumDetail(parent);
+    return openAlbumDetail(parent);
   } else {
-    switchView('albums');
+    return switchView('albums');
   }
 }
 
@@ -15436,6 +15652,10 @@ function makeAlbumCard(album, options = {}) {
 
 // ── 相册详情 ──────────────────────────────────────────
 async function openAlbumDetail(album) {
+  if (!document.documentElement.classList.contains('page-back-committing')) {
+    albumSwipeBack?.cancel();
+    rememberAlbumBackPage();
+  }
   const nextID = Number(album && album.id);
   const prevID = Number(state.currentAlbumID || 0);
   const cached = (state.albums || []).find(item => Number(item && item.id) === nextID);
@@ -15461,7 +15681,7 @@ async function openAlbumDetail(album) {
   state.view = 'album-detail';
   setHashView('album-detail', album.id);
   syncNavActiveView('album-detail');
-  renderAlbumDetail();
+  return renderAlbumDetail();
 }
 function adjacentAlbum(offset) {
   const albums = albumSiblingList(state.currentAlbum);
@@ -15474,6 +15694,11 @@ function openAdjacentAlbum(offset) {
   const album = adjacentAlbum(offset);
   if (!album) return;
   openAlbumDetail(album);
+}
+
+function albumDetailPillContent(album) {
+  return `<button class="album-detail-back-btn" id="album-detail-back-btn" type="button" title="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}" aria-label="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}">${icons.topbarBackAlbums}</button>
+  <span class="album-detail-title" title="${escapeHTML(albumRelativeAddress(album) || albumDisplayTitle(album))}">${escapeHTML(albumDisplayTitle(album))}</span>`;
 }
 
 async function renderAlbumDetail() {
@@ -15500,7 +15725,6 @@ async function renderAlbumDetail() {
     return;
   }
   const albumTitle = albumDisplayTitle(album);
-  const albumAddress = albumRelativeAddress(album);
   const showDirectMediaOnly = Number(state.albumDirectMediaOnlyID) === Number(album.id);
   const childAlbums = showDirectMediaOnly ? [] : albumChildAlbumsForDetail(album);
   const hasDirectMediaEntry = !showDirectMediaOnly
@@ -15526,10 +15750,7 @@ async function renderAlbumDetail() {
   }
 
   $('#content').innerHTML = `
-<div class="album-detail-pill" id="album-detail-pill">
-  <button class="album-detail-back-btn" id="album-detail-back-btn" type="button" title="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}" aria-label="${escapeHTML(copyText('app.interface.runtime.albumDetailBack'))}">${icons.topbarBackAlbums}</button>
-  <span class="album-detail-title" title="${escapeHTML(albumAddress || albumTitle)}">${escapeHTML(albumTitle)}</span>
-</div>
+<div class="album-detail-pill" id="album-detail-pill">${albumDetailPillContent(album)}</div>
 ${showFolderListing ? '' : `<div class="album-detail-bottom-controls" id="album-detail-bottom-controls">${renderAlbumDetailBottomActionControls()}</div>`}
 <div id="album-child-wrap"></div><div class="load-more load-more-top" id="load-more-top" ${showFolderListing ? 'style="display:none"' : ''}><div class="spinner"></div>${escapeHTML(copyText('app.interface.runtime.loadEarlier'))}</div><div id="album-groups"></div><div class="load-more" id="load-more" ${showFolderListing ? 'style="display:none"' : ''}><div class="spinner"></div>${copyText('app.interface.commonLoading')}</div>`;
   renderAlbumChildGrid(childAlbums);
@@ -15692,6 +15913,7 @@ function renderAlbumChildGrid(albums = []) {
       rootEntry: true,
       itemCount: albumDirectMediaCount(parentAlbum),
       onClick: () => {
+        rememberAlbumBackPage();
         state.albumDirectMediaOnlyID = Number(parentAlbum.id);
         state.albumPhotos = [];
         state.albumCursor = '';
@@ -16444,12 +16666,12 @@ function updateLightboxHeaderLayout() {
     main.style.maxWidth = '';
   };
   const constrainTitle = () => {
-    const headerRect = header.getBoundingClientRect();
+    const mainRect = main.getBoundingClientRect();
     const actionRect = actions.getBoundingClientRect();
     const controlsVisible = getComputedStyle(controls).display !== 'none' && controls.offsetWidth > 0;
     const controlsRect = controlsVisible ? controls.getBoundingClientRect() : null;
     const rightBoundary = controlsRect ? controlsRect.left : actionRect.left;
-    const maxWidth = Math.max(0, Math.floor(rightBoundary - headerRect.left - 16));
+    const maxWidth = Math.max(0, Math.floor(rightBoundary - mainRect.left - 16));
     main.style.maxWidth = `${maxWidth}px`;
   };
   const hasOverlap = () => {
@@ -16644,6 +16866,7 @@ function bindGlobal() {
     if (!e.altKey && e.key === 'Alt') syncLightboxTemporaryZoom(false);
   }, true);
   window.addEventListener('blur', () => {
+    cancelLightboxTouchGesture();
     clearLightboxFavoriteKeyHoldState();
     resetLightboxTemporaryZoom();
     handleLightboxVideoAppHidden();
@@ -16652,6 +16875,7 @@ function bindGlobal() {
     syncMediaLoadingActivity();
     if (!document.hidden && lightboxIsInteractive() && !isVideoMedia(state.lightboxPhotos[state.lightboxIndex])) lbRender();
     if (document.hidden) {
+      cancelLightboxTouchGesture();
       resetLightboxTrackpad();
       state.lightboxSwipe = null; state.videoSurfaceSwipe = null;
       resetLightboxSwipeVisual(); clearLightboxDismissGesture();
@@ -16664,6 +16888,7 @@ function bindGlobal() {
     }
   });
   window.addEventListener('pagehide', () => {
+    cancelLightboxTouchGesture();
     resetMediaLoadingRuntime();
     clearLightboxFavoriteKeyHoldState();
     handleLightboxVideoAppHidden();
@@ -16894,6 +17119,9 @@ function bindGlobal() {
       return;
     }
     if (state.videoProgressScrubPointerId != null) endVideoProgressScrub(e);
+  }, true);
+  document.addEventListener('lostpointercapture', e => {
+    cancelLightboxTouchGesture(e.pointerId);
   }, true);
   document.addEventListener('pointerup', e => {
     if (!$('#lightbox').classList.contains('open')) return;

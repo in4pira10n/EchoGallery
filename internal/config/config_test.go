@@ -69,6 +69,9 @@ func TestLoadFromPath_Success(t *testing.T) {
 	if !cfg.Preferences.WarmEnabled {
 		t.Errorf("期望旧配置默认开启 warm_enabled")
 	}
+	if !cfg.Preferences.ProgressiveLinearLayerEnabled {
+		t.Error("旧配置应默认开启页面渐变层")
+	}
 	if !cfg.Preferences.ExperimentalAutoplayVideo || !cfg.Preferences.VideoAutoplayNext {
 		t.Errorf("期望旧配置默认开启视频自动播放")
 	}

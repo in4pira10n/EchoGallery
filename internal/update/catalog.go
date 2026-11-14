@@ -22,8 +22,8 @@ import (
 )
 
 // Version remains semantic for package ordering; VersionCode identifies a build.
-var Version = "v3.0.0"
-var VersionName = "EchoGallery v3.0.0 : Nice to Meet You"
+var Version = "v3.1.0"
+var VersionName = "EchoGallery v3.1.0 : In the Flow"
 var VersionCode = ""
 
 func CurrentVersionCode() string {

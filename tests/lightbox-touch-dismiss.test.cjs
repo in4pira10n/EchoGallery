@@ -16,7 +16,7 @@ function harness(video = false, reduced = false) {
   const context = vm.createContext({ state, performance: { now: () => time }, Date,
     window: { innerHeight: 800, innerWidth: 400, matchMedia: () => ({ matches: reduced }) },
     requestAnimationFrame: callback => { frames.set(++serial, callback); return serial; }, cancelAnimationFrame: id => frames.delete(id),
-    syncMediaLoadingActivity() {}, clearTimeout() {}, $: selector => selector === '#lightbox' ? lightbox : selector === '.lightbox-body' ? body : media,
+    syncMediaLoadingActivity() {}, resetLightboxSwipeVisual() {}, clearTimeout() {}, $: selector => selector === '#lightbox' ? lightbox : selector === '.lightbox-body' ? body : media,
     clampLightboxValue: (value, min, max) => Math.max(min, Math.min(max, value)),
     isVideoMedia: photo => photo?.media_kind === 'video', currentLightboxMediaElement: () => media,
     isLightboxSwipeExcludedTarget: () => false, setupLightboxSwipePreview() {}, lightboxCanLoadMoreForward: () => false,
@@ -24,7 +24,7 @@ function harness(video = false, reduced = false) {
     exitLightboxToContext: () => { exits++; }, lightboxSwipeAnimationMs: 380,
   });
   vm.runInContext('let lightboxTouchDismissMotion = null; let mediaLoadRuntime = null;', context);
-  for (const name of ['setLightboxReturnThumbnailWarmup', 'lightboxReturnThumbnailsReady', 'stopLightboxTouchDismissMotion', 'beginLightboxTouchDismiss', 'updateLightboxTouchDismiss',
+  for (const name of ['setLightboxReturnThumbnailWarmup', 'lightboxReturnThumbnailsReady', 'stopLightboxTouchDismissMotion', 'cancelLightboxTouchGesture', 'beginLightboxTouchDismiss', 'updateLightboxTouchDismiss',
     'renderLightboxTouchDismiss', 'endLightboxTouchDismiss', 'animateLightboxTouchDismiss',
     'setLightboxDismissGesture', 'clearLightboxDismissGesture', 'clearLightboxUnderzoomState',
     'lightboxUnderzoomVisualProgress', 'setLightboxUnderzoomProgress',
@@ -41,7 +41,7 @@ function harness(video = false, reduced = false) {
   const tick = (dt = 16) => { time += dt; const batch = [...frames.values()]; frames.clear(); batch.forEach(callback => callback(time)); };
   const settle = () => { for (let i = 0; i < 120 && frames.size; i++) tick(); assert.equal(frames.size, 0); };
   const y = () => parseFloat(values.get('--lightbox-dismiss-translate-y')) || 0;
-  return { context, state, values, frames, begin, move, end, tick, settle, y, wait: dt => { time += dt; }, exits: () => exits };
+  return { context, state, values, classes, frames, begin, move, end, tick, settle, y, wait: dt => { time += dt; }, exits: () => exits };
 }
 for (const video of [false, true]) {
   test(`${video ? 'video' : 'photo'} dismissal follows the finger and carries release velocity`, async () => {
@@ -150,4 +150,80 @@ test('timeline DOM readiness cannot close the lightbox before visible thumbnail 
   assert.equal(timeline.mounts(), 1);assert.equal(timeline.closes(), 0);
   pixelsReady = true;h.context.finishLightboxReturnTransition();
   assert.equal(timeline.closes(), 1);
+});
+
+
+test('aborting a touch dismissal restores both visible media and clickable controls', async () => {
+  const h = harness();h.begin(100);h.move(260);await h.end();h.tick();
+  assert.ok(h.classes.has('lightbox-underzooming'));
+  h.context.clearLightboxDismissGesture();h.settle();
+  assert.equal(h.classes.has('lightbox-underzooming'),false);
+  assert.equal(h.classes.has('lightbox-dismiss-dragging'),false);
+  assert.equal(h.values.has('--lightbox-underzoom-controls-opacity'),false);
+  assert.equal(h.y(),0);
+});
+
+test('two-finger takeover cancels a grabbed dismissal without leaving the controls disabled', async () => {
+  for (const video of [false,true]) {
+    const h=harness(video), timeline=timelineReturn(h), c=h.context;
+    c.pinchContextForTouches=()=>video?'blocked':'lightbox';c.isFixedTouchGridLayout=()=>false;
+    c.touchDistance=()=>100;c.touchMidpoint=()=>({x:200,y:300});c.updateLightboxFocusPointFromPointer=()=>{};
+    c.resetLightboxSwipeVisual=()=>{};
+    const match=source.match(/^function beginTouchPinch\([^]*?^}/m);vm.runInContext(match[0],c);
+    h.begin(100);h.move(260);await h.end();h.tick();h.begin(400);
+    assert.ok(h.classes.has('lightbox-dismiss-dragging'));
+    c.beginTouchPinch({touches:[{},{}],preventDefault(){}});
+    timeline.resolve();await new Promise(setImmediate);h.settle();
+    assert.equal(h.state.lightboxSwipe ?? h.state.videoSurfaceSwipe,null);
+    assert.equal(h.classes.has('lightbox-dismiss-dragging'),false);
+    assert.equal(h.classes.has('lightbox-underzooming'),false);
+    assert.equal(h.y(),0);assert.equal(timeline.mounts(),0);assert.equal(timeline.closes(),0);
+    assert.equal(h.state.pinchGesture.context,video?'blocked':'lightbox');
+  }
+});
+
+function eventListener(h, target, name) {
+  let callback;
+  h.context[target] ??= {};
+  h.context[target].addEventListener = (_, listener) => { callback = listener; };
+  const match = source.slice(source.indexOf('function bindGlobal()')).match(
+    new RegExp(`^  ${target}\\.addEventListener\\('${name}',[^]*?^  \\}(?:, true)?\\);`, 'm'));
+  assert.ok(match, `${target}.${name}`);
+  vm.runInContext(match[0], h.context);
+  return callback;
+}
+
+test('lost capture cancels only its live touch gesture and leaves normal release animation intact', async () => {
+  for (const video of [false, true]) {
+    const h = harness(video), lost = eventListener(h, 'document', 'lostpointercapture');
+    h.begin(100);h.move(260);
+    lost({ pointerId: 2 });assert.equal(h.y(), 160, 'unrelated capture is ignored');
+    lost({ pointerId: 1 });h.settle();
+    assert.equal(h.y(), 0);assert.equal(h.classes.has('lightbox-underzooming'), false);
+    assert.equal(h.state[video ? 'videoSurfaceSwipe' : 'lightboxSwipe'], null);
+    h.begin(100);h.move(260);await h.end();
+    lost({ pointerId: 1 });h.settle();assert.equal(h.exits(), 1, 'normal release still dismisses');
+  }
+});
+
+test('blur, backgrounding and pagehide recover an interrupted dismissal and reject stale returns', async () => {
+  for (const name of ['blur', 'visibilitychange', 'pagehide']) {
+    for (const grabbed of [false, true]) {
+      const h = harness(), timeline = timelineReturn(h), c = h.context;
+      c.document = { hidden: true };
+      for (const dependency of ['clearLightboxFavoriteKeyHoldState', 'resetLightboxTemporaryZoom',
+        'handleLightboxVideoAppHidden', 'resetLightboxTrackpad', 'resetMediaLoadingRuntime']) c[dependency] = () => {};
+      const hide = eventListener(h, name === 'visibilitychange' ? 'document' : 'window', name);
+      h.begin(100);h.move(260);await h.end();h.tick();
+      if (grabbed) h.begin(400);
+      hide();timeline.resolve();await new Promise(setImmediate);h.settle();
+      assert.equal(h.y(), 0);assert.equal(h.values.has('fade'), false);
+      assert.equal(h.classes.has('lightbox-dismiss-dragging'), false);
+      assert.equal(h.classes.has('lightbox-underzooming'), false);
+      assert.equal(h.state.lightboxReturnInFlight, false);
+      assert.equal(timeline.mounts(), 0);assert.equal(timeline.closes(), 0);
+      h.begin(100);h.move(180);assert.equal(h.y(), 80, 'a fresh drag responds after recovery');
+      await h.end('pointercancel');h.settle();assert.equal(h.y(), 0);
+    }
+  }
 });

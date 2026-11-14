@@ -54,6 +54,9 @@ func TestEnsureProfile_CreatesDefaultFromConfig(t *testing.T) {
 
 func TestNewUserProfileTemplate_DefaultsVideoPreferences(t *testing.T) {
 	profile := NewUserProfileTemplate(validConfig())
+	if !profile.Preferences.ProgressiveLinearLayerEnabled || profile.Preferences.ProgressiveLinearLayerColor != "" {
+		t.Fatal("新用户应默认开启渐变层并跟随主题颜色")
+	}
 	if !profile.Preferences.ExperimentalAutoplayVideo || !profile.Preferences.VideoAutoplayNext {
 		t.Fatal("新用户 Profile 应默认开启视频自动播放")
 	}
@@ -86,14 +89,20 @@ func TestLoadProfile_DefaultsMissingVideoPreferencesButPreservesExplicitValues(t
 	if err != nil {
 		t.Fatalf("加载缺少视频偏好字段的 Profile 失败: %v", err)
 	}
+	if !missing.Preferences.ProgressiveLinearLayerEnabled {
+		t.Fatal("旧 Profile 应默认开启页面渐变层")
+	}
 	if !missing.Preferences.ExperimentalAutoplayVideo || !missing.Preferences.VideoAutoplayNext || missing.Preferences.VideoVolumeMaxPercent != 100 {
 		t.Fatalf("缺失字段未应用默认值: autoplay=%v autoplay_next=%v max_volume=%d", missing.Preferences.ExperimentalAutoplayVideo, missing.Preferences.VideoAutoplayNext, missing.Preferences.VideoVolumeMaxPercent)
 	}
 
-	writeProfile("explicit", `{"storage_path":"/tmp/photos","preferences":{"experimental_autoplay_video":false,"video_autoplay_next":false,"video_volume_max_percent":0}}`)
+	writeProfile("explicit", `{"storage_path":"/tmp/photos","preferences":{"experimental_autoplay_video":false,"video_autoplay_next":false,"video_volume_max_percent":0,"progressive_linear_layer_enabled":false,"progressive_linear_layer_color":"#336699"}}`)
 	explicit, err := LoadProfile(cfg, "explicit")
 	if err != nil {
 		t.Fatalf("加载显式视频偏好字段的 Profile 失败: %v", err)
+	}
+	if explicit.Preferences.ProgressiveLinearLayerEnabled || explicit.Preferences.ProgressiveLinearLayerColor != "#336699" {
+		t.Fatal("读取 Profile 应保留已关闭的渐变层和自选颜色")
 	}
 	if explicit.Preferences.ExperimentalAutoplayVideo || explicit.Preferences.VideoAutoplayNext || explicit.Preferences.VideoVolumeMaxPercent != 0 {
 		t.Fatalf("加载时不应覆盖用户显式值: autoplay=%v autoplay_next=%v max_volume=%d", explicit.Preferences.ExperimentalAutoplayVideo, explicit.Preferences.VideoAutoplayNext, explicit.Preferences.VideoVolumeMaxPercent)

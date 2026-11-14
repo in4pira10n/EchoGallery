@@ -1223,6 +1223,9 @@ func TestSettingsUpdate_VisitorOnlySavesOwnPreferences(t *testing.T) {
 		"grid_size":220,
 		"grid_gap":4,
 		"thumb_radius":6,
+		"progressive_linear_layer_enabled":false,
+		"progressive_linear_layer_color":"#336699",
+		"progressive_linear_layer_dark_color":"#112233",
 		"sidebar_auto_hide":true,
 		"slideshow_mode":"sequential",
 		"slideshow_loop":false,
@@ -1271,6 +1274,20 @@ func TestSettingsUpdate_VisitorOnlySavesOwnPreferences(t *testing.T) {
 	}
 	if savedVisitor.Preferences.Theme != "dark" {
 		t.Fatalf("期望访客主题已保存，得到 %q", savedVisitor.Preferences.Theme)
+	}
+	if savedVisitor.Preferences.ProgressiveLinearLayerEnabled || savedVisitor.Preferences.ProgressiveLinearLayerColor != "#336699" || savedVisitor.Preferences.ProgressiveLayerDarkColor != "#112233" {
+		t.Fatal("渐变层开关与自选颜色应保存到用户 Profile")
+	}
+	read := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	read.AddCookie(&http.Cookie{Name: authCookieName, Value: testToken(t, cfg.JWTSecret, "bob")})
+	readResult := httptest.NewRecorder()
+	router.ServeHTTP(readResult, read)
+	var settings settingsResponse
+	if err := json.Unmarshal(readResult.Body.Bytes(), &settings); err != nil || readResult.Code != http.StatusOK {
+		t.Fatalf("重新读取设置失败: %d %v", readResult.Code, err)
+	}
+	if settings.ProgressiveLinearLayerEnabled || settings.ProgressiveLinearLayerColor != "#336699" || settings.ProgressiveLayerDarkColor != "#112233" {
+		t.Fatal("设置 API 应返回已保存的渐变层偏好")
 	}
 	if len(savedVisitor.Libraries) != 0 || strings.TrimSpace(savedVisitor.StoragePath) != "" {
 		t.Fatalf("期望访客 profile 不写入共享资源库，得到 %+v", savedVisitor)

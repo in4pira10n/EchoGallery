@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -245,6 +246,9 @@ func (s *PhotoService) runThumbnailBuild(ctx context.Context, task *thumbnailBui
 		} else if removed := rawCount - len(page.Photos); removed > 0 {
 			task.adjustTotal(-removed)
 		}
+		for i := 0; i < page.Skipped; i++ {
+			task.incrementSkipped(thumbnailBuildTierLabel(thumbnailTierFull))
+		}
 		sortPhotosForSequentialThumbnailBuild(page.Photos)
 		targetTier := thumbnailTierFull
 		targetLabel := thumbnailBuildTierLabel(targetTier)
@@ -419,6 +423,7 @@ func (s *PhotoService) runThumbnailBuildWorker(ctx context.Context, task *thumbn
 				continue
 			}
 			if err := s.generateThumbnailForPhotoTier(job.photo, job.tier); err != nil {
+				log.Printf("Skipping thumbnail for media %d (%s): %v", job.photo.ID, job.photo.OriginalName, err)
 				label := thumbnailBuildTierLabel(job.tier)
 				task.incrementFailed(label)
 				continue

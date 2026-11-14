@@ -678,6 +678,12 @@
         }
       },
       "display": {
+        "progressiveLinearLayer": "Progressive Linear Layer",
+        "progressiveLinearLayerCopy": "Fade page edges behind floating controls.",
+        "gradientLightColor": "Light mode gradient color",
+        "gradientDarkColor": "Dark mode gradient color",
+        "gradientColorCopy": "Applies to the top and bottom gradients.",
+        "gradientFollowTheme": "Follow theme",
         "gridGap": "Grid gap",
         "thumbRadius": "Image corner radius",
         "thumbnailSize": "Thumbnail size",

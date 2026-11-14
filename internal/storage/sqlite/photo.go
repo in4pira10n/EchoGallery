@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -108,59 +110,118 @@ func makeRandomSortKey(photo *storage.Photo) int64 {
 	return int64(h.Sum64()%uint64(randomSortKeyMax)) + 1
 }
 
-// scanPhoto 从数据库行扫描 Photo 对象
-func scanPhoto(row interface {
-	Scan(...interface{}) error
-}) (*storage.Photo, error) {
-	var p storage.Photo
-	var deletedAt sql.NullTime
-	var deletedBy sql.NullInt64
-	var exifJSON string
-
-	err := row.Scan(
-		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
-		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &exifJSON, &p.IsFavorite, &p.IsSuperFavorite,
-		&p.TakenAt, &p.UploadedAt, &p.UploadedBy,
-		&deletedAt, &deletedBy,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if deletedAt.Valid {
-		p.DeletedAt = &deletedAt.Time
-	}
-	if deletedBy.Valid {
-		p.DeletedBy = &deletedBy.Int64
-	}
-	applyPhotoEXIFJSON(&p, exifJSON)
-	return &p, nil
+// scanPhoto isolates conversion failures to one media row. Scan raw values first
+// so a malformed field cannot hide later fields needed to advance the cursor.
+func scanPhoto(row interface{ Scan(...interface{}) error }) (*storage.Photo, error) {
+	return scanPhotoRecord(row, nil)
 }
 
-func scanPhotoWithExtraInt64(row interface {
-	Scan(...interface{}) error
-}, extra *int64) (*storage.Photo, error) {
+func scanPhotoWithExtraInt64(row interface{ Scan(...interface{}) error }, extra *int64) (*storage.Photo, error) {
+	return scanPhotoRecord(row, extra)
+}
+
+type invalidMediaRowError struct {
+	id    int64
+	cause error
+}
+
+func (e *invalidMediaRowError) Error() string {
+	return fmt.Sprintf("invalid media row %d: %v", e.id, e.cause)
+}
+func (e *invalidMediaRowError) Unwrap() error { return e.cause }
+
+func skipInvalidMediaRow(err error) bool {
+	var invalid *invalidMediaRowError
+	if !errors.As(err, &invalid) {
+		return false
+	}
+	log.Printf("Skipping media metadata: %v", err)
+	return true
+}
+
+// sql.Null* use database/sql's conversion rules, while accepting absent legacy
+// optional fields. Query/driver errors still propagate from row.Scan unchanged.
+func scanMediaColumn(dest any, value any) error {
+	switch dest := dest.(type) {
+	case *string:
+		var v sql.NullString
+		if err := v.Scan(value); err != nil {
+			return err
+		}
+		*dest = v.String
+	case *int64:
+		var v sql.NullInt64
+		if err := v.Scan(value); err != nil {
+			return err
+		}
+		*dest = v.Int64
+	case *int:
+		var v sql.NullInt64
+		if err := v.Scan(value); err != nil {
+			return err
+		}
+		if int64(int(v.Int64)) != v.Int64 {
+			return fmt.Errorf("integer out of range")
+		}
+		*dest = int(v.Int64)
+	case *bool:
+		var v sql.NullBool
+		if err := v.Scan(value); err != nil {
+			return err
+		}
+		*dest = v.Bool
+	case sql.Scanner:
+		return dest.Scan(value)
+	default:
+		return fmt.Errorf("unsupported media column %T", dest)
+	}
+	return nil
+}
+
+func scanPhotoRecord(row interface{ Scan(...interface{}) error }, extra *int64) (*storage.Photo, error) {
 	var p storage.Photo
-	var deletedAt sql.NullTime
+	var takenAt, uploadedAt, deletedAt flexibleSQLiteTime
 	var deletedBy sql.NullInt64
 	var exifJSON string
-	var takenAt flexibleSQLiteTime
-
-	err := row.Scan(
+	dest := []any{
 		&p.ID, &p.UUID, &p.OriginalName, &p.MediaKind, &p.MimeType,
 		&p.Size, &p.Width, &p.Height, &p.DurationMS, &p.StorageRelPath, &p.SourceRelPath, &exifJSON, &p.IsFavorite, &p.IsSuperFavorite,
-		&takenAt, &p.UploadedAt, &p.UploadedBy,
-		&deletedAt, &deletedBy, extra,
-	)
-	if err != nil {
+		&takenAt, &uploadedAt, &p.UploadedBy, &deletedAt, &deletedBy,
+	}
+	if extra != nil {
+		dest = append(dest, extra)
+	}
+	raw := make([]any, len(dest))
+	args := make([]any, len(dest))
+	for i := range raw {
+		args[i] = &raw[i]
+	}
+	if err := row.Scan(args...); err != nil {
 		return nil, err
+	}
+	var conversionErr error
+	for i := range dest {
+		if err := scanMediaColumn(dest[i], raw[i]); err != nil && conversionErr == nil {
+			conversionErr = fmt.Errorf("column %d: %w", i, err)
+		}
+	}
+	// An INTEGER PRIMARY KEY is always readable; do not mask a broken query.
+	if p.ID <= 0 {
+		return nil, fmt.Errorf("invalid media ID: %v", raw[0])
+	}
+	p.UploadedAt = uploadedAt.Time
+	if !uploadedAt.Valid {
+		p.UploadedAt = time.Unix(0, 0).UTC()
 	}
 	p.TakenAt = takenAt.Time
 	if !takenAt.Valid {
-		// Random ordering uses random_sort_key, so malformed legacy capture
-		// timestamps can safely fall back without changing page boundaries.
 		p.TakenAt = p.UploadedAt
 	}
-	if deletedAt.Valid {
+	// A non-NULL deletion marker must stay deleted even if its date is unknown.
+	if raw[17] != nil {
+		if !deletedAt.Valid {
+			deletedAt.Time = time.Unix(0, 0).UTC()
+		}
 		p.DeletedAt = &deletedAt.Time
 	}
 	if deletedBy.Valid {
@@ -170,12 +231,53 @@ func scanPhotoWithExtraInt64(row interface {
 		p.RandomSortKey = *extra
 	}
 	applyPhotoEXIFJSON(&p, exifJSON)
+	if conversionErr != nil {
+		return &p, &invalidMediaRowError{id: p.ID, cause: conversionErr}
+	}
 	return &p, nil
 }
 
+// Keep the database's exact ordering value. Re-encoding a time.Time loses zone
+// names (CST becomes +0800), and fallback display dates must never drive SQL
+// pagination. This is one primary-key lookup per boundary, not per media row.
+func (s *DB) mediaSortBoundary(ctx context.Context, id int64, column string, fallback any) (any, error) {
+	if column != "taken_at" && column != "deleted_at" && column != "size" && column != "is_super_favorite" {
+		return nil, fmt.Errorf("invalid media sort column")
+	}
+	var kind string
+	var raw any
+	err := s.db.QueryRowContext(ctx, "SELECT typeof("+column+"), CAST("+column+" AS TEXT) FROM photos WHERE id = ?", id).Scan(&kind, &raw)
+	if err == sql.ErrNoRows {
+		return fallback, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case "integer":
+		var number sql.NullInt64
+		if err := number.Scan(raw); err != nil {
+			return nil, err
+		}
+		return number.Int64, nil
+	case "real":
+		var number sql.NullFloat64
+		if err := number.Scan(raw); err != nil {
+			return nil, err
+		}
+		return number.Float64, nil
+	case "blob":
+		if value, ok := raw.(string); ok {
+			return []byte(value), nil
+		}
+	}
+	return raw, nil
+}
+
 type flexibleSQLiteTime struct {
-	Time  time.Time
-	Valid bool
+	Time    time.Time
+	Valid   bool
+	Present bool
 }
 
 func (t *flexibleSQLiteTime) Scan(value any) error {
@@ -184,6 +286,7 @@ func (t *flexibleSQLiteTime) Scan(value any) error {
 	}
 	t.Time = time.Time{}
 	t.Valid = false
+	t.Present = value != nil
 	switch value := value.(type) {
 	case time.Time:
 		t.Time = value
@@ -200,11 +303,21 @@ func (t *flexibleSQLiteTime) Scan(value any) error {
 		}
 		t.Valid = true
 	}
+	if t.Time.Year() < 1 || t.Time.Year() > 9999 {
+		t.Time, t.Valid = time.Time{}, false
+	}
 	return nil
 }
 
 func parseFlexibleSQLiteTime(value string) (time.Time, bool) {
 	value = strings.TrimSpace(value)
+	if i := strings.Index(value, " m="); i >= 0 {
+		value = value[:i]
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 4 && fields[2] == fields[3] && (strings.HasPrefix(fields[3], "+") || strings.HasPrefix(fields[3], "-")) {
+		value = strings.Join(fields[:3], " ")
+	}
 	if value == "" {
 		return time.Time{}, false
 	}
@@ -217,6 +330,7 @@ func parseFlexibleSQLiteTime(value string) (time.Time, bool) {
 		"2006-01-02 15:04:05.999999999 -0700 MST",
 		"2006-01-02 15:04:05 -0700 MST",
 		"2006-01-02 15:04:05.999999999 -0700",
+		"2006-01-02 15:04:05.999999999 -07:00",
 		"2006-01-02 15:04:05 -0700",
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05",
@@ -522,11 +636,23 @@ func (s *DB) ListSourceMediaIndex(userID int64) (map[string]storage.SourceMediaI
 	index := make(map[string]storage.SourceMediaInfo)
 	for rows.Next() {
 		var item storage.SourceMediaInfo
-		var deletedAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.SourceRelPath, &item.Size, &item.SourceModUnix, &deletedAt); err != nil {
+		var deletedAt flexibleSQLiteTime
+		var raw [5]any
+		if err := rows.Scan(&raw[0], &raw[1], &raw[2], &raw[3], &raw[4]); err != nil {
 			return nil, err
 		}
-		item.Deleted = deletedAt.Valid
+		dest := []any{&item.ID, &item.SourceRelPath, &item.Size, &item.SourceModUnix, &deletedAt}
+		var invalid error
+		for i := range dest {
+			if err := scanMediaColumn(dest[i], raw[i]); err != nil && invalid == nil {
+				invalid = err
+			}
+		}
+		if invalid != nil {
+			log.Printf("Skipping source media index row %d: %v", item.ID, invalid)
+			continue
+		}
+		item.Deleted = deletedAt.Present
 		if deletedAt.Valid {
 			item.DeletedAtUnixNano = deletedAt.Time.UnixNano()
 		}
@@ -575,21 +701,12 @@ func (s *DB) ListPhotosForMetadataBackfillContext(ctx context.Context, userID, a
 		return nil, fmt.Errorf("查询待修正媒体失败: %w", err)
 	}
 	defer rows.Close()
-	for rows.Next() {
-		photo, err := scanPhoto(rows)
-		if err != nil {
-			return nil, err
-		}
-		page.Photos = append(page.Photos, photo)
-	}
-	if err := rows.Err(); err != nil {
+	collected, err := collectMediaPage(rows, limit, func(p *storage.Photo) string { return encodeCursor(p.TakenAt, p.ID) })
+	if err != nil {
 		return nil, err
 	}
-	if len(page.Photos) > limit {
-		page.HasMore = true
-		page.Photos = page.Photos[:limit]
-	}
-	return page, nil
+	collected.Total = page.Total
+	return collected, nil
 }
 
 func (s *DB) listPhotos(ctx context.Context, params storage.ListPhotosParams, attachPlayback bool) (*storage.PhotoPage, error) {
@@ -637,8 +754,12 @@ func (s *DB) listPhotos(ctx context.Context, params storage.ListPhotosParams, at
 			if err2 != nil {
 				return nil, err2
 			}
+			boundary, boundaryErr := s.mediaSortBoundary(ctx, c.ID, "taken_at", c.TakenAt)
+			if boundaryErr != nil {
+				return nil, boundaryErr
+			}
 			queryArgs := append([]interface{}{}, args...)
-			queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
+			queryArgs = append(queryArgs, boundary, boundary, c.ID, limit+1)
 			rows, err = s.db.QueryContext(ctx, `
 				SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 				       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -665,8 +786,12 @@ func (s *DB) listPhotos(ctx context.Context, params storage.ListPhotosParams, at
 		if err2 != nil {
 			return nil, err2
 		}
+		boundary, boundaryErr := s.mediaSortBoundary(ctx, c.ID, "taken_at", c.TakenAt)
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
 		queryArgs := append([]interface{}{}, args...)
-		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
+		queryArgs = append(queryArgs, boundary, boundary, c.ID, limit+1)
 		rows, err = s.db.QueryContext(ctx, `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -711,7 +836,7 @@ func (s *DB) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage
 		params.PhotoID, params.UserID,
 	)
 	target, err := scanPhoto(row)
-	if err == sql.ErrNoRows || target == nil {
+	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -749,15 +874,13 @@ func (s *DB) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage
 		HasAfter:           afterPage.HasMore,
 		MissingBeforeCount: max(0, missingBeforeCount-len(beforePage.Photos)),
 	}
-	if len(beforePage.Photos) > 0 {
-		first := beforePage.Photos[0]
-		result.PrevCursor = encodeCursor(first.TakenAt, first.ID)
+	if beforePage.BoundaryCursor != "" {
+		result.PrevCursor = beforePage.BoundaryCursor
 	} else {
 		result.PrevCursor = encodeCursor(target.TakenAt, target.ID)
 	}
-	if len(afterPage.Photos) > 0 {
-		last := afterPage.Photos[len(afterPage.Photos)-1]
-		result.NextCursor = encodeCursor(last.TakenAt, last.ID)
+	if afterPage.BoundaryCursor != "" {
+		result.NextCursor = afterPage.BoundaryCursor
 	} else {
 		result.NextCursor = encodeCursor(target.TakenAt, target.ID)
 	}
@@ -765,6 +888,10 @@ func (s *DB) LocateTimelineWindow(params storage.LocateTimelineParams) (*storage
 }
 
 func (s *DB) countTimelineBefore(where string, baseArgs []interface{}, target *storage.Photo, reverse bool) (int, error) {
+	boundary, err := s.mediaSortBoundary(context.Background(), target.ID, "taken_at", target.TakenAt)
+	if err != nil {
+		return 0, err
+	}
 	queryArgs := append([]interface{}{}, baseArgs...)
 	var condition string
 	if reverse {
@@ -772,7 +899,7 @@ func (s *DB) countTimelineBefore(where string, baseArgs []interface{}, target *s
 	} else {
 		condition = " AND (taken_at > ? OR (taken_at = ? AND id > ?))"
 	}
-	queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+	queryArgs = append(queryArgs, boundary, boundary, target.ID)
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos WHERE `+where+condition, queryArgs...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("统计目标之前媒体失败: %w", err)
@@ -794,7 +921,7 @@ func (s *DB) ListPhotosBefore(params storage.LocateTimelineParams) (*storage.Pho
 		params.PhotoID, params.UserID,
 	)
 	target, err := scanPhoto(row)
-	if err == sql.ErrNoRows || target == nil {
+	if err == sql.ErrNoRows {
 		return &storage.PhotoPage{}, nil
 	}
 	if err != nil {
@@ -807,7 +934,10 @@ func (s *DB) ListPhotosBefore(params storage.LocateTimelineParams) (*storage.Pho
 		where += " AND media_kind = ?"
 		baseArgs = append(baseArgs, params.MediaKind)
 	}
-	beforePage, _, err := s.locateTimelinePages(where, baseArgs, target, limit, params.Reverse)
+	beforePage, err := readPastInvalidMediaIDs(target, func(boundary *storage.Photo) (*storage.PhotoPage, error) {
+		page, _, err := s.locateTimelinePages(where, baseArgs, boundary, limit, params.Reverse)
+		return page, err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -826,6 +956,10 @@ func normalizeTimelineBeforePage(page *storage.PhotoPage) *storage.PhotoPage {
 }
 
 func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *storage.Photo, limit int, reverse bool) (*storage.PhotoPage, *storage.PhotoPage, error) {
+	boundary, err := s.mediaSortBoundary(context.Background(), target.ID, "taken_at", target.TakenAt)
+	if err != nil {
+		return nil, nil, err
+	}
 	var beforeQuery string
 	var afterQuery string
 	var beforeArgs []interface{}
@@ -835,7 +969,7 @@ func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *s
 	afterArgs = append([]interface{}{}, baseArgs...)
 
 	if reverse {
-		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeArgs = append(beforeArgs, boundary, boundary, target.ID, limit+1)
 		beforeQuery = `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -846,7 +980,7 @@ func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *s
 			ORDER BY taken_at DESC, id DESC
 			LIMIT ?`
 
-		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterArgs = append(afterArgs, boundary, boundary, target.ID, limit+1)
 		afterQuery = `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -857,7 +991,7 @@ func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *s
 			ORDER BY taken_at ASC, id ASC
 			LIMIT ?`
 	} else {
-		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeArgs = append(beforeArgs, boundary, boundary, target.ID, limit+1)
 		beforeQuery = `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -868,7 +1002,7 @@ func (s *DB) locateTimelinePages(where string, baseArgs []interface{}, target *s
 			ORDER BY taken_at ASC, id ASC
 			LIMIT ?`
 
-		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterArgs = append(afterArgs, boundary, boundary, target.ID, limit+1)
 		afterQuery = `
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -950,8 +1084,12 @@ func (s *DB) SearchPhotos(params storage.SearchPhotosParams) (*storage.PhotoPage
 		if err != nil {
 			return nil, err
 		}
+		boundary, boundaryErr := s.mediaSortBoundary(context.Background(), c.ID, "taken_at", c.TakenAt)
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
 		where += " AND (taken_at < ? OR (taken_at = ? AND id < ?))"
-		args = append(args, c.TakenAt, c.TakenAt, c.ID)
+		args = append(args, boundary, boundary, c.ID)
 	}
 	args = append(args, limit+1)
 
@@ -1038,6 +1176,7 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 		photo   *storage.Photo
 		key     int64
 		wrapped bool
+		invalid bool
 	}
 	items := make([]randomPhoto, 0, limit+1)
 	appendPhase := func(wrapped bool, afterKey, afterID int64, maxKey int64, remaining int) error {
@@ -1065,10 +1204,10 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 		for rows.Next() {
 			var key int64
 			p, err := scanPhotoWithExtraInt64(rows, &key)
-			if err != nil {
+			if err != nil && !skipInvalidMediaRow(err) {
 				return err
 			}
-			items = append(items, randomPhoto{photo: p, key: key, wrapped: wrapped})
+			items = append(items, randomPhoto{photo: p, key: key, wrapped: wrapped, invalid: err != nil})
 		}
 		return rows.Err()
 	}
@@ -1097,6 +1236,10 @@ func (s *DB) ListRandomPhotos(params storage.RandomPhotosParams) (*storage.Photo
 	}
 	page.Photos = make([]*storage.Photo, 0, len(items))
 	for _, item := range items {
+		if item.invalid {
+			page.Skipped++
+			continue
+		}
 		page.Photos = append(page.Photos, item.photo)
 	}
 	if err := s.attachSharedPlaybackMetadata(page.Photos); err != nil {
@@ -1140,8 +1283,12 @@ func (s *DB) ListTrashedPhotos(params storage.ListPhotosParams) (*storage.PhotoP
 		if err2 != nil {
 			return nil, err2
 		}
+		boundary, boundaryErr := s.mediaSortBoundary(context.Background(), c.ID, "deleted_at", c.TakenAt)
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
 		queryArgs := append([]interface{}{}, args...)
-		queryArgs = append(queryArgs, c.TakenAt, c.TakenAt, c.ID, limit+1)
+		queryArgs = append(queryArgs, boundary, boundary, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -1209,12 +1356,20 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 		if err2 != nil {
 			return nil, err2
 		}
+		boundary, boundaryErr := s.mediaSortBoundary(context.Background(), c.ID, "taken_at", c.TakenAt)
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
 		queryArgs := append([]interface{}{}, args...)
 		superValue := 0
 		if c.Super {
 			superValue = 1
 		}
-		queryArgs = append(queryArgs, superValue, superValue, c.TakenAt, superValue, c.TakenAt, c.ID, limit+1)
+		superBoundary, err := s.mediaSortBoundary(context.Background(), c.ID, "is_super_favorite", superValue)
+		if err != nil {
+			return nil, err
+		}
+		queryArgs = append(queryArgs, superBoundary, superBoundary, boundary, superBoundary, boundary, c.ID, limit+1)
 		rows, err = s.db.Query(`
 			SELECT id, uuid, original_name, media_kind, mime_type, size, width, height, duration_ms,
 			       storage_rel_path, source_rel_path, exif_json, is_favorite, is_super_favorite,
@@ -1245,53 +1400,68 @@ func (s *DB) ListFavoritePhotos(params storage.ListPhotosParams) (*storage.Photo
 	return page, nil
 }
 
-func collectFavoritePhotoPage(rows *sql.Rows, limit int) (*storage.PhotoPage, error) {
-	var photos []*storage.Photo
-	for rows.Next() {
-		p, err := scanPhoto(rows)
+// Backward browsing anchors on a visible media ID. A whole skipped window
+// must be crossed here, since it has no visible ID for the browser to anchor on.
+func readPastInvalidMediaIDs(target *storage.Photo, fetch func(*storage.Photo) (*storage.PhotoPage, error)) (*storage.PhotoPage, error) {
+	skipped := 0
+	for {
+		page, err := fetch(target)
 		if err != nil {
 			return nil, err
 		}
-		photos = append(photos, p)
+		skipped += page.Skipped
+		if len(page.Photos) > 0 || !page.HasMore || page.Skipped == 0 {
+			page.Skipped = skipped
+			return page, nil
+		}
+		if page.LastID <= 0 || page.LastID == target.ID {
+			return nil, fmt.Errorf("media window did not advance")
+		}
+		target = &storage.Photo{ID: page.LastID}
+	}
+}
+
+// collectMediaPage keeps continuation based on rows consumed, including skipped
+// rows. The lookahead row is not consumed, so it is retried on the next page.
+func collectMediaPage(rows *sql.Rows, limit int, cursorFor func(*storage.Photo) string) (*storage.PhotoPage, error) {
+	defer rows.Close()
+	page := &storage.PhotoPage{Photos: make([]*storage.Photo, 0, limit)}
+	var boundary *storage.Photo
+	for count := 0; rows.Next(); count++ {
+		if count == limit {
+			page.HasMore = true
+			break
+		}
+		photo, err := scanPhoto(rows)
+		if err != nil && !skipInvalidMediaRow(err) {
+			return nil, err
+		}
+		boundary = photo
+		page.LastID = photo.ID
+		if err == nil {
+			page.Photos = append(page.Photos, photo)
+		} else {
+			page.Skipped++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	page := &storage.PhotoPage{}
-	if len(photos) > limit {
-		page.HasMore = true
-		photos = photos[:limit]
-		last := photos[len(photos)-1]
-		page.NextCursor = encodeFavoriteCursor(last.IsSuperFavorite, last.TakenAt, last.ID)
+	if boundary != nil {
+		page.BoundaryCursor = cursorFor(boundary)
+		if page.HasMore {
+			page.NextCursor = page.BoundaryCursor
+		}
 	}
-	page.Photos = photos
 	return page, nil
 }
 
-// collectPhotoPage 收集分页结果，判断是否有更多。
-// cursorTimeFn 决定当前分页使用哪个时间字段来生成下一页游标。
-func collectPhotoPage(rows *sql.Rows, limit int, cursorTimeFn func(*storage.Photo) time.Time) (*storage.PhotoPage, error) {
-	var photos []*storage.Photo
-	for rows.Next() {
-		p, err := scanPhoto(rows)
-		if err != nil {
-			return nil, err
-		}
-		photos = append(photos, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+func collectFavoritePhotoPage(rows *sql.Rows, limit int) (*storage.PhotoPage, error) {
+	return collectMediaPage(rows, limit, func(p *storage.Photo) string { return encodeFavoriteCursor(p.IsSuperFavorite, p.TakenAt, p.ID) })
+}
 
-	page := &storage.PhotoPage{}
-	if len(photos) > limit {
-		page.HasMore = true
-		photos = photos[:limit]
-		last := photos[len(photos)-1]
-		page.NextCursor = encodeCursor(cursorTimeFn(last), last.ID)
-	}
-	page.Photos = photos
-	return page, nil
+func collectPhotoPage(rows *sql.Rows, limit int, cursorTimeFn func(*storage.Photo) time.Time) (*storage.PhotoPage, error) {
+	return collectMediaPage(rows, limit, func(p *storage.Photo) string { return encodeCursor(cursorTimeFn(p), p.ID) })
 }
 
 // SoftDeletePhoto 软删除图片

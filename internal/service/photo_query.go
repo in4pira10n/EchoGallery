@@ -39,9 +39,38 @@ var (
 	moveFileRename = os.Rename
 )
 
+// readPastInvalidMediaPages only refills a wholly unreadable database page.
+// Most requests make one query; skipped pages still preserve the original total.
+func readPastInvalidMediaPages(cursor string, fetch func(string) (*storage.PhotoPage, error)) (*storage.PhotoPage, error) {
+	var total, skipped int
+	first := true
+	for {
+		page, err := fetch(cursor)
+		if err != nil || page == nil {
+			return page, err
+		}
+		if first {
+			total = page.Total
+			first = false
+		}
+		skipped += page.Skipped
+		if len(page.Photos) > 0 || !page.HasMore || page.Skipped == 0 {
+			page.Total, page.Skipped = total, skipped
+			return page, nil
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return nil, fmt.Errorf("media cursor did not advance")
+		}
+		cursor = page.NextCursor
+	}
+}
+
 // GetTimeline 获取时间线图片（游标分页）
 func (s *PhotoService) GetTimeline(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.ListPhotos(params)
+	page, err := readPastInvalidMediaPages(params.Cursor, func(cursor string) (*storage.PhotoPage, error) {
+		params.Cursor = cursor
+		return s.repo.ListPhotos(params)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +135,10 @@ func (s *PhotoService) GetAlbumBefore(params storage.LocateAlbumParams) (*storag
 
 // GetTrash 获取回收站图片（游标分页）
 func (s *PhotoService) GetTrash(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.ListTrashedPhotos(params)
+	page, err := readPastInvalidMediaPages(params.Cursor, func(cursor string) (*storage.PhotoPage, error) {
+		params.Cursor = cursor
+		return s.repo.ListTrashedPhotos(params)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +158,10 @@ func (s *PhotoService) GetTrashAlbums(userID int64) ([]*storage.FolderAlbumTrash
 
 // GetFavorites 获取个人收藏（游标分页）
 func (s *PhotoService) GetFavorites(params storage.ListPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.ListFavoritePhotos(params)
+	page, err := readPastInvalidMediaPages(params.Cursor, func(cursor string) (*storage.PhotoPage, error) {
+		params.Cursor = cursor
+		return s.repo.ListFavoritePhotos(params)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +170,10 @@ func (s *PhotoService) GetFavorites(params storage.ListPhotosParams) (*storage.P
 
 // SearchMedia 搜索用户媒体（游标分页）。
 func (s *PhotoService) SearchMedia(params storage.SearchPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.SearchPhotos(params)
+	page, err := readPastInvalidMediaPages(params.Cursor, func(cursor string) (*storage.PhotoPage, error) {
+		params.Cursor = cursor
+		return s.repo.SearchPhotos(params)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +215,10 @@ func (s *PhotoService) GetRandomMedia(params storage.RandomPhotosParams) (*stora
 
 // GetAlbumMedia 获取相册内媒体（游标分页）。
 func (s *PhotoService) GetAlbumMedia(params storage.ListAlbumPhotosParams) (*storage.PhotoPage, error) {
-	page, err := s.repo.ListAlbumPhotos(params)
+	page, err := readPastInvalidMediaPages(params.Cursor, func(cursor string) (*storage.PhotoPage, error) {
+		params.Cursor = cursor
+		return s.repo.ListAlbumPhotos(params)
+	})
 	if err != nil {
 		return nil, err
 	}

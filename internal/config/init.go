@@ -61,6 +61,7 @@ func CreateInitialConfig(params InitialConfigParams) (*Config, error) {
 			GridSize:                      180,
 			GridGap:                       2,
 			ThumbRadius:                   2,
+			ProgressiveLinearLayerEnabled: true,
 			SlideshowMode:                 "sequential",
 			SlideshowLoop:                 true,
 			SlideshowInterval:             5000,

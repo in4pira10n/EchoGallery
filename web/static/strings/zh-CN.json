@@ -678,6 +678,12 @@
         }
       },
       "display": {
+        "progressiveLinearLayer": "渐进线性渐变层",
+        "progressiveLinearLayerCopy": "在悬浮控件下方显示页面边缘渐变。",
+        "gradientLightColor": "浅色模式渐变颜色",
+        "gradientDarkColor": "深色模式渐变颜色",
+        "gradientColorCopy": "同时应用于顶部与底部渐变。",
+        "gradientFollowTheme": "跟随主题",
         "gridGap": "图像间距",
         "thumbRadius": "图像圆角",
         "thumbnailSize": "缩略图生成大小",

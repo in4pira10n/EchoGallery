@@ -115,6 +115,9 @@ type settingsResponse struct {
 	GridSize                      int                          `json:"grid_size"`
 	GridGap                       int                          `json:"grid_gap"`
 	ThumbRadius                   int                          `json:"thumb_radius"`
+	ProgressiveLinearLayerEnabled bool                         `json:"progressive_linear_layer_enabled"`
+	ProgressiveLinearLayerColor   string                       `json:"progressive_linear_layer_color"`
+	ProgressiveLayerDarkColor     string                       `json:"progressive_linear_layer_dark_color"`
 	SidebarAutoHide               bool                         `json:"sidebar_auto_hide"`
 	SlideshowMode                 string                       `json:"slideshow_mode"`
 	SlideshowLoop                 bool                         `json:"slideshow_loop"`
@@ -158,6 +161,9 @@ type settingsUpdateRequest struct {
 	GridSize                      int                          `json:"grid_size"`
 	GridGap                       int                          `json:"grid_gap"`
 	ThumbRadius                   int                          `json:"thumb_radius"`
+	ProgressiveLinearLayerEnabled *bool                        `json:"progressive_linear_layer_enabled"`
+	ProgressiveLinearLayerColor   *string                      `json:"progressive_linear_layer_color"`
+	ProgressiveLayerDarkColor     *string                      `json:"progressive_linear_layer_dark_color"`
 	SidebarAutoHide               bool                         `json:"sidebar_auto_hide"`
 	SlideshowMode                 string                       `json:"slideshow_mode"`
 	SlideshowLoop                 bool                         `json:"slideshow_loop"`
@@ -401,6 +407,9 @@ func buildSettingsResponseWithLibraryDetails(cfg *config.Config, profile *config
 		GridSize:                      profile.Preferences.GridSize,
 		GridGap:                       profile.Preferences.GridGap,
 		ThumbRadius:                   profile.Preferences.ThumbRadius,
+		ProgressiveLinearLayerEnabled: profile.Preferences.ProgressiveLinearLayerEnabled,
+		ProgressiveLinearLayerColor:   profile.Preferences.ProgressiveLinearLayerColor,
+		ProgressiveLayerDarkColor:     profile.Preferences.ProgressiveLayerDarkColor,
 		SidebarAutoHide:               profile.Preferences.SidebarAutoHide,
 		SlideshowMode:                 profile.Preferences.SlideshowMode,
 		SlideshowLoop:                 profile.Preferences.SlideshowLoop,
@@ -1245,6 +1254,18 @@ func handleUpdateSettings(cfg *config.Config, hooks LibraryAvailabilityHooks) gi
 				SubtitleColor:                 req.SubtitleColor,
 				SubtitleBackgroundOpacity:     req.SubtitleBackgroundOpacity,
 			},
+		}
+		nextProfile.Preferences.ProgressiveLinearLayerEnabled = prevProfile.Preferences.ProgressiveLinearLayerEnabled
+		nextProfile.Preferences.ProgressiveLinearLayerColor = prevProfile.Preferences.ProgressiveLinearLayerColor
+		nextProfile.Preferences.ProgressiveLayerDarkColor = prevProfile.Preferences.ProgressiveLayerDarkColor
+		if req.ProgressiveLinearLayerEnabled != nil {
+			nextProfile.Preferences.ProgressiveLinearLayerEnabled = *req.ProgressiveLinearLayerEnabled
+		}
+		if req.ProgressiveLinearLayerColor != nil {
+			nextProfile.Preferences.ProgressiveLinearLayerColor = strings.TrimSpace(*req.ProgressiveLinearLayerColor)
+		}
+		if req.ProgressiveLayerDarkColor != nil {
+			nextProfile.Preferences.ProgressiveLayerDarkColor = strings.TrimSpace(*req.ProgressiveLayerDarkColor)
 		}
 		nextPort := req.Port
 		if role != config.UserRoleAdmin {

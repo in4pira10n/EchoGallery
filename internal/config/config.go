@@ -59,6 +59,9 @@ type Preferences struct {
 	GridSize                      int                   `json:"grid_size"`
 	GridGap                       int                   `json:"grid_gap"`
 	ThumbRadius                   int                   `json:"thumb_radius"`
+	ProgressiveLinearLayerEnabled bool                  `json:"progressive_linear_layer_enabled"`
+	ProgressiveLinearLayerColor   string                `json:"progressive_linear_layer_color"`
+	ProgressiveLayerDarkColor     string                `json:"progressive_linear_layer_dark_color"`
 	SidebarAutoHide               bool                  `json:"sidebar_auto_hide"`
 	SlideshowMode                 string                `json:"slideshow_mode"`
 	SlideshowLoop                 bool                  `json:"slideshow_loop"`
@@ -102,6 +105,7 @@ type configDefaultsProbe struct {
 		ExperimentalPrefetchNeighbors *bool   `json:"experimental_prefetch_neighbors"`
 		ExperimentalRestoreLastView   *bool   `json:"experimental_restore_last_view"`
 		ContinueLastVideoPosition     *bool   `json:"continue_last_video_position"`
+		ProgressiveLinearLayerEnabled *bool   `json:"progressive_linear_layer_enabled"`
 		WarmEnabled                   *bool   `json:"warm_enabled"`
 		LightboxUIIdleSeconds         *int    `json:"lightbox_ui_idle_seconds"`
 		ThrottledVideoSeek            *bool   `json:"throttled_video_seek"`
@@ -854,6 +858,9 @@ func (c *Config) ResolveUserLibrarySelection(username string, activeLibraryID st
 
 func (c *Config) applyMissingDefaults(probe configDefaultsProbe) {
 	c.applyDefaults()
+	if probe.Preferences.ProgressiveLinearLayerEnabled == nil {
+		c.Preferences.ProgressiveLinearLayerEnabled = true
+	}
 	if probe.Preferences.ExperimentalAutoplayVideo == nil {
 		c.Preferences.ExperimentalAutoplayVideo = true
 	}

@@ -188,7 +188,7 @@ const loginPageFallbackHTML = `<!doctype html>
         markPageSessionTransfer(pageSessionID);
         var target = d.redirect || '/';
         var delay = Math.max(0, Number(d.delay_ms) || 0);
-        setTimeout(function () { location.href = target; }, delay);
+        setTimeout(function () { location.replace(target); }, delay);
         return;
       }
       errEl.textContent = responseCopy(d, 'error', loginReasonMessage(d.reason) || copy.errors && copy.errors.failed || '');

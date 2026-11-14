@@ -215,6 +215,15 @@ func (s *PhotoService) backfillPhotoEXIFContext(ctx context.Context, userID int6
 		if progress != nil && !progress(status) {
 			return context.Canceled
 		}
+		status.Scanned += page.Skipped
+		status.Done += page.Skipped
+		status.Skipped += page.Skipped
+		if page.Skipped > 0 {
+			status.UpdatedAt = time.Now()
+			if progress != nil && !progress(status) {
+				return context.Canceled
+			}
+		}
 		for _, photo := range page.Photos {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -259,10 +268,17 @@ func (s *PhotoService) backfillPhotoEXIFContext(ctx context.Context, userID int6
 			}
 		}
 		if idPaging {
-			if !page.HasMore || len(page.Photos) == 0 {
+			if !page.HasMore {
 				break
 			}
-			afterID = page.Photos[len(page.Photos)-1].ID
+			nextID := page.LastID
+			if nextID == 0 && len(page.Photos) > 0 {
+				nextID = page.Photos[len(page.Photos)-1].ID
+			}
+			if nextID <= afterID {
+				return fmt.Errorf("metadata repair cursor did not advance")
+			}
+			afterID = nextID
 		} else {
 			if !page.HasMore || page.NextCursor == "" {
 				break

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -145,7 +146,7 @@ func (s *DB) queryAlbumTarget(where string, joinClause string, args []interface{
 		WHERE `+where+` AND p.id = ?
 		LIMIT 1`, queryArgs...)
 	target, err := scanPhoto(row)
-	if err == sql.ErrNoRows || target == nil {
+	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -173,6 +174,9 @@ func (s *DB) listAlbumNaturalScope(where string, joinClause string, args []inter
 	for rows.Next() {
 		p, err := scanPhoto(rows)
 		if err != nil {
+			if skipInvalidMediaRow(err) {
+				continue
+			}
 			return nil, err
 		}
 		photos = append(photos, p)
@@ -223,47 +227,37 @@ func (s *DB) queryAlbumLocatePage(query string, args []interface{}, limit int, s
 	}
 	defer rows.Close()
 
-	var photos []*storage.Photo
-	for rows.Next() {
-		p, err := scanPhoto(rows)
-		if err != nil {
-			return nil, err
-		}
-		photos = append(photos, p)
-	}
-	if err := rows.Err(); err != nil {
+	page, err := collectAlbumPhotoPage(rows, limit, sort)
+	if err != nil {
 		return nil, err
 	}
-	hasMore := len(photos) > limit
-	if hasMore {
-		photos = photos[:limit]
-	}
 	if reverse {
-		reverseAlbumPhotos(photos)
-	}
-	page := &storage.PhotoPage{
-		Photos:  photos,
-		HasMore: hasMore,
-	}
-	if len(photos) > 0 {
-		page.NextCursor = albumLocateCursorForPhoto(photos[len(photos)-1], sort)
+		reverseAlbumPhotos(page.Photos)
 	}
 	return page, nil
 }
 
 func (s *DB) countAlbumBefore(where string, joinClause string, args []interface{}, target *storage.Photo, sort string) (int, error) {
+	column, fallback := "taken_at", any(target.TakenAt)
+	if normalizeAlbumPhotoSort(sort) == "size" {
+		column, fallback = "size", target.Size
+	}
+	boundary, err := s.mediaSortBoundary(context.Background(), target.ID, column, fallback)
+	if err != nil {
+		return 0, err
+	}
 	queryArgs := append([]interface{}{}, args...)
 	var condition string
 	switch normalizeAlbumPhotoSort(sort) {
 	case "timeline_asc":
 		condition = " AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))"
-		queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+		queryArgs = append(queryArgs, boundary, boundary, target.ID)
 	case "size":
 		condition = " AND (p.size > ? OR (p.size = ? AND p.id > ?))"
-		queryArgs = append(queryArgs, target.Size, target.Size, target.ID)
+		queryArgs = append(queryArgs, boundary, boundary, target.ID)
 	default:
 		condition = " AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))"
-		queryArgs = append(queryArgs, target.TakenAt, target.TakenAt, target.ID)
+		queryArgs = append(queryArgs, boundary, boundary, target.ID)
 	}
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos p `+joinClause+` WHERE `+where+condition, queryArgs...).Scan(&count); err != nil {
@@ -273,6 +267,14 @@ func (s *DB) countAlbumBefore(where string, joinClause string, args []interface{
 }
 
 func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{}, target *storage.Photo, limit int, sort string) (*storage.PhotoPage, *storage.PhotoPage, error) {
+	column, fallback := "taken_at", any(target.TakenAt)
+	if normalizeAlbumPhotoSort(sort) == "size" {
+		column, fallback = "size", target.Size
+	}
+	boundary, err := s.mediaSortBoundary(context.Background(), target.ID, column, fallback)
+	if err != nil {
+		return nil, nil, err
+	}
 	baseArgs := append([]interface{}{}, args...)
 	var beforeQuery string
 	var afterQuery string
@@ -282,7 +284,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 	afterArgs = append([]interface{}{}, baseArgs...)
 	switch normalizeAlbumPhotoSort(sort) {
 	case "timeline_asc":
-		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeArgs = append(beforeArgs, boundary, boundary, target.ID, limit+1)
 		beforeQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -293,7 +295,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 			  AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))
 			ORDER BY p.taken_at DESC, p.id DESC
 			LIMIT ?`
-		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterArgs = append(afterArgs, boundary, boundary, target.ID, limit+1)
 		afterQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -305,7 +307,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 			ORDER BY p.taken_at ASC, p.id ASC
 			LIMIT ?`
 	case "size":
-		beforeArgs = append(beforeArgs, target.Size, target.Size, target.ID, limit+1)
+		beforeArgs = append(beforeArgs, boundary, boundary, target.ID, limit+1)
 		beforeQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -316,7 +318,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 			  AND (p.size > ? OR (p.size = ? AND p.id > ?))
 			ORDER BY p.size ASC, p.id ASC
 			LIMIT ?`
-		afterArgs = append(afterArgs, target.Size, target.Size, target.ID, limit+1)
+		afterArgs = append(afterArgs, boundary, boundary, target.ID, limit+1)
 		afterQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -328,7 +330,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 			ORDER BY p.size DESC, p.id DESC
 			LIMIT ?`
 	default:
-		beforeArgs = append(beforeArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		beforeArgs = append(beforeArgs, boundary, boundary, target.ID, limit+1)
 		beforeQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -339,7 +341,7 @@ func (s *DB) locateAlbumPages(where string, joinClause string, args []interface{
 			  AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))
 			ORDER BY p.taken_at ASC, p.id ASC
 			LIMIT ?`
-		afterArgs = append(afterArgs, target.TakenAt, target.TakenAt, target.ID, limit+1)
+		afterArgs = append(afterArgs, boundary, boundary, target.ID, limit+1)
 		afterQuery = `
 			SELECT p.id, p.uuid, p.original_name, p.media_kind, p.mime_type, p.size, p.width, p.height, p.duration_ms,
 			       p.storage_rel_path, p.source_rel_path, p.exif_json, p.is_favorite, p.is_super_favorite,
@@ -1105,16 +1107,24 @@ func (s *DB) ListAlbumPhotos(params storage.ListAlbumPhotosParams) (*storage.Pho
 		if err != nil {
 			return nil, err
 		}
+		column, fallback := "taken_at", any(c.Time)
+		if sort == "size" {
+			column, fallback = "size", c.Size
+		}
+		boundary, err := s.mediaSortBoundary(context.Background(), c.ID, column, fallback)
+		if err != nil {
+			return nil, err
+		}
 		switch sort {
 		case "timeline_asc":
 			where += " AND (p.taken_at > ? OR (p.taken_at = ? AND p.id > ?))"
-			args = append(args, c.Time, c.Time, c.ID)
+			args = append(args, boundary, boundary, c.ID)
 		case "size":
 			where += " AND (p.size < ? OR (p.size = ? AND p.id < ?))"
-			args = append(args, c.Size, c.Size, c.ID)
+			args = append(args, boundary, boundary, c.ID)
 		default:
 			where += " AND (p.taken_at < ? OR (p.taken_at = ? AND p.id < ?))"
-			args = append(args, c.Time, c.Time, c.ID)
+			args = append(args, boundary, boundary, c.ID)
 		}
 	}
 	switch sort {
@@ -1234,13 +1244,13 @@ func (s *DB) LocateAlbumWindow(params storage.LocateAlbumParams) (*storage.Timel
 		HasAfter:           afterPage.HasMore,
 		MissingBeforeCount: max(0, missingBeforeCount-len(beforePage.Photos)),
 	}
-	if len(beforePage.Photos) > 0 {
-		result.PrevCursor = albumLocateCursorForPhoto(beforePage.Photos[0], sort)
+	if beforePage.BoundaryCursor != "" {
+		result.PrevCursor = beforePage.BoundaryCursor
 	} else {
 		result.PrevCursor = albumLocateCursorForPhoto(target, sort)
 	}
-	if len(afterPage.Photos) > 0 {
-		result.NextCursor = albumLocateCursorForPhoto(afterPage.Photos[len(afterPage.Photos)-1], sort)
+	if afterPage.BoundaryCursor != "" {
+		result.NextCursor = afterPage.BoundaryCursor
 	} else {
 		result.NextCursor = albumLocateCursorForPhoto(target, sort)
 	}
@@ -1296,7 +1306,10 @@ func (s *DB) ListAlbumPhotosBefore(params storage.LocateAlbumParams) (*storage.P
 	if target == nil {
 		return &storage.PhotoPage{}, nil
 	}
-	beforePage, _, err := s.locateAlbumPages(where, joinClause, args, target, limit, sort)
+	beforePage, err := readPastInvalidMediaIDs(target, func(boundary *storage.Photo) (*storage.PhotoPage, error) {
+		page, _, err := s.locateAlbumPages(where, joinClause, args, boundary, limit, sort)
+		return page, err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1331,27 +1344,7 @@ func (s *DB) listAlbumPhotosByNaturalName(where string, joinClause string, args 
 }
 
 func collectAlbumPhotoPage(rows *sql.Rows, limit int, sort string) (*storage.PhotoPage, error) {
-	var photos []*storage.Photo
-	for rows.Next() {
-		p, err := scanPhoto(rows)
-		if err != nil {
-			return nil, err
-		}
-		photos = append(photos, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	page := &storage.PhotoPage{}
-	if len(photos) > limit {
-		page.HasMore = true
-		photos = photos[:limit]
-		last := photos[len(photos)-1]
-		cursor := albumPhotoCursor{Sort: sort, Time: last.TakenAt, Name: strings.ToLower(last.OriginalName), Size: last.Size, ID: last.ID}
-		page.NextCursor = encodeAlbumPhotoCursor(cursor)
-	}
-	page.Photos = photos
-	return page, nil
+	return collectMediaPage(rows, limit, func(p *storage.Photo) string { return albumLocateCursorForPhoto(p, sort) })
 }
 
 // IsPhotoInAlbum 检查图片是否在相册中

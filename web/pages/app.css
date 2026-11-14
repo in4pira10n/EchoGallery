@@ -2510,8 +2510,8 @@ body.selection-mode .date-select-all {
 
 .lightbox-header.lightbox-compact-controls .lightbox-header-main {
   grid-column: 1;
-  width: 100%;
-  max-width: none;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .lightbox-header.lightbox-compact-controls .lightbox-header-controls {
@@ -5276,7 +5276,7 @@ html.echo-frame-open { overflow: hidden; }
   gap: 2px;
 }
 
-#topbar-meta:has(> .album-view-toggle) {
+:is(#topbar-meta, .album-back-preview-stage .topbar-meta):has(> .album-view-toggle) {
   position: fixed;
   left: 50%;
   bottom: 32px;
@@ -5294,18 +5294,18 @@ html.echo-frame-open { overflow: hidden; }
   transform: translateX(-50%);
 }
 
-#topbar-meta:has(> .album-view-toggle) > .topbar-media-filter {
+:is(#topbar-meta, .album-back-preview-stage .topbar-meta):has(> .album-view-toggle) > .topbar-media-filter {
   position: static;
   left: auto;
   bottom: auto;
   transform: none;
 }
 
-#topbar-meta.album-kind-hidden > .album-kind-filter {
+:is(#topbar-meta, .album-back-preview-stage .topbar-meta).album-kind-hidden > .album-kind-filter {
   display: none;
 }
 
-#topbar-meta.album-kind-hidden #album-kind-filter-options {
+:is(#topbar-meta, .album-back-preview-stage .topbar-meta).album-kind-hidden #album-kind-filter-options {
   display: none;
 }
 
@@ -5320,13 +5320,13 @@ html.echo-frame-open { overflow: hidden; }
 }
 
 @media (max-width: 640px) {
-  #topbar-meta:has(> .album-view-toggle) {
+  :is(#topbar-meta, .album-back-preview-stage .topbar-meta):has(> .album-view-toggle) {
     max-width: calc(100vw - 24px);
     overflow: visible;
     scrollbar-width: none;
   }
 
-  #topbar-meta:has(> .album-view-toggle)::-webkit-scrollbar {
+  :is(#topbar-meta, .album-back-preview-stage .topbar-meta):has(> .album-view-toggle)::-webkit-scrollbar {
     display: none;
   }
 
@@ -9866,8 +9866,8 @@ html.echo-frame-open { overflow: hidden; }
 
   .lightbox-header-main {
     grid-column: 1;
-    width: 100%;
-    max-width: none;
+    width: fit-content;
+    max-width: 100%;
     min-width: 0;
     height: 52px;
     padding: 4px 14px 4px 4px;
@@ -10126,7 +10126,7 @@ html.echo-frame-open { overflow: hidden; }
 }
 
 @media (max-width: 640px) and (hover: none) and (pointer: coarse) {
-  #topbar-meta:has(> .album-view-toggle) > .album-kind-filter {
+  :is(#topbar-meta, .album-back-preview-stage .topbar-meta):has(> .album-view-toggle) > .album-kind-filter {
     display: none;
   }
 
@@ -10634,4 +10634,66 @@ html.echo-frame-open { overflow: hidden; }
 @media (max-width: 560px) {
   #settings-local-update-panel { gap: 24px; }
   #settings-local-update-panel .settings-update-actions { grid-template-columns: 1fr; gap: 10px; }
+}
+
+/* Page edges sit above media and below every floating control. */
+.page-edge-fades {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  display: var(--page-fade-display, block);
+  --page-fade-color: var(--page-fade-light-color, var(--bg));
+}
+[data-theme="dark"] .page-edge-fades {
+  --page-fade-color: var(--page-fade-dark-color, var(--bg));
+}
+.page-edge-fades::before, .page-edge-fades::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+.page-edge-fades::before {
+  top: 0;
+  height: var(--page-fade-top, 50px);
+  background: linear-gradient(to bottom, var(--page-fade-color) 0%, color-mix(in srgb, var(--page-fade-color) 0%, transparent) 100%);
+}
+.page-edge-fades::after {
+  bottom: 0;
+  height: var(--page-fade-bottom, 50px);
+  background: linear-gradient(to top, var(--page-fade-color) 0%, color-mix(in srgb, var(--page-fade-color) 0%, transparent) 100%);
+}
+/* Two bounded viewport snapshots keep fixed safe-area/keyboard positioning intact.
+   The real page stays in place; there is no body lock or scroll compensation. */
+.page-swipe-preview, .page-swipe-foreground {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg);
+  pointer-events: none;
+  will-change: transform;
+}
+.page-swipe-preview { z-index: 60; }
+.page-swipe-foreground { z-index: 61; box-shadow: -8px 0 30px rgb(0 0 0 / .16); }
+.page-swipe-snapshot { position: absolute; inset: 0; overflow: hidden; }
+html.page-back-swiping #app,
+html.page-back-swiping > body > .floating-search-btn,
+html.page-back-swiping > body > .floating-grid-scale-control { visibility: hidden; }
+html.page-back-committing .nav,
+html.page-back-committing .nav-item,
+html.page-back-committing .topbar,
+html.page-back-committing .topbar * { transition: none !important; animation: none !important; }
+.album-back-preview-stage {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--bg);
+}
+.album-back-preview-stage .content { padding: 184px 20px 132px; }
+@media (prefers-reduced-motion: reduce) {
+  .page-swipe-preview, .page-swipe-foreground { will-change: opacity; box-shadow: none; }
 }
